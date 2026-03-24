@@ -41,8 +41,6 @@ services:
         condition: service_healthy
       redis:
         condition: service_started
-    volumes:
-      - ./backend:/app
 
   bot:
     build:
@@ -53,8 +51,6 @@ services:
       - API_URL=http://backend:8000/api/v1
     depends_on:
       - backend
-    volumes:
-      - ./bot:/app
 
   admin:
     build:
