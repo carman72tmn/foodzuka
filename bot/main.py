@@ -18,6 +18,11 @@ logger = logging.getLogger(__name__)
 
 async def main():
     """Запуск бота"""
+    if not settings.BOT_TOKEN:
+        logger.warning("⚠️ BOT_TOKEN не задан. Бот ожидает настройки через панель управления...")
+        while True:
+            await asyncio.sleep(3600)  # Спим, пока не пропишут токен
+
     # Инициализация бота и диспетчера
     bot = Bot(token=settings.BOT_TOKEN)
     dp = Dispatcher(storage=MemoryStorage())

@@ -7,8 +7,8 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class Settings(BaseSettings):
     """Настройки бота из .env файла"""
 
-    # Токен Telegram бота
-    BOT_TOKEN: str
+    # Токен Telegram бота (может быть пустым для настройки через БД позже)
+    BOT_TOKEN: str | None = None
 
     # URL Backend API
     API_URL: str = "http://backend:8000/api/v1"
