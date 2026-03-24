@@ -41,15 +41,22 @@ fi
 
 # 6. Environment Setup
 if [ ! -f ".env" ]; then
-    echo "Creating .env from example..."
-    cp .env.example .env || echo "No .env.example found, skipping auto-copy."
-    
-    echo "Please update your .env file with correct credentials (IIKO_LOGIN, BOT_TOKEN, etc.)"
+    echo "Creating .env from template..."
+    if [ -f ".env.example" ]; then
+        cp .env.example .env
+    else
+        echo "DB_DATABASE=foodtech_db" > .env
+        echo "DB_USERNAME=foodtech_user" >> .env
+        echo "DB_PASSWORD=postgres" >> .env
+    fi
+    echo "⚠️  Please update your .env file with correct credentials later!"
 fi
 
 # 7. Launch
 echo "Launching project with Docker Compose..."
-sudo docker-compose up -d --build
+# Using --no-cache to avoid package integrity issues from previous failed attempts
+sudo docker-compose build --no-cache
+sudo docker-compose up -d
 
 echo "✅ Installation complete!"
 echo "API: http://your-vps-ip:8000"
