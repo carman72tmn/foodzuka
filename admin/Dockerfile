@@ -24,7 +24,7 @@ COPY --from=composer:latest /usr/bin/composer /usr/bin/composer
 COPY . .
 
 # Install PHP and JS dependencies
-RUN composer install --no-scripts --no-autoloader
+RUN composer install
 RUN npm install
 
 EXPOSE 8000 5173
