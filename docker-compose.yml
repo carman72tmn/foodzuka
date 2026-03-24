@@ -71,9 +71,6 @@ services:
     depends_on:
       db:
         condition: service_healthy
-    volumes:
-      - ./admin:/var/www/html
-      - /var/www/html/node_modules
 
   frontend:
     build:
@@ -82,9 +79,6 @@ services:
     restart: always
     expose:
       - "5173"
-    volumes:
-      - ./frontend:/app
-      - /app/node_modules
 
   nginx:
     image: nginx:alpine
