@@ -48,7 +48,7 @@ const webhookLogs = ref([]);
 const loadingLogs = ref(false);
 const registeringWebhook = ref(false);
 
-const API_BASE = "http://localhost:8000/api/v1/iiko";
+const API_BASE = "/api/v1/iiko";
 
 // =========================================================================
 // Методы

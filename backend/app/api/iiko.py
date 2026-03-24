@@ -19,6 +19,7 @@ from app.schemas import (
 from app.models.iiko_webhook_event import IikoWebhookEvent
 from app.services.iiko_service import iiko_service
 from app.services.iiko_sync_service import iiko_sync_service
+from app.core.config import settings as global_settings
 
 router = APIRouter(prefix="/iiko", tags=["iiko Integration"])
 
@@ -228,6 +229,16 @@ async def sync_stop_lists(session: Session = Depends(get_session)):
         raise HTTPException(status_code=500, detail=f"Stop-list sync error: {str(e)}")
 
 
+@router.post("/sync-vk-loyalty", response_model=IikoSyncResponse)
+async def sync_vk_loyalty(session: Session = Depends(get_session)):
+    """Синхронизация баллов VK активности в iikoCard"""
+    try:
+        result = await iiko_sync_service.sync_vk_loyalty(session)
+        return IikoSyncResponse(**result)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"VK Loyalty sync error: {str(e)}")
+
+
 # =============================================================================
 # Логи синхронизации
 # =============================================================================
@@ -289,11 +300,11 @@ async def register_webhook(
     
     try:
         if not webhook_url:
-            # Пытаемся определить базовый URL из текущего запроса если APP_PUBLIC_URL не задан
-            request_base_url = str(request.base_url)
+            # Пытаемся определить базовый URL (приоритет у настройки APP_PUBLIC_URL из конфига)
+            base_url = global_settings.APP_PUBLIC_URL or str(request.base_url)
             
             # Автоматическая регистрация
-            result = await iiko_service.auto_register_webhook(request_url=request_base_url)
+            result = await iiko_service.auto_register_webhook(request_url=base_url)
             
             # Сохраняем сгенерированные данные в БД
             settings_db.webhook_url = result["webhook_url"]

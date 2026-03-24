@@ -5,7 +5,7 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.core.config import settings
-from app.api import categories, products, orders, iiko, loyalty, promo_codes, webhooks, companies, branches, actions, nps, customers, mailings, stories, funnels, reports
+from app.api import categories, products, orders, iiko, loyalty, promo_codes, webhooks, companies, branches, actions, nps, customers, mailings, stories, funnels, reports, employees, vk
 
 # Создание приложения FastAPI
 app = FastAPI(
@@ -19,7 +19,13 @@ app = FastAPI(
 # Настройка CORS для работы с фронтендом и Telegram Bot
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173", "*"],  # В продакшене укажите конкретные домены
+    allow_origins=[
+        "http://localhost:5173", 
+        "http://127.0.0.1:5173", 
+        "http://192.168.31.162:5173",
+        "http://192.168.31.162:8081",
+        "*"
+    ],  # В продакшене укажите конкретные домены
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -41,7 +47,9 @@ app.include_router(mailings.router, prefix="/api/v1")
 app.include_router(stories.router, prefix="/api/v1")
 app.include_router(funnels.router, prefix="/api/v1")
 app.include_router(reports.router, prefix="/api/v1")
+app.include_router(employees.router, prefix="/api/v1/employees", tags=["Employees"])
 app.include_router(webhooks.router, prefix="/api/v1/webhooks", tags=["Webhooks"])
+app.include_router(vk.router, prefix="/api/v1/vk", tags=["VK"])
 
 
 @app.get("/")

@@ -49,6 +49,7 @@ import VerticalNavLink from "@layouts/components/VerticalNavLink.vue"
   <VerticalNavGroup :item="{ title: 'Система', icon: 'bx-cog' }">
     <VerticalNavLink :item="{ title: 'Метки', to: '/system/tags' }" />
     <VerticalNavLink :item="{ title: 'Настройки iiko', to: '/settings/iiko' }" />
+    <VerticalNavLink :item="{ title: 'Настройки VK Бота', to: '/settings/vk' }" />
   </VerticalNavGroup>
 
   <VerticalNavGroup :item="{ title: 'Отчеты', icon: 'bx-bar-chart-alt-2' }">
@@ -61,5 +62,6 @@ import VerticalNavLink from "@layouts/components/VerticalNavLink.vue"
   </VerticalNavGroup>
 
   <VerticalNavSectionTitle :item="{ heading: 'Администрирование' }" />
+  <VerticalNavLink :item="{ title: 'Сотрудники', icon: 'bx-id-card', to: '/employees' }" />
   <VerticalNavLink :item="{ title: 'Пользователи', icon: 'bx-user', to: '/users' }" />
 </template>

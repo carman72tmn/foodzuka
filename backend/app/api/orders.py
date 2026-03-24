@@ -15,7 +15,11 @@ from app.models.product import Product
 from app.models.promo_code import PromoCode
 from app.models.action import Action
 from app.schemas import OrderCreate, OrderUpdate, OrderResponse, OrderItemResponse
+import logging
 from app.services.iiko_service import iiko_service
+from app.services.iiko_sync_service import iiko_sync_service
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/orders", tags=["Orders"])
 
@@ -420,122 +424,6 @@ async def cancel_order(order_id: int, session: Session = Depends(get_session)):
 
 # --- IIKO INTEGRATION ---
 
-async def _process_iiko_order(session: Session, iiko_order_data: Dict[str, Any], organization_id: str):
-    """
-    Вспомогательная функция для обработки данных заказа из iiko.
-    Создает новый или обновляет существующий заказ в БД.
-    """
-    order_id_iiko = iiko_order_data.get("id")
-    if not order_id_iiko:
-        return
-
-    # Ищем заказ по iiko_order_id
-    order = session.exec(select(Order).where(Order.iiko_order_id == order_id_iiko)).first()
-    
-    # Извлечение данных из iiko_order_data
-    # iiko api format for delivery: order_data["order"] -> sometimes it's passed directly 
-    o_data = iiko_order_data.get("order", iiko_order_data)
-    
-    # Status mapping (simplified)
-    iiko_status = iiko_order_data.get("creationStatus", "") or o_data.get("status", "")
-    mapped_status = OrderStatus.CONFIRMED
-    if iiko_status in ["WaitCooking", "ReadyForCooking", "CookingStarted"]:
-        mapped_status = OrderStatus.PREPARING
-    elif iiko_status in ["CookingCompleted", "Waiting", "OnWay"]:
-        mapped_status = OrderStatus.DELIVERING
-    elif iiko_status == "Delivered":
-        mapped_status = OrderStatus.DELIVERED
-    elif iiko_status in ["Cancelled", "Error"]:
-        mapped_status = OrderStatus.CANCELLED
-
-    customer_info = o_data.get("customer", {})
-    phone = customer_info.get("phone", "")
-    name = customer_info.get("name", "")
-
-    # Парсинг времени
-    def parse_time(ts_str):
-        if not ts_str:
-            return None
-        try:
-            # iiko usually sends "2024-02-26 15:30:00.000" or similar
-            if "T" in ts_str:
-                return datetime.fromisoformat(ts_str.replace("Z", "+00:00").split("+")[0])
-            return datetime.strptime(ts_str.split(".")[0], "%Y-%m-%d %H:%M:%S")
-        except:
-            return None
-
-    expected_time = parse_time(o_data.get("completeBefore"))
-    actual_time = parse_time(o_data.get("actualTime"))
-    creation_time = parse_time(o_data.get("creationTime"))
-    
-    delay_minutes = 0
-    if expected_time and actual_time and actual_time > expected_time:
-        delay_minutes = int((actual_time - expected_time).total_seconds() / 60)
-
-    # Финансы
-    sum_total = Decimal(str(o_data.get("sum", 0)))
-    
-    # Тип заказа и оплата
-    order_type = "Доставка" if o_data.get("isCourierDelivery") else "Самовывоз"
-    payments = o_data.get("payments", [])
-    payment_method = payments[0].get("paymentTypeKind", "Unknown") if payments else "Not specified"
-
-    if not order:
-        # Пытаемся найти клиента, если нет - создаем заглушку (для заказов созданных в самом iiko)
-        customer = session.exec(select(Customer).where(Customer.phone == phone)).first() if phone else None
-        
-        # Пытаемся найти branch (terminal group)
-        terminal_group_id = iiko_order_data.get("terminalGroupId")
-        branch_id = None
-        if terminal_group_id:
-            branch = session.exec(select(Branch).where(Branch.iiko_terminal_id == terminal_group_id)).first()
-            if branch:
-                branch_id = branch.id
-        
-        # Если клиент не найден, но есть телефон, можно создать базовую запись
-        if not customer and phone:
-            customer = Customer(phone=phone, name=name)
-            session.add(customer)
-            session.commit()
-
-        order = Order(
-            iiko_order_id=order_id_iiko,
-            customer_name=name,
-            customer_phone=phone,
-            customer_id=customer.id if customer else None,
-            branch_id=branch_id,
-            total_amount=sum_total,
-            status=mapped_status,
-            order_items_details=o_data.get("items", []),
-            customer_info_details=customer_info,
-            iiko_creation_time=creation_time,
-            expected_time=expected_time,
-            actual_time=actual_time,
-            delay_minutes=delay_minutes,
-            payment_method=payment_method,
-            order_type=order_type,
-            total_with_discount=sum_total  # Basic mapping
-        )
-        session.add(order)
-    else:
-        # Обновляем существующий заказ
-        order.status = mapped_status
-        order.iiko_creation_time = creation_time or order.iiko_creation_time
-        order.expected_time = expected_time or order.expected_time
-        order.actual_time = actual_time or order.actual_time
-        order.delay_minutes = delay_minutes or order.delay_minutes
-        order.payment_method = payment_method or order.payment_method
-        order.order_type = order_type or order.order_type
-        order.order_items_details = o_data.get("items", []) or order.order_items_details
-        
-        # Информируем SQLAlchemy, что JSON-поле изменилось
-        flag_modified(order, "order_items_details")
-        
-        session.add(order)
-        
-    session.commit()
-
-
 @router.post("/webhook/iiko")
 async def iiko_webhook(request: Request, session: Session = Depends(get_session)):
     """
@@ -556,7 +444,7 @@ async def iiko_webhook(request: Request, session: Session = Depends(get_session)
             event_info = event.get("eventInfo", {})
             org_id = event.get("organizationId")
             if event_info:
-                await _process_iiko_order(session, event_info, org_id)
+                await iiko_sync_service.process_iiko_order(session, event_info, org_id)
                 
     return {"status": "success"}
 
@@ -576,17 +464,8 @@ async def sync_recent_orders(background_tasks: BackgroundTasks, session: Session
     
     async def run_sync():
         with Session(session.bind) as sync_session:
-            for company in companies:
-                try:
-                    orders_data = await iiko_service.get_orders_by_date(
-                        date_from=date_from,
-                        date_to=date_to,
-                        organization_id=company.iiko_organization_id
-                    )
-                    for order_data in orders_data:
-                        await _process_iiko_order(sync_session, order_data, company.iiko_organization_id)
-                except Exception as e:
-                    print(f"Error syncing orders for org {company.iiko_organization_id}: {e}")
-                    
+            # Ручная синхронизация за последние 30 дней (720 часов)
+            await iiko_sync_service.sync_orders(sync_session, hours=720)
+    
     background_tasks.add_task(run_sync)
     return {"status": "accepted", "message": "Order synchronization started in background"}

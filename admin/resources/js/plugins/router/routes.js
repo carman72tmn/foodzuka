@@ -25,6 +25,10 @@ export const routes = [
         component: () => import('@/pages/settings/iiko.vue'),
       },
       {
+        path: 'settings/vk',
+        component: () => import('@/pages/settings/vk.vue'),
+      },
+      {
         path: 'settings/sync-logs',
         component: () => import('@/pages/settings/sync-logs.vue'),
       },
@@ -43,6 +47,10 @@ export const routes = [
       {
         path: 'users',
         component: () => import('@/pages/users.vue'),
+      },
+      {
+        path: 'employees',
+        component: () => import('@/pages/employees.vue'),
       },
       {
         path: 'account-settings',

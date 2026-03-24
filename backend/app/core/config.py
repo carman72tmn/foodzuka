@@ -26,6 +26,11 @@ class Settings(BaseSettings):
     IIKO_API_LOGIN: str
     IIKO_ORGANIZATION_ID: str
 
+    # Настройки VK Bot
+    VK_BOT_TOKEN: Optional[str] = None
+    VK_CONFIRMATION_CODE: Optional[str] = None
+    VK_SECRET_KEY: Optional[str] = None
+
     # Настройки Redis
     REDIS_URL: Optional[str] = None
     CACHE_ENABLED: bool = False

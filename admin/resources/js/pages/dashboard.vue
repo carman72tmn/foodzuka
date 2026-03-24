@@ -5,6 +5,7 @@ import AnalyticsOrderStatistics from '@/views/dashboard/AnalyticsOrderStatistics
 import AnalyticsProfitReport from '@/views/dashboard/AnalyticsProfitReport.vue'
 import AnalyticsTotalRevenue from '@/views/dashboard/AnalyticsTotalRevenue.vue'
 import AnalyticsTransactions from '@/views/dashboard/AnalyticsTransactions.vue'
+import EmployeeStatus from '@/views/dashboard/EmployeeStatus.vue'
 
 // 👉 Images
 import chart from '@images/cards/chart-success.png'
@@ -130,14 +131,14 @@ import wallet from '@images/cards/wallet-info.png'
       <AnalyticsOrderStatistics />
     </VCol>
 
-    <!-- 👉 Tabs chart -->
+    <!-- 👉 Employee Status -->
     <VCol
       cols="12"
       md="4"
       sm="6"
       order="3"
     >
-      <AnalyticsFinanceTabs />
+      <EmployeeStatus />
     </VCol>
 
     <!-- 👉 Transactions -->

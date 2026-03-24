@@ -136,6 +136,7 @@
       <VTable v-else hover>
         <thead>
           <tr>
+            <th>Дата</th>
             <th>Торговое предприятие</th>
             <th class="text-right">Выручка</th>
             <th class="text-right">Средний чек</th>
@@ -149,6 +150,12 @@
         </thead>
         <tbody>
           <tr v-for="(row, idx) in reportData" :key="idx">
+            <td>
+              <div v-if="row.business_date" class="font-weight-medium">
+                {{ row.business_date }}
+              </div>
+              <div v-else class="text-disabled">—</div>
+            </td>
             <td>
               <div class="font-weight-medium">{{ row.organization_name || 'Все предприятия' }}</div>
             </td>
@@ -167,6 +174,7 @@
         <tfoot v-if="reportData.length > 1">
           <tr class="font-weight-bold bg-grey-lighten-4">
             <td>Итого</td>
+            <td>—</td>
             <td class="text-right text-success">{{ formatCurrency(totals.revenue) }}</td>
             <td class="text-right">{{ formatCurrency(totals.average_check) }}</td>
             <td class="text-right text-warning">{{ formatCurrency(totals.discount_sum) }}</td>
@@ -193,7 +201,7 @@
 <script setup>
 import { ref, computed, onMounted } from 'vue'
 
-const BACKEND_URL = import.meta.env.VITE_BACKEND_URL || 'http://localhost:8000'
+const BACKEND_URL = '' // Используем относительные пути для проксирования
 
 const selectedPeriod = ref('today')
 const customFrom = ref('')

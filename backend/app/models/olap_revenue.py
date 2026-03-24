@@ -22,6 +22,7 @@ class OlapRevenueRecord(SQLModel, table=True):
     # Период
     date_from: datetime = Field(index=True, description="Начало периода")
     date_to: datetime = Field(index=True, description="Конец периода")
+    business_date: Optional[str] = Field(default=None, index=True, description="Бизнес-день (для ежедневной разбивки)")
     period_type: str = Field(max_length=20, index=True, description="Тип периода: day/yesterday/week/month/year/custom")
 
     # Данные выручки (из iiko OLAP)

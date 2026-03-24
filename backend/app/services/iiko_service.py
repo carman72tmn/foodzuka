@@ -85,6 +85,7 @@ class IikoService:
                 if not json_data["organizationIds"] or len(json_data["organizationIds"]) == 1:
                     json_data["organizationIds"] = [org_id]
 
+        print(f"DEBUG iiko request: {endpoint} | Payload: {json_data}")
         async with httpx.AsyncClient(timeout=timeout) as client:
             response = await client.request(
                 method,
@@ -92,6 +93,8 @@ class IikoService:
                 headers={"Authorization": f"Bearer {token}"},
                 json=json_data
             )
+            if response.status_code >= 400:
+                print(f"DEBUG iiko error response: {response.status_code} | Body: {response.text}")
             response.raise_for_status()
             return response.json()
 
@@ -425,16 +428,128 @@ class IikoService:
         """
         org_id = organization_id or self.organization_id
         
-        # Инструмент iiko требует дату в формате yyyy-MM-dd HH:mm:ss
-        date_format = "%Y-%m-%d %H:%M:%S"
+        # Инструмент iiko требует дату в формате yyyy-MM-dd HH:mm:ss.fff
+        date_format = "%Y-%m-%d %H:%M:%S.000"
         
         data = await self._request("POST", "/api/1/deliveries/by_delivery_date_and_status", {
             "organizationIds": [org_id],
             "deliveryDateFrom": date_from.strftime(date_format),
-            "deliveryDateTo": date_to.strftime(date_format)
+            "deliveryDateTo": date_to.strftime(date_format),
+            "statuses": [
+                "Unconfirmed", "WaitCooking", "ReadyForCooking", 
+                "CookingStarted", "CookingCompleted", "Waiting", 
+                "OnWay", "Delivered", "Closed", "Cancelled"
+            ]
         })
         
         return data.get("orders", [])
+
+    async def get_active_orders(self, organization_id: Optional[str] = None) -> List[Dict[str, Any]]:
+        """
+        Получение всех текущих активных заказов из iiko.
+        """
+        org_id = organization_id or self.organization_id
+        now = datetime.utcnow()
+        # iiko API limits the time span, so we use the last 24 hours
+        date_from = (now - timedelta(days=1)).strftime("%Y-%m-%d 00:00:00.000")
+        date_to = (now + timedelta(days=1)).strftime("%Y-%m-%d 23:59:59.000")
+        
+        statuses = [
+            "Unconfirmed", "WaitCooking", "ReadyForCooking", "CookingStarted", "CookingCompleted", "Waiting", "OnWay"
+        ]
+        
+        data = await self._request("POST", "/api/1/deliveries/by_delivery_date_and_status", {
+            "organizationIds": [org_id],
+            "deliveryDateFrom": date_from,
+            "deliveryDateTo": date_to,
+            "statuses": statuses
+        })
+        
+        return data.get("orders", [])
+
+    # =========================================================================
+    # Сотрудники и смены
+    # =========================================================================
+
+    async def get_employees(self, organization_id: Optional[str] = None) -> List[Dict[str, Any]]:
+        """
+        Получение списка сотрудников
+        """
+        org_id = organization_id or self.organization_id
+        data = await self._request("POST", "/api/1/employees/couriers", {
+            "organizationIds": [org_id]
+        })
+        
+        employees_list = []
+        # Ответ имеет структуру: {"employees": [{"organizationId": "...", "items": [{...}]}]}
+        for org_data in data.get("employees", []):
+            if org_data.get("organizationId") == org_id:
+                for item in org_data.get("items", []):
+                    # Приводим данные к ожидаемому формату в iiko_sync_service
+                    name = item.get("displayName")
+                    if not name:
+                        name = f"{item.get('firstName', '')} {item.get('lastName', '')}".strip()
+                    
+                    employees_list.append({
+                        "id": item.get("id"),
+                        "name": name,
+                        "phone": None,  # Метод couriers не отдает телефоны напрямую
+                        "roleId": "Courier",
+                        "deleted": item.get("isDeleted", False)
+                    })
+        return employees_list
+
+    async def get_shifts(
+        self,
+        date_from: datetime,
+        date_to: datetime,
+        organization_id: Optional[str] = None
+    ) -> List[Dict[str, Any]]:
+        """
+        Получение списка смен за указанный период (iiko API)
+        Для получения смен обычно используется /api/1/employees/shift (если доступен в iiko Biz)
+        """
+        org_id = organization_id or self.organization_id
+        date_format = "%Y-%m-%d %H:%M:%S.000"
+        
+        try:
+            data = await self._request("POST", "/api/1/employees/shift", {
+                "organizationIds": [org_id],
+                "dateFrom": date_from.strftime(date_format),
+                "dateTo": date_to.strftime(date_format)
+            })
+            return data.get("shifts", [])
+        except Exception as e:
+            logger.error(f"Error fetching shifts: {e}")
+            return []
+
+    async def get_schedules(
+        self,
+        date_from: datetime,
+        date_to: datetime,
+        organization_id: Optional[str] = None
+    ) -> List[Dict[str, Any]]:
+        """
+        Получение графика смен (запланированных) за указанный период (iiko API)
+        """
+        org_id = organization_id or self.organization_id
+        date_format = "%Y-%m-%d %H:%M:%S.000"
+        
+        try:
+            data = await self._request("POST", "/api/1/employees/schedule", {
+                "organizationIds": [org_id],
+                "from": date_from.strftime(date_format),
+                "to": date_to.strftime(date_format)
+            })
+            # Ответ обычно содержит список расписаний для разных групп/организаций
+            # Мы возвращаем плоский список всех записей графика
+            schedules = []
+            for org_schedule in data.get("schedules", []):
+                schedules.extend(org_schedule.get("items", []))
+            return schedules
+        except Exception as e:
+            logger.error(f"Error fetching schedules: {e}")
+            return []
 
     # =========================================================================
     # Программа лояльности (iikoCard)
@@ -483,6 +598,30 @@ class IikoService:
             "found": True,
             "name": customer.get("name", "")
         }
+
+    async def add_customer_balance(
+        self,
+        customer_id: str,
+        wallet_id: str,
+        amount: float,
+        api_login: Optional[str] = None,
+        organization_id: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """Начисление/списание бонусов клиента (iikoCard) вручную"""
+        org_id = organization_id or self.organization_id
+        payload = {
+            "organizationId": org_id,
+            "customerId": customer_id,
+            "walletId": wallet_id,
+            "sum": amount,
+            "comment": "Бонусы за активность в VK"
+        }
+        return await self._request(
+            "POST", "/api/1/loyalty/iiko/customer/wallet/topup",
+            payload,
+            api_login=api_login,
+            organization_id=org_id
+        )
 
     # =========================================================================
     # Вебхуки

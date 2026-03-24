@@ -120,6 +120,7 @@ async def get_revenue_report(
                 organization_name=row.get("organization_name", ""),
                 date_from=date_from_dt,
                 date_to=date_to_dt,
+                business_date=row.get("business_date"),
                 period_type=period,
                 average_check=row.get("average_check", 0.0),
                 markup=row.get("markup", 0.0),
@@ -149,6 +150,7 @@ def _record_to_dict(r: OlapRevenueRecord) -> dict:
     return {
         "organization_id": r.organization_id,
         "organization_name": r.organization_name,
+        "business_date": r.business_date,
         "average_check": r.average_check,
         "markup": r.markup,
         "markup_percent": r.markup_percent,

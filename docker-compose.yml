@@ -33,6 +33,7 @@ services:
       - DATABASE_URL=postgresql://${DB_USERNAME:-foodtech_user}:${DB_PASSWORD:-postgres}@db:5432/${DB_DATABASE:-foodtech_db}
       - REDIS_URL=redis://redis:6379/0
       - API_RELOAD=True
+      - APP_PUBLIC_URL=http://192.168.31.162:8000
     ports:
       - "8000:8000"
     depends_on:

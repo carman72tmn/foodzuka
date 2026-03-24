@@ -19,6 +19,10 @@ from .mailing import Mailing
 from .story import Story
 from .funnel import Funnel
 from .olap_revenue import OlapRevenueRecord
+from .employee import Employee, Shift
+from .vk_user import VkUser
+from .vk_activity import VkActivity
+from .vk_settings import VkSettings
 
 __all__ = [
     "User",
@@ -47,4 +51,8 @@ __all__ = [
     "Story",
     "Funnel",
     "OlapRevenueRecord",
+    "Employee",
+    "Shift",
+    "VkUser",
+    "VkActivity",
 ]

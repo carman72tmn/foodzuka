@@ -11,7 +11,7 @@ class Settings(BaseSettings):
     BOT_TOKEN: str
 
     # URL Backend API
-    API_URL: str = "http://localhost:8000/api/v1"
+    API_URL: str = "http://backend:8000/api/v1"
 
     # Режим отладки
     DEBUG: bool = False
