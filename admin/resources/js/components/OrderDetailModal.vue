@@ -135,10 +135,15 @@ const statusName = computed(() => {
                 <VListItemTitle>{{ order.order_type || 'Не указан' }}</VListItemTitle>
                 <VListItemSubtitle>Тип заказа</VListItemSubtitle>
               </VListItem>
-              <VListItem class="px-0" v-if="order.courier_name">
-                <template #prepend><VIcon icon="bx-run" size="small" class="me-3 text-medium-emphasis" /></template>
-                <VListItemTitle>{{ order.courier_name }}</VListItemTitle>
+              <VListItem class="px-0">
+                <template #prepend><VIcon icon="bx-user" size="small" class="me-3 text-medium-emphasis" /></template>
+                <VListItemTitle>{{ order.courier_name || 'Не назначен' }}</VListItemTitle>
                 <VListItemSubtitle>Курьер</VListItemSubtitle>
+              </VListItem>
+              <VListItem class="px-0" v-if="order.delivery_zone">
+                <template #prepend><VIcon icon="bx-map-alt" size="small" class="me-3 text-medium-emphasis" /></template>
+                <VListItemTitle>{{ order.delivery_zone }}</VListItemTitle>
+                <VListItemSubtitle>Зона доставки</VListItemSubtitle>
               </VListItem>
             </VList>
 
@@ -165,8 +170,31 @@ const statusName = computed(() => {
                 <VListItemSubtitle>Опоздание</VListItemSubtitle>
               </VListItem>
               <VListItem class="px-0" v-else-if="order.actual_time">
-                <VListItemTitle class="text-success font-weight-bold">Вовремя</VListItemTitle>
+                <VListItemTitle class="text-success font-weight-bold">
+                  Вовремя
+                </VListItemTitle>
                 <VListItemSubtitle>Статус доставки</VListItemSubtitle>
+              </VListItem>
+              <VListItem 
+                v-if="order.is_on_time"
+                class="px-0"
+              >
+                <template #prepend>
+                  <VIcon 
+                    icon="bx-calendar-event" 
+                    size="small" 
+                    class="me-3 text-warning" 
+                  />
+                </template>
+                <VListItemTitle class="text-warning font-weight-bold">
+                  Предзаказ (на время)
+                </VListItemTitle>
+                <VListItemSubtitle>Тип времени</VListItemSubtitle>
+              </VListItem>
+              <VListItem class="px-0" v-if="order.admin_name">
+                <template #prepend><VIcon icon="bx-user-check" size="small" class="me-3 text-medium-emphasis" /></template>
+                <VListItemTitle>{{ order.admin_name }}</VListItemTitle>
+                <VListItemSubtitle>Администратор (iiko)</VListItemSubtitle>
               </VListItem>
             </VList>
 
@@ -209,9 +237,17 @@ const statusName = computed(() => {
                 <span class="text-body-2">Сумма товаров:</span>
                 <span class="font-weight-medium">{{ order.total_amount }} ₽</span>
               </div>
-              <div class="d-flex justify-space-between mb-2 text-error" v-if="order.total_discount > 0">
-                <span class="text-body-2">Скидка:</span>
-                <span class="font-weight-medium">-{{ order.total_discount }} ₽</span>
+              <div class="mb-2" v-if="order.total_discount > 0">
+                <div class="d-flex justify-space-between text-error">
+                  <span class="text-body-2">Скидка:</span>
+                  <span class="font-weight-medium">-{{ order.total_discount }} ₽</span>
+                </div>
+                <div v-if="order.discounts_details && order.discounts_details.discounts" class="ms-4">
+                  <div v-for="d in order.discounts_details.discounts" :key="d.name" class="d-flex justify-space-between text-caption text-error opacity-70">
+                    <span>• {{ d.name }}</span>
+                    <span>-{{ d.sum }} ₽</span>
+                  </div>
+                </div>
               </div>
               <div class="d-flex justify-space-between mb-2 text-warning" v-if="order.bonus_spent > 0">
                 <span class="text-body-2">Оплачено бонусами:</span>

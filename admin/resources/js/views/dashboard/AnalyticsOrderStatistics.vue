@@ -30,10 +30,10 @@ const chartOptions = computed(() => {
     tooltip: { enabled: false },
     dataLabels: { enabled: false },
     labels: [
-      'Fashion',
-      'Electronic',
-      'Sports',
-      'Decor',
+      'Суши',
+      'Пицца',
+      'Напитки',
+      'Десерты',
     ],
     colors: [
       currentTheme.success,
@@ -73,7 +73,7 @@ const chartOptions = computed(() => {
             },
             total: {
               show: true,
-              label: 'Weekly',
+              label: 'Неделя',
               fontSize: '13px',
               lineHeight: '18px',
               formatter: () => '38%',
@@ -90,45 +90,45 @@ const chartOptions = computed(() => {
 const orders = [
   {
     amount: '82.5k',
-    title: 'Electronic',
+    title: 'Пицца',
     avatarColor: 'primary',
-    subtitle: 'Mobile, Earbuds, TV',
-    avatarIcon: 'bx-mobile-alt',
+    subtitle: 'Пепперони, Маргарита',
+    avatarIcon: 'bx-pizza',
   },
   {
     amount: '23.8k',
-    title: 'Fashion',
+    title: 'Суши',
     avatarColor: 'success',
-    subtitle: 'Tshirt, Jeans, Shoes',
-    avatarIcon: 'bx-closet',
+    subtitle: 'Филадельфия, Калифорния',
+    avatarIcon: 'bx-bowl-rice',
   },
   {
     amount: 849,
-    title: 'Decor',
+    title: 'Напитки',
     avatarColor: 'info',
-    subtitle: 'Fine Art, Dining',
-    avatarIcon: 'bx-home',
+    subtitle: 'Кола, Соки, Чай',
+    avatarIcon: 'bx-drink',
   },
   {
     amount: 99,
-    title: 'Sports',
+    title: 'Десерты',
     avatarColor: 'secondary',
-    subtitle: 'Football, Cricket Kit',
-    avatarIcon: 'bx-football',
+    subtitle: 'Чизкейк, Тирамису',
+    avatarIcon: 'bx-cake',
   },
 ]
 
 const moreList = [
   {
-    title: 'Share',
+    title: 'Поделиться',
     value: 'Share',
   },
   {
-    title: 'Refresh',
+    title: 'Обновить',
     value: 'Refresh',
   },
   {
-    title: 'Update',
+    title: 'Изменить',
     value: 'Update',
   },
 ]
@@ -138,9 +138,9 @@ const moreList = [
   <VCard>
     <VCardItem>
       <VCardTitle>
-        Order Statistics
+        Статистика заказов
       </VCardTitle>
-      <VCardSubtitle>42.82k Total Sales</VCardSubtitle>
+      <VCardSubtitle>42.82k Общих продаж</VCardSubtitle>
 
       <template #append>
         <MoreBtn :menu-list="moreList" />
@@ -154,7 +154,7 @@ const moreList = [
             8,258
           </h3>
           <div class="text-caption text-medium-emphasis">
-            Total Orders
+            Всего заказов
           </div>
         </div>
 

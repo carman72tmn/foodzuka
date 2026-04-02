@@ -32,8 +32,13 @@ class IikoService:
         Получение токена доступа к iiko API
         """
         login = api_login or self.api_login
-        if login:
-            login = login.strip()
+        
+        # Защита от плейсхолдеров и пустых значений
+        if not login or login.startswith("your_") or "placeholder" in login.lower() or "client error" in login.lower():
+            logger.error(f"Invalid iiko API login: {login}")
+            raise ValueError("iiko API login is not configured or is an error message. Please re-enter the key.")
+
+        login = login.strip()
 
         # Если просим тот же логин, что и в кеше, и он не протух — возвращаем
         if not api_login and self.access_token and self.token_expires_at:
@@ -76,6 +81,10 @@ class IikoService:
         """Универсальный метод для запросов к iiko API с авторизацией"""
         token = await self._get_access_token(api_login=api_login)
         org_id = organization_id or self.organization_id
+        
+        # Если это плейсхолдер - игнорируем его
+        if org_id and (org_id.startswith("your_") or "placeholder" in org_id.lower()):
+            org_id = None
 
         # Если в json_data есть organizationId или organizationIds - подменяем если передали organization_id
         if json_data and org_id:
@@ -246,14 +255,22 @@ class IikoService:
     # Меню и номенклатура
     # =========================================================================
 
-    async def get_nomenclature(self) -> Dict[str, Any]:
+    async def get_nomenclature(
+        self,
+        api_login: Optional[str] = None,
+        organization_id: Optional[str] = None
+    ) -> Dict[str, Any]:
         """
         Получение номенклатуры (меню) из iiko
         Возвращает категории (groups) и товары (products)
         """
-        return await self._request("POST", "/api/1/nomenclature", {
-            "organizationId": self.organization_id
-        })
+        org_id = organization_id or self.organization_id
+        return await self._request(
+            "POST", "/api/1/nomenclature", 
+            {"organizationId": org_id},
+            api_login=api_login,
+            organization_id=org_id
+        )
 
     async def get_external_menus(
         self,
@@ -272,7 +289,13 @@ class IikoService:
         )
         return data.get("externalMenus", [])
 
-    async def get_external_menu_by_id(self, external_menu_id: str, price_category_id: Optional[str] = None) -> Dict[str, Any]:
+    async def get_external_menu_by_id(
+        self, 
+        external_menu_id: str, 
+        price_category_id: Optional[str] = None,
+        api_login: Optional[str] = None,
+        organization_id: Optional[str] = None
+    ) -> Dict[str, Any]:
         """
         Получение конкретного внешнего меню по ID
 
@@ -280,28 +303,42 @@ class IikoService:
             external_menu_id: ID внешнего меню
             price_category_id: ID ценовой категории (опционально)
         """
+        org_id = organization_id or self.organization_id
         payload: Dict[str, Any] = {
             "externalMenuId": external_menu_id,
-            "organizationIds": [self.organization_id]
+            "organizationIds": [org_id]
         }
         if price_category_id:
             payload["priceCategoryId"] = price_category_id
 
-        return await self._request("POST", "/api/2/menu/by_id", payload)
+        return await self._request(
+            "POST", "/api/2/menu/by_id", 
+            payload,
+            api_login=api_login,
+            organization_id=org_id
+        )
 
     # =========================================================================
     # Стоп-листы
     # =========================================================================
 
-    async def get_stop_lists(self) -> List[Dict[str, Any]]:
+    async def get_stop_lists(
+        self,
+        api_login: Optional[str] = None,
+        organization_id: Optional[str] = None
+    ) -> List[Dict[str, Any]]:
         """
         Получение стоп-листов (недоступные позиции)
 
         Возвращает список продуктов, которые временно недоступны.
         """
-        data = await self._request("POST", "/api/1/stop_lists", {
-            "organizationIds": [self.organization_id]
-        })
+        org_id = organization_id or self.organization_id
+        data = await self._request(
+            "POST", "/api/1/stop_lists", 
+            {"organizationIds": [org_id]},
+            api_login=api_login,
+            organization_id=org_id
+        )
         stop_list_items = []
         for org_stop in data.get("terminalGroupStopLists", []):
             for tg in org_stop.get("items", []):
@@ -396,22 +433,44 @@ class IikoService:
 
         raise last_error
 
-    async def get_order_status(self, order_id: str) -> Dict[str, Any]:
+    async def get_order_status(
+        self, 
+        order_id: str,
+        api_login: Optional[str] = None,
+        organization_id: Optional[str] = None
+    ) -> Dict[str, Any]:
         """Получение статуса заказа из iiko"""
-        data = await self._request("POST", "/api/1/deliveries/by_id", {
-            "organizationIds": [self.organization_id],
-            "orderIds": [order_id]
-        })
+        org_id = organization_id or self.organization_id
+        data = await self._request(
+            "POST", "/api/1/deliveries/by_id", 
+            {
+                "organizationIds": [org_id],
+                "orderIds": [order_id]
+            },
+            api_login=api_login,
+            organization_id=org_id
+        )
         orders = data.get("orders", [])
         return orders[0] if orders else {}
 
-    async def cancel_order(self, order_id: str) -> bool:
+    async def cancel_order(
+        self, 
+        order_id: str,
+        api_login: Optional[str] = None,
+        organization_id: Optional[str] = None
+    ) -> bool:
         """Отмена заказа в iiko"""
+        org_id = organization_id or self.organization_id
         try:
-            await self._request("POST", "/api/1/deliveries/cancel", {
-                "organizationId": self.organization_id,
-                "orderId": order_id
-            })
+            await self._request(
+                "POST", "/api/1/deliveries/cancel", 
+                {
+                    "organizationId": org_id,
+                    "orderId": order_id
+                },
+                api_login=api_login,
+                organization_id=org_id
+            )
             return True
         except Exception:
             return False
@@ -420,7 +479,8 @@ class IikoService:
         self,
         date_from: datetime,
         date_to: datetime,
-        organization_id: Optional[str] = None
+        organization_id: Optional[str] = None,
+        api_login: Optional[str] = None
     ) -> List[Dict[str, Any]]:
         """
         Получение заказов за заданный период.
@@ -431,20 +491,30 @@ class IikoService:
         # Инструмент iiko требует дату в формате yyyy-MM-dd HH:mm:ss.fff
         date_format = "%Y-%m-%d %H:%M:%S.000"
         
-        data = await self._request("POST", "/api/1/deliveries/by_delivery_date_and_status", {
-            "organizationIds": [org_id],
-            "deliveryDateFrom": date_from.strftime(date_format),
-            "deliveryDateTo": date_to.strftime(date_format),
-            "statuses": [
-                "Unconfirmed", "WaitCooking", "ReadyForCooking", 
-                "CookingStarted", "CookingCompleted", "Waiting", 
-                "OnWay", "Delivered", "Closed", "Cancelled"
-            ]
-        })
+        data = await self._request(
+            "POST", 
+            "/api/1/deliveries/by_delivery_date_and_status", 
+            {
+                "organizationIds": [org_id],
+                "deliveryDateFrom": date_from.strftime(date_format),
+                "deliveryDateTo": date_to.strftime(date_format),
+                "statuses": [
+                    "Unconfirmed", "WaitCooking", "ReadyForCooking", 
+                    "CookingStarted", "CookingCompleted", "Waiting", 
+                    "OnWay", "Delivered", "Closed", "Cancelled"
+                ]
+            },
+            api_login=api_login,
+            organization_id=org_id
+        )
         
         return data.get("orders", [])
 
-    async def get_active_orders(self, organization_id: Optional[str] = None) -> List[Dict[str, Any]]:
+    async def get_active_orders(
+        self,
+        organization_id: Optional[str] = None,
+        api_login: Optional[str] = None
+    ) -> List[Dict[str, Any]]:
         """
         Получение всех текущих активных заказов из iiko.
         """
@@ -458,12 +528,17 @@ class IikoService:
             "Unconfirmed", "WaitCooking", "ReadyForCooking", "CookingStarted", "CookingCompleted", "Waiting", "OnWay"
         ]
         
-        data = await self._request("POST", "/api/1/deliveries/by_delivery_date_and_status", {
-            "organizationIds": [org_id],
-            "deliveryDateFrom": date_from,
-            "deliveryDateTo": date_to,
-            "statuses": statuses
-        })
+        data = await self._request(
+            "POST", "/api/1/deliveries/by_delivery_date_and_status", 
+            {
+                "organizationIds": [org_id],
+                "deliveryDateFrom": date_from,
+                "deliveryDateTo": date_to,
+                "statuses": statuses
+            },
+            api_login=api_login,
+            organization_id=org_id
+        )
         
         return data.get("orders", [])
 
@@ -471,30 +546,64 @@ class IikoService:
     # Сотрудники и смены
     # =========================================================================
 
-    async def get_employees(self, organization_id: Optional[str] = None) -> List[Dict[str, Any]]:
+    async def get_employees(
+        self,
+        organization_id: Optional[str] = None,
+        api_login: Optional[str] = None
+    ) -> List[Dict[str, Any]]:
         """
-        Получение списка сотрудников
+        Получение списка сотрудников организации. 
+        Сначала пробуем общий список, если нет прав - откатываемся на список курьеров.
         """
         org_id = organization_id or self.organization_id
-        data = await self._request("POST", "/api/1/employees/couriers", {
-            "organizationIds": [org_id]
-        })
+        data = None
+        used_fallback = False
+        
+        try:
+            # 1. Пробуем получить полный список (требует прав на Staff Management)
+            data = await self._request(
+                "POST", "/api/1/employees", 
+                {"organizationIds": [org_id]},
+                api_login=api_login,
+                organization_id=org_id
+            )
+        except httpx.HTTPStatusError as e:
+            # Если 401 или 403 - значит нет прав на этот эндпоинт, пробуем курьеров
+            if e.response.status_code in [401, 403]:
+                logger.warning(f"Access to /api/1/employees restricted (401/403). Falling back to /couriers.")
+                used_fallback = True
+                data = await self._request(
+                    "POST", "/api/1/employees/couriers", 
+                    {"organizationIds": [org_id]},
+                    api_login=api_login,
+                    organization_id=org_id
+                )
+            else:
+                raise e
         
         employees_list = []
         # Ответ имеет структуру: {"employees": [{"organizationId": "...", "items": [{...}]}]}
         for org_data in data.get("employees", []):
             if org_data.get("organizationId") == org_id:
                 for item in org_data.get("items", []):
-                    # Приводим данные к ожидаемому формату в iiko_sync_service
+                    # Универсальное получение имени (displayName или firstName + lastName)
                     name = item.get("displayName")
-                    if not name:
-                        name = f"{item.get('firstName', '')} {item.get('lastName', '')}".strip()
+                    if not name or name == "": # Обработка битых символов если есть
+                        fname = item.get("firstName") or ""
+                        lname = item.get("lastName") or ""
+                        name = f"{fname} {lname}".strip() or "Unnamed"
                     
+                    # Извлекаем роли (в /couriers их нет)
+                    role_id = "Courier" if used_fallback else None
+                    roles = item.get("roles", [])
+                    if roles:
+                        role_id = roles[0].get("name") or roles[0].get("id")
+
                     employees_list.append({
                         "id": item.get("id"),
                         "name": name,
-                        "phone": None,  # Метод couriers не отдает телефоны напрямую
-                        "roleId": "Courier",
+                        "phone": item.get("phone"), 
+                        "roleId": role_id or "Employee",
                         "deleted": item.get("isDeleted", False)
                     })
         return employees_list
@@ -503,21 +612,26 @@ class IikoService:
         self,
         date_from: datetime,
         date_to: datetime,
-        organization_id: Optional[str] = None
+        organization_id: Optional[str] = None,
+        api_login: Optional[str] = None
     ) -> List[Dict[str, Any]]:
         """
         Получение списка смен за указанный период (iiko API)
-        Для получения смен обычно используется /api/1/employees/shift (если доступен в iiko Biz)
         """
         org_id = organization_id or self.organization_id
         date_format = "%Y-%m-%d %H:%M:%S.000"
         
         try:
-            data = await self._request("POST", "/api/1/employees/shift", {
-                "organizationIds": [org_id],
-                "dateFrom": date_from.strftime(date_format),
-                "dateTo": date_to.strftime(date_format)
-            })
+            data = await self._request(
+                "POST", "/api/1/employees/shift", 
+                {
+                    "organizationIds": [org_id],
+                    "dateFrom": date_from.strftime(date_format),
+                    "dateTo": date_to.strftime(date_format)
+                },
+                api_login=api_login,
+                organization_id=org_id
+            )
             return data.get("shifts", [])
         except Exception as e:
             logger.error(f"Error fetching shifts: {e}")
@@ -527,7 +641,8 @@ class IikoService:
         self,
         date_from: datetime,
         date_to: datetime,
-        organization_id: Optional[str] = None
+        organization_id: Optional[str] = None,
+        api_login: Optional[str] = None
     ) -> List[Dict[str, Any]]:
         """
         Получение графика смен (запланированных) за указанный период (iiko API)
@@ -536,11 +651,16 @@ class IikoService:
         date_format = "%Y-%m-%d %H:%M:%S.000"
         
         try:
-            data = await self._request("POST", "/api/1/employees/schedule", {
-                "organizationIds": [org_id],
-                "from": date_from.strftime(date_format),
-                "to": date_to.strftime(date_format)
-            })
+            data = await self._request(
+                "POST", "/api/1/employees/schedule", 
+                {
+                    "organizationIds": [org_id],
+                    "from": date_from.strftime(date_format),
+                    "to": date_to.strftime(date_format)
+                },
+                api_login=api_login,
+                organization_id=org_id
+            )
             # Ответ обычно содержит список расписаний для разных групп/организаций
             # Мы возвращаем плоский список всех записей графика
             schedules = []
@@ -863,6 +983,175 @@ class IikoService:
         except Exception as e:
             logger.error(f"iiko OLAP report error: {e}")
             raise
+
+    # =========================================================================
+    # iiko Resto (Office API) - Прямое подключение
+    # =========================================================================
+
+    async def _resto_request(
+        self,
+        method: str,
+        endpoint: str,
+        resto_url: str,
+        resto_login: str,
+        resto_password: str,
+        params: Optional[Dict] = None,
+        timeout: float = 30.0
+    ) -> Any:
+        """Метод для запросов к iiko Resto (Office) API с SHA-1 авторизацией"""
+        import hashlib
+        
+        # Calculate SHA-1 hash of the password
+        password_sha1 = hashlib.sha1(resto_password.encode()).hexdigest()
+        
+        # Normalize URL
+        base_url = resto_url.rstrip('/')
+        if not base_url.endswith('/api'):
+            if base_url.endswith('/resto'):
+                base_url = f"{base_url}/api"
+            else:
+                base_url = f"{base_url}/resto/api"
+        
+        # 1. Получаем токен
+        async with httpx.AsyncClient(verify=False, timeout=timeout) as client:
+            auth_url = f"{base_url}/auth"
+            auth_params = {"login": resto_login, "pass": password_sha1}
+            
+            auth_response = await client.get(auth_url, params=auth_params)
+            if auth_response.status_code != 200:
+                # Попытка без хеширования (для старых версий или если пароль уже хеш)
+                auth_response = await client.get(auth_url, params={"login": resto_login, "pass": resto_password})
+                if auth_response.status_code != 200:
+                    logger.error(f"Resto auth failed: {auth_response.status_code} | {auth_response.text}")
+                    raise HTTPException(status_code=401, detail=f"Resto auth failed: {auth_response.text}")
+            
+            token = auth_response.text.strip().replace('"', '')
+            
+            # 2. Выполняем основной запрос
+            request_url = f"{base_url}{endpoint}"
+            final_params = params or {}
+            final_params["key"] = token
+            
+            response = await client.request(method, request_url, params=final_params)
+            response.raise_for_status()
+            
+            # Пробуем распарсить JSON, если не выходит — возвращаем текст/XML
+            try:
+                return response.json()
+            except Exception:
+                return response.text
+
+    async def get_resto_employees(
+        self,
+        resto_url: str,
+        resto_login: str,
+        resto_password: str
+    ) -> List[Dict[str, Any]]:
+        """Получение детального списка сотрудников из iiko Resto"""
+        # iiko Resto возвращает XML по умолчанию, запрашиваем JSON если возможно или парсим XML
+        # Большинство современных iiko поддерживают JSON через заголовок Accept или расширение .json
+        data = await self._resto_request(
+            "GET", "/employees", 
+            resto_url, resto_login, resto_password
+        )
+        
+        # Если пришел XML (строка), нужно распарсить. 
+        if isinstance(data, str):
+            import xml.etree.ElementTree as ET
+            root = ET.fromstring(data)
+            employees = []
+            for emp in root.findall('employee'):
+                employees.append({
+                    "id": emp.findtext('id'),
+                    "firstName": emp.findtext('firstName'),
+                    "lastName": emp.findtext('lastName'),
+                    "phone": emp.findtext('phone'),
+                    "email": emp.findtext('email'),
+                    "role": emp.findtext('mainRole/name'),
+                    "cardNumber": emp.findtext('cardNumber'),
+                    "inn": emp.findtext('inn'),
+                    "snils": emp.findtext('snils'),
+                    "passportSeries": emp.findtext('passportSeries'),
+                    "passportNumber": emp.findtext('passportNumber'),
+                    "medicalCardNumber": emp.findtext('medicalCardNumber'),
+                    "medicalCardExpired": emp.findtext('medicalCardExpired'),
+                    "birthday": emp.findtext('birthday'),
+                    "address": emp.findtext('address'),
+                    "salary": self._safe_float(emp.findtext('salary')),
+                })
+            return employees
+        return data if isinstance(data, list) else []
+
+    async def get_resto_attendance(
+        self,
+        resto_url: str,
+        resto_login: str,
+        resto_password: str,
+        date_from: datetime,
+        date_to: datetime
+    ) -> List[Dict[str, Any]]:
+        """Получение данных о явках (сменах) из iiko Resto"""
+        params = {
+            "from": date_from.strftime("%Y-%m-%d"),
+            "to": date_to.strftime("%Y-%m-%d")
+        }
+        data = await self._resto_request(
+            "GET", "/employees/attendance", 
+            resto_url, resto_login, resto_password,
+            params=params
+        )
+        # Аналогично парсим XML если нужно
+        if isinstance(data, str):
+            import xml.etree.ElementTree as ET
+            root = ET.fromstring(data)
+            records = []
+            for rec in root.findall('attendance'):
+                records.append({
+                    "employeeId": rec.findtext('employee/id'),
+                    "dateOpen": rec.findtext('dateOpen'),
+                    "dateClose": rec.findtext('dateClose'),
+                })
+            return records
+        return data if isinstance(data, list) else []
+
+    # =========================================================================
+    # iiko Transport (Cloud API) - Дополнительная статистика
+    # =========================================================================
+
+    async def get_courier_statistics(
+        self,
+        date_from: datetime,
+        date_to: datetime,
+        organization_id: str,
+        api_login: Optional[str] = None
+    ) -> List[Dict[str, Any]]:
+        """Получение статистики доставок по курьерам через Transport API"""
+        # Используем эндпоинт истории доставок
+        date_format = "%Y-%m-%d %H:%M:%S.000"
+        payload = {
+            "organizationIds": [organization_id],
+            "deliveryDateFrom": date_from.strftime(date_format),
+            "deliveryDateTo": date_to.strftime(date_format)
+        }
+        
+        data = await self._request(
+            "POST", "/api/1/deliveries/history", 
+            payload,
+            api_login=api_login,
+            organization_id=organization_id
+        )
+        
+        # Группируем по курьеру
+        stats = {}
+        for order in data.get("orders", []):
+            courier = order.get("courierInfo", {}).get("courier", {})
+            courier_id = courier.get("id")
+            if courier_id:
+                if courier_id not in stats:
+                    stats[courier_id] = {"id": courier_id, "name": courier.get("name"), "count": 0}
+                stats[courier_id]["count"] += 1
+                
+        return list(stats.values())
 
     @staticmethod
     def _safe_float(value) -> float:

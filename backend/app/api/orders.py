@@ -14,6 +14,7 @@ from app.models.order import Order, OrderItem, OrderStatus
 from app.models.product import Product
 from app.models.promo_code import PromoCode
 from app.models.action import Action
+from app.models.iiko_settings import IikoSettings
 from app.schemas import OrderCreate, OrderUpdate, OrderResponse, OrderItemResponse
 import logging
 from app.services.iiko_service import iiko_service
@@ -454,10 +455,10 @@ async def sync_recent_orders(background_tasks: BackgroundTasks, session: Session
     """
     Ручная синхронизация заказов из iiko за последние 24 часа.
     """
-    # Получаем все активные филиалы организаций iiko
-    companies = session.exec(select(Company).where(Company.iiko_organization_id != None)).all()
-    if not companies:
-        raise HTTPException(status_code=400, detail="No iiko organizations configured")
+    # Проверяем наличие настроек iiko в БД
+    settings_db = session.exec(select(IikoSettings)).first()
+    if not settings_db or not settings_db.api_login:
+        raise HTTPException(status_code=400, detail="No iiko settings configured")
     
     date_to = datetime.utcnow()
     date_from = date_to - timedelta(hours=24)

@@ -46,17 +46,17 @@ const isPasswordVisible = ref(false)
               v-html="logo"
             />
             <h1 class="app-logo-title">
-              sneat
+              FoodTech
             </h1>
           </RouterLink>
         </VCardItem>
 
         <VCardText>
           <h4 class="text-h4 mb-1">
-            Adventure starts here 🚀
+            Приключение начинается здесь 🚀
           </h4>
           <p class="mb-0">
-            Make your app management easy and fun!
+            Управляйте вашим бизнесом легко и с удовольствием!
           </p>
         </VCardText>
 
@@ -68,8 +68,8 @@ const isPasswordVisible = ref(false)
                 <VTextField
                   v-model="form.username"
                   autofocus
-                  label="Username"
-                  placeholder="Johndoe"
+                  label="Логин"
+                  placeholder="admin"
                 />
               </VCol>
               <!-- email -->
@@ -78,7 +78,7 @@ const isPasswordVisible = ref(false)
                   v-model="form.email"
                   label="Email"
                   type="email"
-                  placeholder="johndoe@email.com"
+                  placeholder="admin@example.com"
                 />
               </VCol>
 
@@ -86,7 +86,7 @@ const isPasswordVisible = ref(false)
               <VCol cols="12">
                 <VTextField
                   v-model="form.password"
-                  label="Password"
+                  label="Пароль"
                   autocomplete="password"
                   placeholder="············"
                   :type="isPasswordVisible ? 'text' : 'password'"
@@ -104,11 +104,11 @@ const isPasswordVisible = ref(false)
                     for="privacy-policy"
                     style="opacity: 1;"
                   >
-                    <span class="me-1 text-high-emphasis">I agree to</span>
+                    <span class="me-1 text-high-emphasis">Я согласен с</span>
                     <a
                       href="javascript:void(0)"
                       class="text-primary"
-                    >privacy policy & terms</a>
+                    >политикой конфиденциальности и условиями</a>
                   </VLabel>
                 </div>
 
@@ -116,7 +116,7 @@ const isPasswordVisible = ref(false)
                   block
                   type="submit"
                 >
-                  Sign up
+                  Зарегистрироваться
                 </VBtn>
               </VCol>
 
@@ -125,12 +125,12 @@ const isPasswordVisible = ref(false)
                 cols="12"
                 class="text-center text-base"
               >
-                <span>Already have an account?</span>
+                <span>Уже есть аккаунт?</span>
                 <RouterLink
                   class="text-primary ms-1"
                   to="/login"
                 >
-                  Sign in instead
+                  Войти вместо этого
                 </RouterLink>
               </VCol>
 

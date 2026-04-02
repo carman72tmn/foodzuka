@@ -102,13 +102,13 @@ const chartOptions = computed(() => {
         crosshairs: { opacity: 0 },
         axisBorder: { show: false },
         categories: [
-          'Jan',
-          'Feb',
-          'Mar',
-          'Apr',
-          'May',
-          'Jun',
-          'Jul',
+          'Янв',
+          'Фев',
+          'Мар',
+          'Апр',
+          'Май',
+          'Июн',
+          'Июл',
         ],
         labels: {
           style: {
@@ -209,7 +209,7 @@ const chartOptions = computed(() => {
     },
     radial: {
       chart: { sparkline: { enabled: true } },
-      labels: ['Growth'],
+      labels: ['Рост'],
       stroke: { dashArray: 5 },
       colors: [`rgba(${ hexToRgb(String(currentTheme.primary)) }, 1)`],
       states: {
@@ -281,13 +281,13 @@ const chartOptions = computed(() => {
 const balanceData = [
   {
     icon: 'bx-dollar',
-    amount: '$2.54k',
+    amount: '2.54k ₽',
     year: '2023',
     color: 'primary',
   },
   {
     icon: 'bx-wallet',
-    amount: '$4.21k',
+    amount: '4.21k ₽',
     year: '2022',
     color: 'info',
   },
@@ -319,7 +319,7 @@ const moreList = [
         :class="$vuetify.display.smAndUp ? 'border-e' : 'border-b'"
       >
         <VCardItem class="pb-0">
-          <VCardTitle>Total Revenue</VCardTitle>
+          <VCardTitle>Общая выручка</VCardTitle>
 
           <template #append>
             <MoreBtn :menu-list="moreList" />
@@ -371,7 +371,7 @@ const moreList = [
           />
 
           <h6 class="text-h6 text-medium-emphasis mb-8 mt-1">
-            62% Company Growth
+            Рост компании: 62%
           </h6>
           <div class="d-flex align-center justify-center flex-wrap gap-x-6 gap-y-3">
             <div

@@ -3,6 +3,7 @@ API эндпоинты для синхронизации с iiko и управл
 """
 from typing import List, Optional
 from datetime import datetime
+import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlmodel import Session, select
 from app.core.database import get_session
@@ -102,6 +103,75 @@ async def test_connection(
         except Exception as e:
             print(f"DEBUG: Exception in test_connection (DB): {e}")
             raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.post("/test-resto-connection")
+async def test_resto_connection(
+    data: Optional[IikoSettingsCreate] = None,
+    session: Session = Depends(get_session)
+):
+    """Проверить подключение к iiko Resto (Direct Office API)"""
+    
+    if data:
+        url = data.resto_url.strip() if data.resto_url else ""
+        login = data.resto_login.strip() if data.resto_login else ""
+        password = data.resto_password.strip() if data.resto_password else ""
+        
+        # If masked password is sent, try to get the real one from DB
+        if password == "********" or (data.api_login and "..." in data.api_login):
+            existing = session.exec(select(IikoSettings)).first()
+            if existing:
+                if password == "********":
+                    password = existing.resto_password
+                if data.api_login and "..." in data.api_login:
+                    # Note: we are not using api_login for resto test, but good to be careful
+                    pass
+    else:
+        existing = session.exec(select(IikoSettings)).first()
+        if not existing:
+            raise HTTPException(status_code=404, detail="Settings not found")
+        url = existing.resto_url
+        login = existing.resto_login
+        password = existing.resto_password
+
+    if not all([url, login, password]):
+        raise HTTPException(status_code=400, detail="Resto URL, login, and password are required")
+
+    try:
+        import hashlib
+        # Calculate SHA-1 hash of the password
+        password_sha1 = hashlib.sha1(password.encode()).hexdigest()
+        
+        async with httpx.AsyncClient(verify=False) as client:
+            # Attempt to login to get a token.
+            # The URL usually ends with /resto/api, so we ensure it's correct
+            base_url = url.rstrip('/')
+            if not base_url.endswith('/api'):
+                if base_url.endswith('/resto'):
+                    base_url = f"{base_url}/api"
+                else:
+                    base_url = f"{base_url}/resto/api"
+            
+            auth_url = f"{base_url}/auth"
+            params = {"login": login, "pass": password_sha1}
+            
+            print(f"DEBUG: Testing Resto connection to {auth_url} with login {login}")
+            response = await client.get(auth_url, params=params)
+            
+            if response.status_code == 200:
+                token = response.text.strip().replace('"', '')
+                return {"success": True, "message": "Подключение успешно", "token": token}
+            else:
+                # Try fallback without hashing just in case (some versions might differ or it's already hashed)
+                params_plain = {"login": login, "pass": password}
+                response_plain = await client.get(auth_url, params=params_plain)
+                if response_plain.status_code == 200:
+                    token = response_plain.text.strip().replace('"', '')
+                    return {"success": True, "message": "Подключение успешно (plain)", "token": token}
+                    
+                return {"success": False, "error": f"Ошибка авторизации: HTTP {response.status_code} - {response.text}"}
+    except Exception as e:
+        return {"success": False, "error": f"Ошибка соединения: {str(e)}"}
 
 
 # =============================================================================
@@ -304,7 +374,11 @@ async def register_webhook(
             base_url = global_settings.APP_PUBLIC_URL or str(request.base_url)
             
             # Автоматическая регистрация
-            result = await iiko_service.auto_register_webhook(request_url=base_url)
+            result = await iiko_service.auto_register_webhook(
+                request_url=base_url,
+                api_login=settings_db.api_login,
+                organization_id=settings_db.organization_id
+            )
             
             # Сохраняем сгенерированные данные в БД
             settings_db.webhook_url = result["webhook_url"]
@@ -320,7 +394,12 @@ async def register_webhook(
             session.add(settings_db)
             session.commit()
             
-            iiko_resp = await iiko_service.update_webhook_settings(webhook_url, auth_token)
+            iiko_resp = await iiko_service.update_webhook_settings(
+                webhook_url, 
+                auth_token,
+                api_login=settings_db.api_login,
+                organization_id=settings_db.organization_id
+            )
             return {"success": True, "iiko_response": iiko_resp}
             
     except Exception as e:

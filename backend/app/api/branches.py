@@ -6,6 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlmodel import Session, select
 from app.core.database import get_session
 from app.models.company import Company, Branch, DeliveryZone
+from app.models.iiko_settings import IikoSettings
 from app.services.iiko_service import iiko_service
 from app.schemas import (
     BranchCreate, BranchUpdate, BranchResponse,
@@ -20,9 +21,27 @@ router = APIRouter(prefix="/branches", tags=["Branches"])
 async def sync_iiko_branches(session: Session = Depends(get_session)):
     """Синхронизация организаций и филиалов из iiko"""
     try:
+        # Получаем настройки iiko из БД
+        settings_db = session.exec(select(IikoSettings)).first()
+        api_login = settings_db.api_login if settings_db else None
+        organization_id = settings_db.organization_id if settings_db else None
+
         # 1. Получаем организации (Company)
-        organizations = await iiko_service.get_organizations()
+        organizations = await iiko_service.get_organizations(api_login=api_login)
         
+        # Если список пуст, но есть organization_id в настройках - попробуем получить инфо об одной
+        if not organizations and organization_id:
+            try:
+                org_info = await iiko_service.get_organization_info(
+                    api_login=api_login, 
+                    organization_id=organization_id
+                )
+                if org_info:
+                    organizations = [org_info]
+            except Exception as e:
+                # Не критично, попробуем продолжить
+                pass
+
         synced_companies = 0
         synced_branches = 0
         
@@ -51,7 +70,10 @@ async def sync_iiko_branches(session: Session = Depends(get_session)):
             synced_companies += 1
 
         # 2. Получаем терминальные группы (Branch)
-        terminal_groups = await iiko_service.get_terminal_groups()
+        terminal_groups = await iiko_service.get_terminal_groups(
+            api_login=api_login, 
+            organization_id=organization_id
+        )
         
         for tg in terminal_groups:
             tg_id = tg.get("id")

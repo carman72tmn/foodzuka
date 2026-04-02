@@ -49,6 +49,7 @@ import VerticalNavLink from "@layouts/components/VerticalNavLink.vue"
   <VerticalNavGroup :item="{ title: 'Система', icon: 'bx-cog' }">
     <VerticalNavLink :item="{ title: 'Метки', to: '/system/tags' }" />
     <VerticalNavLink :item="{ title: 'Настройки iiko', to: '/settings/iiko' }" />
+    <VerticalNavLink :item="{ title: 'Настройки Telegram Бота', to: '/settings/bot' }" />
     <VerticalNavLink :item="{ title: 'Настройки VK Бота', to: '/settings/vk' }" />
   </VerticalNavGroup>
 

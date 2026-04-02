@@ -5,7 +5,12 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.core.config import settings
-from app.api import categories, products, orders, iiko, loyalty, promo_codes, webhooks, companies, branches, actions, nps, customers, mailings, stories, funnels, reports, employees, vk
+import asyncio
+import logging
+from app.services.iiko_sync_service import iiko_sync_service
+from app.core.database import Session, engine
+
+logger = logging.getLogger(__name__)
 
 # Создание приложения FastAPI
 app = FastAPI(
@@ -15,6 +20,24 @@ app = FastAPI(
     docs_url="/docs",  # Swagger UI
     redoc_url="/redoc"  # ReDoc
 )
+
+async def repeat_sync_employees():
+    """Фоновая задача для синхронизации каждые 30 минут"""
+    await asyncio.sleep(10) # Задержка перед первым запуском
+    while True:
+        try:
+            logger.info("Starting scheduled employee sync...")
+            with Session(engine) as session:
+                await iiko_sync_service.sync_employees_full(session, days=7)
+            logger.info("Scheduled employee sync completed successfully")
+        except Exception as e:
+            logger.error(f"Error in scheduled sync: {e}")
+        
+        await asyncio.sleep(1800) # 30 минут
+
+@app.on_event("startup")
+async def startup_event():
+    asyncio.create_task(repeat_sync_employees())
 
 # Настройка CORS для работы с фронтендом и Telegram Bot
 app.add_middleware(
@@ -50,6 +73,7 @@ app.include_router(reports.router, prefix="/api/v1")
 app.include_router(employees.router, prefix="/api/v1/employees", tags=["Employees"])
 app.include_router(webhooks.router, prefix="/api/v1/webhooks", tags=["Webhooks"])
 app.include_router(vk.router, prefix="/api/v1/vk", tags=["VK"])
+app.include_router(bot_settings.router, prefix="/api/v1")
 
 
 @app.get("/")

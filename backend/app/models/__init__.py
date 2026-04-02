@@ -23,6 +23,7 @@ from .employee import Employee, Shift
 from .vk_user import VkUser
 from .vk_activity import VkActivity
 from .vk_settings import VkSettings
+from .bot_settings import BotSettings
 
 __all__ = [
     "User",
@@ -55,4 +56,6 @@ __all__ = [
     "Shift",
     "VkUser",
     "VkActivity",
+    "VkSettings",
+    "BotSettings",
 ]

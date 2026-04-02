@@ -1,21 +1,23 @@
-FROM php:8.4-fpm-alpine
+# Stage 1: Build Frontend Assets
+FROM node:20-alpine AS frontend-builder
+WORKDIR /app
+COPY package*.json ./
+RUN npm install
+COPY . .
+RUN npm run build
 
-# Set working directory
+# Stage 2: PHP Application
+FROM php:8.4-fpm-alpine
 WORKDIR /var/www/html
 
-# Install dependencies
+# Install system dependencies
 RUN apk add --no-cache \
     postgresql-dev \
     libpng-dev \
     libzip-dev \
     oniguruma-dev \
-    git \
     unzip \
-    nodejs \
-    npm
-
-# Install PHP extensions
-RUN docker-php-ext-install pdo pdo_pgsql pgsql gd zip mbstring
+    && docker-php-ext-install pdo pdo_pgsql pgsql gd zip mbstring
 
 # Get Composer
 COPY --from=composer:latest /usr/bin/composer /usr/bin/composer
@@ -23,11 +25,11 @@ COPY --from=composer:latest /usr/bin/composer /usr/bin/composer
 # Copy application files
 COPY . .
 
-# Install PHP and JS dependencies
-RUN composer install
-RUN npm install
+# Copy built frontend assets from Stage 1
+COPY --from=frontend-builder /app/public/build ./public/build
 
-EXPOSE 8000 5173
+# Install PHP dependencies
+RUN composer install --no-dev --optimize-autoloader
 
-# Entrypoint script would be better, but for simplicity:
-CMD ["php", "artisan", "serve", "--host", "0.0.0.0", "--port", "8000"]
+EXPOSE 9000
+CMD ["php-fpm"]

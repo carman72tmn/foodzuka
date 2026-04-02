@@ -29,14 +29,18 @@ sudo ufw allow 8081/tcp
 sudo ufw allow 5173/tcp
 sudo ufw --force enable
 
-# 5. Clone Project (if not already in folder)
-if [ ! -d "foodtech" ]; then
-    echo "Cloning repository..."
-    git clone https://github.com/carman72tmn/foodzuka.git foodtech
-    cd foodtech
+# 5. Repository Setup
+if [ -f "docker-compose.yml" ]; then
+    echo "Using current directory as project root..."
 else
-    echo "Using existing foodtech directory..."
-    cd foodtech
+    if [ ! -d "foodtech" ]; then
+        echo "Cloning repository..."
+        git clone https://github.com/carman72tmn/foodzuka.git foodtech
+        cd foodtech
+    else
+        echo "Using existing foodtech directory..."
+        cd foodtech
+    fi
 fi
 
 # 6. Environment Setup

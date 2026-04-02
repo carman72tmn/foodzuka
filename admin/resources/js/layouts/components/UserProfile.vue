@@ -48,9 +48,9 @@ import avatar1 from '@images/avatars/avatar-1.png'
             </template>
 
             <VListItemTitle class="font-weight-semibold">
-              John Doe
+              Админ
             </VListItemTitle>
-            <VListItemSubtitle>Admin</VListItemSubtitle>
+            <VListItemSubtitle>Администратор</VListItemSubtitle>
           </VListItem>
           <VDivider class="my-2" />
 
@@ -64,7 +64,7 @@ import avatar1 from '@images/avatars/avatar-1.png'
               />
             </template>
 
-            <VListItemTitle>Profile</VListItemTitle>
+            <VListItemTitle>Профиль</VListItemTitle>
           </VListItem>
 
           <!-- 👉 Settings -->
@@ -77,7 +77,7 @@ import avatar1 from '@images/avatars/avatar-1.png'
               />
             </template>
 
-            <VListItemTitle>Settings</VListItemTitle>
+            <VListItemTitle>Настройки</VListItemTitle>
           </VListItem>
 
           <!-- 👉 Pricing -->
@@ -90,7 +90,7 @@ import avatar1 from '@images/avatars/avatar-1.png'
               />
             </template>
 
-            <VListItemTitle>Pricing</VListItemTitle>
+            <VListItemTitle>Цены</VListItemTitle>
           </VListItem>
 
           <!-- 👉 FAQ -->
@@ -119,7 +119,7 @@ import avatar1 from '@images/avatars/avatar-1.png'
               />
             </template>
 
-            <VListItemTitle>Logout</VListItemTitle>
+            <VListItemTitle>Выйти</VListItemTitle>
           </VListItem>
         </VList>
       </VMenu>

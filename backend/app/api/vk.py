@@ -1,7 +1,6 @@
 from fastapi import APIRouter, Request, Response, HTTPException, Depends
-from sqlmodel.ext.asyncio.session import AsyncSession
-from sqlmodel import select
-from app.db.session import get_session
+from sqlmodel import Session, select
+from app.core.database import get_session
 from app.models.vk_settings import VkSettings
 from app.services.vk_service import process_vk_event
 from pydantic import BaseModel
@@ -14,16 +13,16 @@ class VkSettingsSchema(BaseModel):
     vk_secret_key: str | None = None
 
 @router.get("/settings", response_model=VkSettingsSchema)
-async def get_vk_settings(db: AsyncSession = Depends(get_session)):
-    result = await db.execute(select(VkSettings))
+async def get_vk_settings(db: Session = Depends(get_session)):
+    result = db.execute(select(VkSettings))
     settings_db = result.scalars().first()
     if not settings_db:
         return VkSettingsSchema()
     return settings_db
 
 @router.post("/settings", response_model=VkSettingsSchema)
-async def save_vk_settings(data: VkSettingsSchema, db: AsyncSession = Depends(get_session)):
-    result = await db.execute(select(VkSettings))
+async def save_vk_settings(data: VkSettingsSchema, db: Session = Depends(get_session)):
+    result = db.execute(select(VkSettings))
     settings_db = result.scalars().first()
     
     if settings_db:
@@ -34,18 +33,18 @@ async def save_vk_settings(data: VkSettingsSchema, db: AsyncSession = Depends(ge
         settings_db = VkSettings(**data.model_dump())
         db.add(settings_db)
         
-    await db.commit()
-    await db.refresh(settings_db)
+    db.commit()
+    db.refresh(settings_db)
     return settings_db
 
 @router.post("/webhook")
-async def vk_webhook(request: Request, db: AsyncSession = Depends(get_session)):
+async def vk_webhook(request: Request, db: Session = Depends(get_session)):
     try:
         data = await request.json()
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid JSON")
         
-    result = await db.execute(select(VkSettings))
+    result = db.execute(select(VkSettings))
     vk_settings = result.scalars().first()
     
     # Check secret key if configured

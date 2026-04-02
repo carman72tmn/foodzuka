@@ -25,6 +25,10 @@ export const routes = [
         component: () => import('@/pages/settings/iiko.vue'),
       },
       {
+        path: 'settings/bot',
+        component: () => import('@/pages/settings/bot.vue'),
+      },
+      {
         path: 'settings/vk',
         component: () => import('@/pages/settings/vk.vue'),
       },

@@ -1,14 +1,19 @@
 from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
+from datetime import datetime
 from sqlmodel import Session, select
 from typing import List, Optional
 
-from app.core.database import get_session
-from app.models.employee import Employee, Shift
+from app.core.database import get_session, engine
+from app.models.employee import Employee, Shift, Schedule
 from app.services.iiko_sync_service import iiko_sync_service
+import logging
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
 @router.get("/")
+@router.get("")
 def get_employees(
     status: Optional[str] = None,
     session: Session = Depends(get_session)
@@ -37,6 +42,18 @@ def get_employee_shifts(
         
     shifts = session.exec(select(Shift).where(Shift.employee_id == employee_id).order_by(Shift.date_open.desc())).all()
     return {"status": "success", "data": shifts}
+
+@router.get("/{employee_id}/stats")
+async def get_employee_stats(
+    employee_id: int,
+    mode: str = "calendar", # calendar or sliding
+    session: Session = Depends(get_session)
+):
+    """
+    Получение статистики сотрудника (режимы: календарная неделя или последние 7 дней)
+    """
+    stats = await iiko_sync_service.get_employee_stats(session, employee_id, mode)
+    return {"status": "success", "data": stats}
 
 @router.get("/shifts/open")
 def get_open_shifts(
@@ -83,14 +100,19 @@ def get_schedules(
         
     return {"status": "success", "data": result}
 
+@router.post("/sync/")
 @router.post("/sync")
-def sync_employees(background_tasks: BackgroundTasks, session: Session = Depends(get_session)):
+def sync_employees(background_tasks: BackgroundTasks):
     """
     Запуск фоновой синхронизации списка сотрудников и смен (по умолчанию за последние 7 дней)
     """
     async def run_sync():
-        with Session(session.bind) as sync_session:
-            await iiko_sync_service.sync_employees_and_shifts(sync_session, days=7)
+        try:
+            with Session(engine) as sync_session:
+                await iiko_sync_service.sync_employees_full(sync_session, days=7)
+                logger.info("Background employee full sync completed successfully")
+        except Exception as e:
+            logger.error(f"Fatal error in background employee sync: {e}")
             
     background_tasks.add_task(run_sync)
     return {"status": "accepted", "message": "Employees synchronization started"}

@@ -13,6 +13,7 @@ class OrderStatus(str, Enum):
     """Статусы заказа"""
     NEW = "new"  # Новый заказ
     CONFIRMED = "confirmed"  # Подтвержден
+    PREPARING = "preparing"  # В подготовке
     COOKING = "cooking"  # Готовится
     READY = "ready"  # Готов
     DELIVERING = "delivering"  # Доставляется
@@ -50,13 +51,20 @@ class Order(SQLModel, table=True):
     expected_time: Optional[datetime] = Field(default=None, description="Время готовности/ожидаемой доставки")
     actual_time: Optional[datetime] = Field(default=None, description="Фактическое время выдачи/доставки")
     delay_minutes: Optional[int] = Field(default=None, description="Опоздание в минутах")
+    is_on_time: bool = Field(default=True, description="Заказ на время / вовремя")
+    admin_name: Optional[str] = Field(default=None, description="Администратор")
+    delivery_zone: Optional[str] = Field(default=None, description="Зона доставки")
     
     # JSON-поля для хранения детализированных данных, если они нужны
     order_items_details: Optional[Dict[str, Any]] = Field(default=None, sa_column=Column(JSON), description="Полный состав заказа из iiko")
+    discounts_details: Optional[Dict[str, Any]] = Field(default=None, sa_column=Column(JSON), description="Детали скидок")
     customer_info_details: Optional[Dict[str, Any]] = Field(default=None, sa_column=Column(JSON), description="Полные данные заказчика")
     
     created_at: datetime = Field(default_factory=datetime.utcnow)
     updated_at: datetime = Field(default_factory=datetime.utcnow)
+
+    # Relationships
+    items: List["OrderItem"] = Relationship(back_populates="order", sa_relationship_kwargs={"cascade": "all, delete-orphan"})
 
     class Config:
         """Настройки модели"""
@@ -78,6 +86,10 @@ class OrderItem(SQLModel, table=True):
 
     id: Optional[int] = Field(default=None, primary_key=True)
     order_id: int = Field(foreign_key="orders.id", index=True)
+    
+    # Relationships
+    order: Order = Relationship(back_populates="items")
+    
     product_id: int = Field(foreign_key="products.id")
     product_name: str = Field(max_length=255)  # Сохраняем название на момент заказа
     quantity: int = Field(default=1, ge=1)

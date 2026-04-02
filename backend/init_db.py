@@ -4,7 +4,7 @@
 """
 from sqlmodel import SQLModel
 from app.core.database import engine
-from app.models import User, Category, Product, Order, OrderItem
+from app.models import *
 
 
 def init_db():

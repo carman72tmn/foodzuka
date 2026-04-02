@@ -9,42 +9,42 @@ const transactions = [
   {
     amount: +82.6,
     paymentMethod: 'PayPal',
-    description: 'Send money',
+    description: 'Перевод средств',
     icon: paypalError,
     color: 'error',
   },
   {
-    paymentMethod: 'Wallet',
+    paymentMethod: 'Кошелек',
     amount: +270.69,
-    description: 'Mac\'D',
+    description: 'Обед в МакД',
     icon: walletPrimary,
     color: 'primary',
   },
   {
     amount: +637.91,
-    paymentMethod: 'Transfer',
-    description: 'Refund',
+    paymentMethod: 'Перевод',
+    description: 'Возврат средств',
     icon: chartInfo,
     color: 'info',
   },
   {
-    paymentMethod: 'Credit Card',
+    paymentMethod: 'Кредитная карта',
     amount: -838.71,
-    description: 'Ordered Food',
+    description: 'Заказ еды',
     icon: creditCardSuccess,
     color: 'success',
   },
   {
-    paymentMethod: 'Wallet',
+    paymentMethod: 'Кошелек',
     amount: +203.33,
-    description: 'Starbucks',
+    description: 'Кофе Старбакс',
     icon: walletPrimary,
     color: 'primary',
   },
   {
     paymentMethod: 'Mastercard',
     amount: -92.45,
-    description: 'Ordered Food',
+    description: 'Заказ еды',
     icon: creditCardWarning,
     color: 'warning',
   },
@@ -52,22 +52,22 @@ const transactions = [
 
 const moreList = [
   {
-    title: 'Share',
+    title: 'Поделиться',
     value: 'Share',
   },
   {
-    title: 'Refresh',
+    title: 'Обновить',
     value: 'Refresh',
   },
   {
-    title: 'Update',
+    title: 'Изменить',
     value: 'Update',
   },
 ]
 </script>
 
 <template>
-  <VCard title="Transactions">
+  <VCard title="Транзакции">
     <template #append>
       <MoreBtn :menu-list="moreList" />
     </template>
@@ -97,8 +97,8 @@ const moreList = [
 
           <template #append>
             <VListItemAction>
-              <span class="me-2">{{ item.amount > 0 ? `+$${Math.abs(item.amount)}` : `-$${Math.abs(item.amount)}` }}</span>
-              <span class="text-disabled">USD</span>
+              <span class="me-2">{{ item.amount > 0 ? `+${Math.abs(item.amount)} ₽` : `-${Math.abs(item.amount)} ₽` }}</span>
+              <span class="text-disabled">RUB</span>
             </VListItemAction>
           </template>
         </VListItem>

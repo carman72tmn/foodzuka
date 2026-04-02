@@ -52,27 +52,27 @@ const tabData = computed(() => {
   const data = {
     income: {
       avatar: statsVerticalWallet,
-      title: 'Total Income',
-      stats: '$459.1k',
+      title: 'Общий доход',
+      stats: '459.1k ₽',
       profitLoss: 65,
       profitLossAmount: '6.5',
-      compareToLastWeek: '$39k',
+      compareToLastWeek: '39k ₽',
     },
     expenses: {
       avatar: statsVerticalPaypal,
-      title: 'Total Expenses',
-      stats: '$316.5k',
+      title: 'Общие расходы',
+      stats: '316.5k ₽',
       profitLoss: 27.8,
       profitLossAmount: '7.2',
-      compareToLastWeek: '$16k',
+      compareToLastWeek: '16k ₽',
     },
     profit: {
       avatar: statsVerticalChart,
-      title: 'Total Profit',
-      stats: '$147.9k',
+      title: 'Общая прибыль',
+      stats: '147.9k ₽',
       profitLoss: 35.1,
       profitLossAmount: '4.5',
-      compareToLastWeek: '$28k',
+      compareToLastWeek: '28k ₽',
     },
   }
   
@@ -143,13 +143,13 @@ const chartConfig = computed(() => {
       axisBorder: { show: false },
       categories: [
         '',
-        'Jan',
-        'Feb',
-        'Mar',
-        'Apr',
-        'May',
-        'Jun',
-        'Jul',
+        'Янв',
+        'Фев',
+        'Мар',
+        'Апр',
+        'Май',
+        'Июн',
+        'Июл',
       ],
       offsetY: 20,
       offsetX: -24,
@@ -195,13 +195,13 @@ const chartConfig = computed(() => {
         class="v-tabs-pill"
       >
         <VTab value="income">
-          Income
+          Доход
         </VTab>
         <VTab value="expenses">
-          Expenses
+          Расходы
         </VTab>
         <VTab value="profit">
-          Profit
+          Прибыль
         </VTab>
       </VTabs>
     </VCardText>
@@ -250,14 +250,14 @@ const chartConfig = computed(() => {
         color="primary"
         :model-value="tabData.profitLoss"
       >
-        <span class="text-overline text-medium-emphasis">${{ tabData.profitLossAmount }}</span>
+        <span class="text-overline text-medium-emphasis">{{ tabData.profitLossAmount }} ₽</span>
       </VProgressCircular>
 
       <div>
         <h6 class="text-base font-weight-regular">
-          <span class="text-capitalize d-inline-block">{{ currentTab }} this week</span>
+          <span class="text-capitalize d-inline-block">{{ currentTab === 'income' ? 'Доход' : currentTab === 'expenses' ? 'Расходы' : 'Прибыль' }} на этой неделе</span>
         </h6>
-        <span class="text-sm d-inline-block">{{ tabData.compareToLastWeek }} less than last week</span>
+        <span class="text-sm d-inline-block">{{ tabData.compareToLastWeek }} меньше, чем на прошлой неделе</span>
       </div>
     </VCardText>
   </VCard>

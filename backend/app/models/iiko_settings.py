@@ -89,6 +89,20 @@ class IikoSettings(SQLModel, table=True):
         description="Токен авторизации для вебхуков (Authorization header)"
     )
 
+    # Настройки iiko Resto (Direct Office API)
+    resto_url: Optional[str] = Field(
+        default=None, max_length=500,
+        description="URL сервера iiko Resto (напр. https://domain.iiko.it/resto)"
+    )
+    resto_login: Optional[str] = Field(
+        default=None, max_length=255,
+        description="Логин для iiko Resto API"
+    )
+    resto_password: Optional[str] = Field(
+        default=None, max_length=255,
+        description="Пароль для iiko Resto API"
+    )
+
     # Метаданные
     created_at: datetime = Field(default_factory=datetime.utcnow)
     updated_at: datetime = Field(default_factory=datetime.utcnow)

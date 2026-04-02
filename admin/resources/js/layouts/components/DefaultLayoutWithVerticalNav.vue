@@ -31,20 +31,12 @@ import UserProfile from '@/layouts/components/UserProfile.vue'
           </IconBtn>
 
           <span class="d-none d-md-flex align-center text-disabled ms-2">
-            <span class="me-2">Search</span>
+            <span class="me-2">Поиск</span>
             <span class="meta-key">&#8984;K</span>
           </span>
         </div>
 
         <VSpacer />
-
-        <IconBtn
-          href="https://github.com/themeselection/sneat-vuetify-vuejs-laravel-admin-template-free"
-          target="_blank"
-          rel="noopener noreferrer"
-        >
-          <VIcon icon="bxl-github" />
-        </IconBtn>
 
         <IconBtn>
           <VIcon icon="bx-bell" />
@@ -69,7 +61,7 @@ import UserProfile from '@/layouts/components/UserProfile.vue'
         <!-- eslint-enable -->
 
         <h1 class="app-logo-title">
-          sneat
+          FoodTech
         </h1>
       </RouterLink>
 

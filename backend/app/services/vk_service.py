@@ -1,7 +1,6 @@
 import re
 from typing import Dict, Any
-from sqlmodel import select
-from sqlmodel.ext.asyncio.session import AsyncSession
+from sqlmodel import Session, select
 from app.models.order import Order
 from app.models.vk_user import VkUser
 from app.models.vk_activity import VkActivity
@@ -9,7 +8,7 @@ import httpx
 from app.core.config import settings
 
 
-async def process_vk_event(event_data: Dict[str, Any], db: AsyncSession, bot_token: str | None):
+async def process_vk_event(event_data: Dict[str, Any], db: Session, bot_token: str | None):
     event_type = event_data.get("type")
     obj = event_data.get("object", {})
 
@@ -19,7 +18,7 @@ async def process_vk_event(event_data: Dict[str, Any], db: AsyncSession, bot_tok
         await handle_activity(event_type, obj, db, bot_token)
 
 
-async def handle_message(event_type: str, obj: Dict[str, Any], db: AsyncSession, bot_token: str | None):
+async def handle_message(event_type: str, obj: Dict[str, Any], db: Session, bot_token: str | None):
     # Depending on API version, message might be directly in obj or obj.message
     message = obj if 'text' in obj else obj.get('message', {})
     text = message.get("text", "")
@@ -37,14 +36,14 @@ async def handle_message(event_type: str, obj: Dict[str, Any], db: AsyncSession,
     
     try:
         # Find order in DB
-        result = await db.execute(select(Order).where(Order.id == int(order_number)))
+        result = db.execute(select(Order).where(Order.id == int(order_number)))
         order = result.scalars().first()
         
         if not order:
             return
 
         # Link profile
-        result = await db.execute(select(VkUser).where(VkUser.vk_id == vk_id))
+        result = db.execute(select(VkUser).where(VkUser.vk_id == vk_id))
         vk_user = result.scalars().first()
         
         if not vk_user:
@@ -56,7 +55,7 @@ async def handle_message(event_type: str, obj: Dict[str, Any], db: AsyncSession,
                 is_linked=True
             )
             db.add(vk_user)
-            await db.commit()
+            db.commit()
             
             # Optionally send a welcome message
             if order.customer_name and bot_token:
@@ -68,7 +67,7 @@ async def handle_message(event_type: str, obj: Dict[str, Any], db: AsyncSession,
     except Exception as e:
         print(f"Error handling order binding: {e}")
 
-async def handle_activity(event_type: str, obj: Dict[str, Any], db: AsyncSession, bot_token: str | None):
+async def handle_activity(event_type: str, obj: Dict[str, Any], db: Session, bot_token: str | None):
     # Example logic for activity points
     vk_id = obj.get("liker_id") or obj.get("from_id")
     if not vk_id:
@@ -77,14 +76,14 @@ async def handle_activity(event_type: str, obj: Dict[str, Any], db: AsyncSession
     item_id = str(obj.get("item_id") or obj.get("post_id") or obj.get("id"))
     
     # Check if user is linked
-    result = await db.execute(select(VkUser).where(VkUser.vk_id == vk_id))
+    result = db.execute(select(VkUser).where(VkUser.vk_id == vk_id))
     vk_user = result.scalars().first()
     
     if not vk_user or not vk_user.is_linked:
         return
         
     # Check if action already recorded
-    result = await db.execute(
+    result = db.execute(
         select(VkActivity)
         .where(VkActivity.vk_id == vk_id)
         .where(VkActivity.action_type == event_type)
@@ -110,7 +109,7 @@ async def handle_activity(event_type: str, obj: Dict[str, Any], db: AsyncSession
     vk_user.vk_bonus_balance += points
     db.add(vk_user)
     
-    await db.commit()
+    db.commit()
     
     # Send notification
     if bot_token:

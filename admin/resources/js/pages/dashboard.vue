@@ -36,9 +36,9 @@ import wallet from '@images/cards/wallet-info.png'
         >
           <CardStatisticsVertical
             v-bind="{
-              title: 'Profit',
+              title: 'Прибыль',
               image: chart,
-              stats: '$12,628',
+              stats: '12,628 ₽',
               change: 72.80,
             }"
           />
@@ -51,9 +51,9 @@ import wallet from '@images/cards/wallet-info.png'
         >
           <CardStatisticsVertical
             v-bind="{
-              title: 'Sales',
+              title: 'Продажи',
               image: wallet,
-              stats: '$4,679',
+              stats: '4,679 ₽',
               change: 28.42,
             }"
           />
@@ -86,9 +86,9 @@ import wallet from '@images/cards/wallet-info.png'
         >
           <CardStatisticsVertical
             v-bind=" {
-              title: 'Payments',
+              title: 'Платежи',
               image: paypal,
-              stats: '$2,468',
+              stats: '2,468 ₽',
               change: -14.82,
             }"
           />
@@ -101,9 +101,9 @@ import wallet from '@images/cards/wallet-info.png'
         >
           <CardStatisticsVertical
             v-bind="{
-              title: 'Transactions',
+              title: 'Транзакции',
               image: card,
-              stats: '$14,857',
+              stats: '14,857 ₽',
               change: 28.14,
             }"
           />

@@ -352,6 +352,9 @@ class IikoSettingsCreate(BaseModel):
     fallback_telegram_id: Optional[str] = None
     webhook_url: Optional[str] = None
     webhook_auth_token: Optional[str] = None
+    resto_url: Optional[str] = None
+    resto_login: Optional[str] = None
+    resto_password: Optional[str] = None
 
 
 class IikoSettingsResponse(IikoSettingsCreate):
@@ -361,6 +364,16 @@ class IikoSettingsResponse(IikoSettingsCreate):
     updated_at: datetime
 
     model_config = ConfigDict(from_attributes=True)
+
+    @classmethod
+    def model_validate(cls, obj, **kwargs):
+        """Маскируем пароль и ключи при выводе"""
+        instance = super().model_validate(obj, **kwargs)
+        if instance.resto_password:
+            instance.resto_password = "********"
+        if instance.api_login and len(instance.api_login) > 8:
+            instance.api_login = f"{instance.api_login[:4]}...{instance.api_login[-4:]}"
+        return instance
 
 
 class IikoConnectionTestResponse(BaseModel):

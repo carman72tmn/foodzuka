@@ -7,7 +7,7 @@ from sqlalchemy import engine_from_config, pool
 from alembic import context
 
 # Импортируем все модели для автогенерации миграций
-from app.models import User, Category, Product, Order, OrderItem
+import app.models
 from app.core.config import settings
 
 # Конфигурация Alembic

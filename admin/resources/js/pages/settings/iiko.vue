@@ -31,6 +31,9 @@ const settings = ref({
   fallback_telegram_id: "",
   webhook_url: "",
   webhook_auth_token: "",
+  resto_url: "",
+  resto_login: "",
+  resto_password: "",
 });
 
 // Справочники (загружаются из iiko)
@@ -42,6 +45,8 @@ const discountTypes = ref([]);
 
 // Статус подключения
 const connectionStatus = ref(null); // null, 'success', 'error'
+const restoConnectionStatus = ref(null);
+const testingResto = ref(false);
 
 const activeTab = ref("general");
 const webhookLogs = ref([]);
@@ -136,6 +141,32 @@ const testConnection = async () => {
     showMessage("Не удалось подключиться к API iiko (port 8000)", "error");
   } finally {
     testing.value = false;
+  }
+};
+
+// Тест подключения к Resto API
+const testRestoConnection = async () => {
+  testingResto.value = true;
+  restoConnectionStatus.value = null;
+  try {
+    const res = await fetch(`${API_BASE}/test-resto-connection`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(settings.value),
+    });
+    const data = await res.json();
+    if (res.ok && data.success) {
+      restoConnectionStatus.value = "success";
+      showMessage(data.message || "Успешное подключение к iiko Resto API!");
+    } else {
+      restoConnectionStatus.value = "error";
+      showMessage(data.error || data.detail || "Ошибка подключения", "error");
+    }
+  } catch (e) {
+    restoConnectionStatus.value = "error";
+    showMessage("Не удалось подключиться к API iiko Resto", "error");
+  } finally {
+    testingResto.value = false;
   }
 };
 
@@ -343,6 +374,73 @@ md="4" class="d-flex align-center">
                         :disabled="!settings.api_login"
                         prepend-icon="mdi-lan-check"
                         @click="testConnection"
+                      >
+                        Проверить подключение
+                      </VBtn>
+                    </VCol>
+                  </VRow>
+                </VCardText>
+              </VCard>
+            </VCol>
+
+            <!-- ==================== Подключение Resto (Direct API) ==================== -->
+            <VCol cols="12">
+              <VCard class="mb-4">
+                <VCardTitle class="d-flex align-center">
+                  <VIcon icon="mdi-server-network" class="me-2" />
+                  Прямое подключение к iiko Resto (Office API)
+                  <VSpacer />
+                  <VChip
+                    v-if="restoConnectionStatus === 'success'"
+                    color="success"
+                    variant="tonal"
+                    prepend-icon="mdi-check-circle"
+                  >
+                    Подключено
+                  </VChip>
+                  <VChip
+                    v-if="restoConnectionStatus === 'error'"
+                    color="error"
+                    variant="tonal"
+                    prepend-icon="mdi-alert-circle"
+                  >
+                    Ошибка
+                  </VChip>
+                </VCardTitle>
+                <VCardText>
+                  <VRow>
+                    <VCol cols="12" md="12">
+                      <VTextField
+                        v-model.trim="settings.resto_url"
+                        label="Resto API URL"
+                        hint="Прямая ссылка на сервер iiko Resto (Например: https://dovezzuka-tyumen.iiko.it/resto)"
+                        persistent-hint
+                        prepend-inner-icon="mdi-link"
+                      />
+                    </VCol>
+                    <VCol cols="12" md="4">
+                      <VTextField
+                        v-model.trim="settings.resto_login"
+                        label="Логин (Server API)"
+                        prepend-inner-icon="mdi-account"
+                      />
+                    </VCol>
+                    <VCol cols="12" md="4">
+                      <VTextField
+                        v-model.trim="settings.resto_password"
+                        label="Пароль (Server API)"
+                        type="password"
+                        prepend-inner-icon="mdi-key"
+                      />
+                    </VCol>
+                    <VCol cols="12" md="4" class="d-flex align-center">
+                      <VBtn
+                        color="primary"
+                        variant="elevated"
+                        :loading="testingResto"
+                        :disabled="!settings.resto_url || !settings.resto_login || !settings.resto_password"
+                        prepend-icon="mdi-lan-check"
+                        @click="testRestoConnection"
                       >
                         Проверить подключение
                       </VBtn>

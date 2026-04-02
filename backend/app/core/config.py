@@ -23,8 +23,8 @@ class Settings(BaseSettings):
 
     # Настройки iiko Cloud API
     IIKO_API_URL: str = "https://api-ru.iiko.services"
-    IIKO_API_LOGIN: str
-    IIKO_ORGANIZATION_ID: str
+    IIKO_API_LOGIN: Optional[str] = None
+    IIKO_ORGANIZATION_ID: Optional[str] = None
 
     # Настройки VK Bot
     VK_BOT_TOKEN: Optional[str] = None

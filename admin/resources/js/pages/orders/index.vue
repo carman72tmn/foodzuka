@@ -30,6 +30,7 @@ const headers = [
 const statusColors = {
   new: "info",
   confirmed: "primary",
+  preparing: "warning",
   cooking: "warning",
   ready: "success",
   delivering: "info",
@@ -40,6 +41,7 @@ const statusColors = {
 const statusNames = {
   new: "Новый",
   confirmed: "Подтвержден",
+  preparing: "В подготовке",
   cooking: "Готовится",
   ready: "Готов",
   delivering: "В пути",

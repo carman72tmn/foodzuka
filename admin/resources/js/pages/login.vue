@@ -45,17 +45,17 @@ const isPasswordVisible = ref(false)
               v-html="logo"
             />
             <h1 class="app-logo-title">
-              sneat
+              FoodTech
             </h1>
           </RouterLink>
         </VCardItem>
 
         <VCardText>
           <h4 class="text-h4 mb-1">
-            Welcome to Sneat! 👋🏻
+            Добро пожаловать в FoodTech! 👋🏻
           </h4>
           <p class="mb-0">
-            Please sign-in to your account and start the adventure
+            Пожалуйста, войдите в свой аккаунт, чтобы начать работу
           </p>
         </VCardText>
 
@@ -67,9 +67,9 @@ const isPasswordVisible = ref(false)
                 <VTextField
                   v-model="form.email"
                   autofocus
-                  label="Email or Username"
+                  label="Email или Логин"
                   type="email"
-                  placeholder="johndoe@email.com"
+                  placeholder="admin@example.com"
                 />
               </VCol>
 
@@ -77,7 +77,7 @@ const isPasswordVisible = ref(false)
               <VCol cols="12">
                 <VTextField
                   v-model="form.password"
-                  label="Password"
+                  label="Пароль"
                   placeholder="············"
                   :type="isPasswordVisible ? 'text' : 'password'"
                   autocomplete="password"
@@ -89,14 +89,14 @@ const isPasswordVisible = ref(false)
                 <div class="d-flex align-center justify-space-between flex-wrap my-6">
                   <VCheckbox
                     v-model="form.remember"
-                    label="Remember me"
+                    label="Запомнить меня"
                   />
 
                   <a
                     class="text-primary"
                     href="javascript:void(0)"
                   >
-                    Forgot Password?
+                    Забыли пароль?
                   </a>
                 </div>
 
@@ -105,7 +105,7 @@ const isPasswordVisible = ref(false)
                   block
                   type="submit"
                 >
-                  Login
+                  Войти
                 </VBtn>
               </VCol>
 
@@ -115,13 +115,13 @@ const isPasswordVisible = ref(false)
                 class="text-body-1 text-center"
               >
                 <span class="d-inline-block">
-                  New on our platform?
+                  Впервые у нас?
                 </span>
                 <RouterLink
                   class="text-primary ms-1 d-inline-block text-body-1"
                   to="/register"
                 >
-                  Create an account
+                  Создать аккаунт
                 </RouterLink>
               </VCol>
 
@@ -130,7 +130,7 @@ const isPasswordVisible = ref(false)
                 class="d-flex align-center"
               >
                 <VDivider />
-                <span class="mx-4 text-high-emphasis">or</span>
+                <span class="mx-4 text-high-emphasis">или</span>
                 <VDivider />
               </VCol>
 

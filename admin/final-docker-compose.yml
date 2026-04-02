@@ -1,0 +1,122 @@
+services:
+  db:
+    image: postgres:15-alpine
+    container_name: foodtech-db
+    restart: always
+    environment:
+      POSTGRES_DB: ${DB_DATABASE:-foodtech_db}
+      POSTGRES_USER: ${DB_USERNAME:-foodtech_user}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-your_strong_password}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USERNAME:-foodtech_user} -d ${DB_DATABASE:-foodtech_db}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:alpine
+    container_name: foodtech-redis
+    restart: always
+    ports:
+      - "6379:6379"
+
+  backend:
+    build:
+      context: ./backend
+    container_name: foodtech-backend
+    restart: always
+    environment:
+      - DATABASE_URL=postgresql://${DB_USERNAME:-foodtech_user}:${DB_PASSWORD:-your_strong_password}@db:5432/${DB_DATABASE:-foodtech_db}
+      - REDIS_URL=redis://redis:6379/0
+      - API_RELOAD=True
+      - APP_PUBLIC_URL=https://72roll.ru
+    expose:
+      - "8000"
+    volumes:
+      - ./backend:/app
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_started
+
+  bot:
+    build:
+      context: ./bot
+    container_name: foodtech-bot
+    restart: always
+    environment:
+      - API_URL=https://72roll.ru/api/v1
+    volumes:
+      - ./bot:/app
+    depends_on:
+      - backend
+
+  admin:
+    build:
+      context: ./admin
+    container_name: foodtech-admin
+    restart: always
+    environment:
+      - DB_HOST=db
+      - DB_CONNECTION=pgsql
+      - DB_PORT=5432
+      - DB_DATABASE=${DB_DATABASE:-foodtech_db}
+      - DB_USERNAME=${DB_USERNAME:-foodtech_user}
+      - DB_PASSWORD=${DB_PASSWORD:-your_strong_password}
+      - REDIS_HOST=redis
+    ports:
+      - "8081:8000"
+    expose:
+      - "8000"
+      - "5173"
+    volumes:
+      - ./admin:/var/www/html
+    depends_on:
+      db:
+        condition: service_healthy
+
+  frontend:
+    build:
+      context: ./frontend
+    container_name: foodtech-frontend
+    restart: always
+    expose:
+      - "5173"
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+    environment:
+      - VITE_API_URL=https://72roll.ru/api/v1
+
+  nginx:
+    image: nginx:alpine
+    container_name: foodtech-nginx
+    restart: always
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./configs/nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./certbot/conf:/etc/letsencrypt:ro
+      - ./certbot/www:/var/www/certbot:ro
+      - ./admin/public:/var/www/html/admin/public:ro
+    depends_on:
+      - frontend
+      - admin
+      - backend
+
+  certbot:
+    image: certbot/certbot:latest
+    container_name: foodtech-certbot
+    volumes:
+      - ./certbot/conf:/etc/letsencrypt
+      - ./certbot/www:/var/www/certbot
+    entrypoint: "/bin/sh -c 'trap exit TERM; while :; do certbot renew; sleep 12h & wait $${!}; done;'"
+
+volumes:
+  postgres_data:
