@@ -16,6 +16,7 @@ router = APIRouter()
 @router.get("")
 def get_employees(
     status: Optional[str] = None,
+    role: Optional[str] = None,
     session: Session = Depends(get_session)
 ):
     """
@@ -24,6 +25,8 @@ def get_employees(
     query = select(Employee)
     if status is not None:
         query = query.where(Employee.status == status)
+    if role is not None:
+        query = query.where(Employee.role == role)
         
     employees = session.exec(query).all()
     return {"status": "success", "data": employees}
@@ -38,7 +41,7 @@ def get_employee_shifts(
     """
     employee = session.exec(select(Employee).where(Employee.id == employee_id)).first()
     if not employee:
-        raise HTTPException(status_code=404, detail="Employee not found")
+        raise HTTPException(status_code=404, detail="Сотрудник не найден")
         
     shifts = session.exec(select(Shift).where(Shift.employee_id == employee_id).order_by(Shift.date_open.desc())).all()
     return {"status": "success", "data": shifts}
@@ -115,4 +118,45 @@ def sync_employees(background_tasks: BackgroundTasks):
             logger.error(f"Fatal error in background employee sync: {e}")
             
     background_tasks.add_task(run_sync)
-    return {"status": "accepted", "message": "Employees synchronization started"}
+    return {"status": "success", "message": "Синхронизация сотрудников запущена"}
+
+@router.get("/reports/couriers")
+async def get_courier_report(
+    date_from: Optional[str] = None,
+    date_to: Optional[str] = None,
+    session: Session = Depends(get_session)
+):
+    """
+    Отчет по курьерам (количество доставок) за период
+    """
+    # Если даты не указаны, берем сегодня
+    df = datetime.fromisoformat(date_from) if date_from else datetime.utcnow().replace(hour=0, minute=0, second=0)
+    dt = datetime.fromisoformat(date_to) if date_to else datetime.utcnow()
+    
+    # Получаем всех курьеров (фильтруем по ролям CUR, Courier, курьер, Delivery)
+    courier_roles = ["Courier", "CUR", "курьер", "Delivery"]
+    couriers = session.exec(select(Employee).where(Employee.role.in_(courier_roles))).all()
+    
+    report = []
+    for courier in couriers:
+        # Считаем доставки из смен за период
+        shifts = session.exec(
+            select(Shift).where(
+                Shift.employee_id == courier.id,
+                Shift.date_open >= df,
+                Shift.date_open <= dt
+            )
+        ).all()
+        
+        total_deliveries = sum(s.deliveries_count or 0 for s in shifts)
+        total_hours = sum(s.work_hours or 0.0 for s in shifts)
+        
+        report.append({
+            "id": courier.id,
+            "name": courier.name,
+            "deliveries": total_deliveries,
+            "hours": round(total_hours, 2),
+            "shifts_count": len(shifts)
+        })
+        
+    return {"status": "success", "data": report}

@@ -75,8 +75,23 @@ async def iiko_webhook(
         session.commit()
 
     elif event_type == "DeliveryOrderUpdate":
-        # Тут можно будет добавить логику обновления статуса заказа
-        # Пока просто помечаем как "получено"
-        pass
+        # Синхронизация конкретного заказа при его обновлении
+        order_id = payload.get("eventInfo", {}).get("id")
+        org_id = payload.get("organizationId")
+        if order_id and org_id and background_tasks:
+            background_tasks.add_task(iiko_sync_service.sync_order_by_id, session, order_id, org_id)
+            log_entry.processed = True
+            log_entry.error = "Background order sync started"
+            session.add(log_entry)
+            session.commit()
+
+    elif event_type in ["PersonalSessionUpdate", "CashShiftUpdate"]:
+        # Триггер полной синхронизации сотрудников при открытии/закрытии смен
+        if background_tasks:
+            background_tasks.add_task(iiko_sync_service.sync_employees_full, session)
+            log_entry.processed = True
+            log_entry.error = "Background employee sync started"
+            session.add(log_entry)
+            session.commit()
 
     return {"status": "ok", "id": log_entry.id}

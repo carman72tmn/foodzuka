@@ -26,6 +26,11 @@ class Settings(BaseSettings):
     IIKO_API_LOGIN: Optional[str] = None
     IIKO_ORGANIZATION_ID: Optional[str] = None
 
+    # Настройки iiko Resto API (Office/Server)
+    IIKO_RESTO_URL: Optional[str] = None
+    IIKO_RESTO_LOGIN: Optional[str] = None
+    IIKO_RESTO_PASSWORD: Optional[str] = None
+
     # Настройки VK Bot
     VK_BOT_TOKEN: Optional[str] = None
     VK_CONFIRMATION_CODE: Optional[str] = None

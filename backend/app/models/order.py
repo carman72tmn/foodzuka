@@ -39,6 +39,10 @@ class Order(SQLModel, table=True):
     total_discount: Decimal = Field(sa_type=Numeric(10, 2), default=Decimal("0.00"), description="Сумма скидки")
     promo_code_id: Optional[int] = Field(default=None, foreign_key="promo_codes.id", index=True)
     iiko_order_id: Optional[str] = Field(default=None, unique=True, index=True, max_length=255)
+    external_number: Optional[str] = Field(default=None, index=True, max_length=100, description="Читаемый номер заказа из iiko")
+    terminal_group_id: Optional[str] = Field(default=None, index=True, max_length=255, description="ID терминальной группы iiko")
+    terminal_group_name: Optional[str] = Field(default=None, index=True, max_length=255, description="Название терминальной группы")
+    source: Optional[str] = Field(default=None, max_length=100, description="Источник заказа (например, сайт, приложение, агрегатор)")
     comment: Optional[str] = Field(default=None)
     
     # Расширенные данные из iiko
@@ -53,7 +57,9 @@ class Order(SQLModel, table=True):
     delay_minutes: Optional[int] = Field(default=None, description="Опоздание в минутах")
     is_on_time: bool = Field(default=True, description="Заказ на время / вовремя")
     admin_name: Optional[str] = Field(default=None, description="Администратор")
+    city: Optional[str] = Field(default=None, description="Город")
     delivery_zone: Optional[str] = Field(default=None, description="Зона доставки")
+    is_paid: bool = Field(default=False, description="Заказ оплачен")
     
     # JSON-поля для хранения детализированных данных, если они нужны
     order_items_details: Optional[Dict[str, Any]] = Field(default=None, sa_column=Column(JSON), description="Полный состав заказа из iiko")

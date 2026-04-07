@@ -1,4 +1,11 @@
-# PHP Application
+# Stage 1: Build Frontend Assets
+FROM node:20-alpine AS frontend-builder
+WORKDIR /app
+COPY . .
+RUN npm install
+RUN npm run build
+
+# Stage 2: PHP Application
 FROM php:8.4-fpm-alpine
 WORKDIR /var/www/html
 
@@ -17,9 +24,8 @@ COPY --from=composer:latest /usr/bin/composer /usr/bin/composer
 # Copy application files
 COPY . .
 
-# Copy pre-built frontend assets
-# This requires the 'build' folder to exist in 'admin/public/build' locally
-COPY public/build ./public/build
+# Copy built frontend assets from Stage 1
+COPY --from=frontend-builder /app/public/build ./public/build
 
 # Install PHP dependencies
 RUN composer install --no-dev --optimize-autoloader

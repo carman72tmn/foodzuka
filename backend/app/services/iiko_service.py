@@ -5,10 +5,13 @@
 import httpx
 import asyncio
 import logging
-import secrets
 from typing import Optional, Dict, List, Any
 from datetime import datetime, timedelta
+import secrets
+from sqlmodel import Session, select
+from fastapi import HTTPException
 from app.core.config import settings
+from app.models.iiko_settings import IikoSettings
 
 logger = logging.getLogger(__name__)
 
@@ -35,8 +38,8 @@ class IikoService:
         
         # Защита от плейсхолдеров и пустых значений
         if not login or login.startswith("your_") or "placeholder" in login.lower() or "client error" in login.lower():
-            logger.error(f"Invalid iiko API login: {login}")
-            raise ValueError("iiko API login is not configured or is an error message. Please re-enter the key.")
+            logger.error(f"Некорректный логин iiko API: {login}")
+            raise ValueError("Логин iiko API не настроен или содержит ошибку. Пожалуйста, введите ключ заново.")
 
         login = login.strip()
 
@@ -45,8 +48,8 @@ class IikoService:
             if datetime.utcnow() < self.token_expires_at:
                 return self.access_token
 
-        masked_login = f"{login[:4]}...{login[-4:]}" if login and len(login) > 8 else "INVALID"
-        logger.info(f"Requesting iiko access token with login: {masked_login}")
+        masked_login = f"{login[:4]}...{login[-4:]}" if login and len(login) > 8 else "НЕКОРРЕКТНО"
+        logger.info(f"Запрос токена доступа iiko для логина: {masked_login}")
 
         async with httpx.AsyncClient() as client:
             try:
@@ -66,7 +69,7 @@ class IikoService:
 
                 return token
             except httpx.HTTPStatusError as e:
-                logger.error(f"Failed to get access token: {e.response.text}")
+                logger.error(f"Не удалось получить токен доступа: {e.response.text}")
                 raise
 
     async def _request(
@@ -88,10 +91,18 @@ class IikoService:
 
         # Если в json_data есть organizationId или organizationIds - подменяем если передали organization_id
         if json_data and org_id:
-            if "organizationId" in json_data:
+            # Всегда стараемся добавить оба варианта для совместимости с разными версиями iiko Cloud
+            if "organizationId" in json_data or any(k in endpoint for k in ["/by_id", "/create", "/nomenclature", "/stop_lists"]):
                 json_data["organizationId"] = org_id
-            if "organizationIds" in json_data and isinstance(json_data["organizationIds"], list):
-                if not json_data["organizationIds"] or len(json_data["organizationIds"]) == 1:
+            
+            if "organizationIds" in json_data or any(k in endpoint for k in [
+                "/organizations", "/terminal_groups", "/payment_types", "/deliveries/order_types", 
+                "/discounts", "/menu", "/stop_lists", "/by_delivery_date_and_status", "/employees", 
+                "/shift", "/schedule", "/reports/olap"
+            ]):
+                if "organizationIds" not in json_data or not isinstance(json_data["organizationIds"], list):
+                    json_data["organizationIds"] = [org_id]
+                elif not json_data["organizationIds"]:
                     json_data["organizationIds"] = [org_id]
 
         print(f"DEBUG iiko request: {endpoint} | Payload: {json_data}")
@@ -134,7 +145,7 @@ class IikoService:
                 "organizations": orgs.get("organizations", [])
             }
         except Exception as e:
-            logger.error(f"iiko connection test failed: {e}")
+            logger.error(f"Ошибка при проверке соединения с iiko: {e}")
             return {
                 "success": False,
                 "error": str(e)
@@ -198,6 +209,7 @@ class IikoService:
     ) -> List[Dict[str, Any]]:
         """Получение типов оплаты"""
         org_id = organization_id or self.organization_id
+        logger.info(f"Запрос типов оплаты для организации {org_id}")
         data = await self._request(
             "POST", "/api/1/payment_types", 
             {"organizationIds": [org_id]},
@@ -205,10 +217,14 @@ class IikoService:
             organization_id=org_id
         )
         types = data.get("paymentTypes", [])
+        logger.info(f"Получено {len(types)} групп типов оплаты из iiko Cloud")
         result = []
         for org_types in types:
-            for item in org_types.get("items", []):
+            items = org_types.get("items", [])
+            logger.debug(f"Орг {org_types.get('organizationId')}: {len(items)} типов")
+            for item in items:
                 result.append(item)
+        logger.info(f"Итого: обработано {len(result)} типов оплаты")
         return result
 
     async def get_order_types(
@@ -268,6 +284,20 @@ class IikoService:
         return await self._request(
             "POST", "/api/1/nomenclature", 
             {"organizationId": org_id},
+            api_login=api_login,
+            organization_id=org_id
+        )
+
+    async def get_delivery_restrictions(
+        self,
+        api_login: Optional[str] = None,
+        organization_id: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """Получение ограничений доставки (зоны, условия)"""
+        org_id = organization_id or self.organization_id
+        return await self._request(
+            "POST", "/api/1/delivery_restrictions", 
+            {"organizationIds": [org_id]},
             api_login=api_login,
             organization_id=org_id
         )
@@ -426,7 +456,7 @@ class IikoService:
             except Exception as e:
                 last_error = e
                 logger.warning(
-                    f"Order delivery attempt {attempt + 1}/3 failed: {e}"
+                    f"Попытка создания заказа {attempt + 1}/3 не удалась: {e}"
                 )
                 if attempt < 2:
                     await asyncio.sleep(15)
@@ -570,7 +600,7 @@ class IikoService:
         except httpx.HTTPStatusError as e:
             # Если 401 или 403 - значит нет прав на этот эндпоинт, пробуем курьеров
             if e.response.status_code in [401, 403]:
-                logger.warning(f"Access to /api/1/employees restricted (401/403). Falling back to /couriers.")
+                logger.warning(f"Доступ к /api/1/employees ограничен (401/403). Переключение на /couriers.")
                 used_fallback = True
                 data = await self._request(
                     "POST", "/api/1/employees/couriers", 
@@ -634,7 +664,7 @@ class IikoService:
             )
             return data.get("shifts", [])
         except Exception as e:
-            logger.error(f"Error fetching shifts: {e}")
+            logger.error(f"Ошибка при получении смен: {e}")
             return []
 
     async def get_schedules(
@@ -668,7 +698,7 @@ class IikoService:
                 schedules.extend(org_schedule.get("items", []))
             return schedules
         except Exception as e:
-            logger.error(f"Error fetching schedules: {e}")
+            logger.error(f"Ошибка при получении графиков: {e}")
             return []
 
     # =========================================================================
@@ -742,6 +772,29 @@ class IikoService:
             api_login=api_login,
             organization_id=org_id
         )
+
+    async def get_order_by_id(
+        self,
+        order_id: str,
+        organization_id: str,
+        api_login: Optional[str] = None
+    ) -> Optional[Dict[str, Any]]:
+        """Получить детальную информацию о заказе по его ID"""
+        org_id = organization_id or self.organization_id
+        payload = {
+            "organizationIds": [org_id],
+            "orderIds": [order_id]
+        }
+        # В iiko Cloud API v1 эндпоинт для получения заказов по ID: /api/1/deliveries/by_id
+        res = await self._request(
+            "POST", "/api/1/deliveries/by_id",
+            payload,
+            api_login=api_login,
+            organization_id=org_id
+        )
+        if res and res.get("orders"):
+            return res["orders"][0]
+        return None
 
     # =========================================================================
     # Вебхуки
@@ -831,6 +884,7 @@ class IikoService:
                 raise e
 
     async def auto_register_webhook(self,
+        session: Optional[Session] = None,
         base_url: Optional[str] = None,
         api_login: Optional[str] = None,
         organization_id: Optional[str] = None,
@@ -841,6 +895,7 @@ class IikoService:
         1. Генерация безопасного токена.
         2. Определение URL (из параметров, запроса или настроек).
         3. Регистрация в iiko.
+        4. Сохранение в БД (если передан session).
         """
         public_url = settings.APP_PUBLIC_URL
         if public_url and "your-public-url.ngrok-free.app" in public_url:
@@ -857,7 +912,7 @@ class IikoService:
             url = url.split("/api/")[0]
             
         # Убеждаемся, что URL заканчивается на правильный эндпоинт
-        endpoint = "/api/v1/orders/webhook/iiko"
+        endpoint = "/api/v1/webhooks/iiko"
         if not url.endswith(endpoint):
             url = url.rstrip("/") + endpoint
         
@@ -879,12 +934,122 @@ class IikoService:
             else:
                 raise e
         
+        # Сохранение в БД
+        if session:
+            try:
+                db_settings = session.exec(select(IikoSettings)).first()
+                if db_settings:
+                    db_settings.webhook_url = url
+                    db_settings.webhook_auth_token = auth_token
+                    session.add(db_settings)
+                    session.commit()
+                    print(f"[iiko_service] Webhook settings saved to DB: {url}")
+            except Exception as e:
+                print(f"[iiko_service] Failed to save webhook to DB: {e}")
+        
         return {
             "success": True,
             "webhook_url": url,
             "auth_token": auth_token,
             "iiko_response": result
         }
+
+    # =========================================================================
+    # iiko Card (Loyalty)
+    # =========================================================================
+
+    async def get_customer_info(
+        self,
+        phone: str,
+        api_login: Optional[str] = None,
+        organization_id: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """Получение информации о клиенте по номеру телефона (iiko Card)"""
+        org_id = organization_id or self.organization_id
+        try:
+            return await self._request(
+                "POST", "/api/1/loyalty/iiko/customer/info", 
+                {
+                    "organizationId": org_id,
+                    "type": "phone",
+                    "phone": phone
+                },
+                api_login=api_login,
+                organization_id=org_id
+            )
+        except Exception as e:
+            logger.error(f"Error getting customer info from iiko Card: {e}")
+            return {"found": False}
+
+    async def get_customer_balance(
+        self,
+        customer_id: str,
+        api_login: Optional[str] = None,
+        organization_id: Optional[str] = None
+    ) -> float:
+        """Получение баланса баллов клиента"""
+        # В v1 информация о балансе обычно возвращается в get_customer_info в walletBalances
+        # Но если нужно отдельное получение, iiko Card API имеет свои особенности
+        info = await self.get_customer_info("", api_login=api_login, organization_id=organization_id)
+        # Реализация зависит от конкретной версии iiko Card
+        return 0.0
+
+    async def add_customer_balance(
+        self,
+        customer_id: str,
+        wallet_id: str,
+        amount: float,
+        api_login: Optional[str] = None,
+        organization_id: Optional[str] = None,
+        comment: str = "Начисление за активность"
+    ) -> bool:
+        """Начисление баллов на кошелек клиента"""
+        org_id = organization_id or self.organization_id
+        try:
+            await self._request(
+                "POST", "/api/1/loyalty/iiko/customer/wallet/topup", 
+                {
+                    "organizationId": org_id,
+                    "customerId": customer_id,
+                    "walletId": wallet_id,
+                    "sum": amount,
+                    "comment": comment
+                },
+                api_login=api_login,
+                organization_id=org_id
+            )
+            return True
+        except Exception as e:
+            logger.error(f"Error adding customer balance: {e}")
+            return False
+
+    # =========================================================================
+    # iiko Resto (Office API) - Расширенные данные
+    # =========================================================================
+
+    async def get_order_details_resto(
+        self,
+        order_id: str,
+        resto_url: Optional[str] = None,
+        resto_login: Optional[str] = None,
+        resto_password: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """Получение детальной информации о заказе из iiko Resto (Office)"""
+        # Используем эндпоинт /deliveries/by_id или аналогичный в Office API
+        # В Office API часто используется XML.
+        try:
+            data = await self._resto_request(
+                "GET", f"/deliveries/by_id?id={order_id}", 
+                resto_url=resto_url,
+                resto_login=resto_login,
+                resto_password=resto_password
+            )
+            # Если пришел XML, в _resto_request он превратится в строку.
+            # Для простоты пока возвращаем как есть, парсинг будет в вызывающем коде или здесь.
+            return data if isinstance(data, dict) else {"raw": data}
+        except Exception as e:
+            logger.error(f"Error getting order details from Resto: {e}")
+            return {}
 
     # =========================================================================
     # OLAP Отчёты
@@ -897,74 +1062,190 @@ class IikoService:
         api_login: Optional[str] = None,
         organization_id: Optional[str] = None,
         include_deleted: bool = False,
+        resto_url: Optional[str] = None,
+        resto_login: Optional[str] = None,
+        resto_password: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
         """
-        Получение OLAP-отчёта по выручке из iiko Cloud API.
-        Группировка: Торговое предприятие.
-        Возвращает список строк с данными по каждому предприятию.
+        Получение OLAP-отчёта по выручке.
+        Пробует iiko Resto (Office) API, так как Cloud API часто дает 401.
         """
         org_id = organization_id or self.organization_id
-
-        # Формируем строки дат в формате API iiko: yyyy-MM-dd HH:mm:ss.fff
-        fmt = "%Y-%m-%d %H:%M:%S.000"
-
-        # Базовые фильтры — только незамененные и не-удалённые заказы
-        filters = [
-            {
-                "filterType": "OrderDeleted",
-                "field": "OrderDeleted",
-                "relation": "is",
-                "values": ["NOT_DELETED"]
+        fmt_date = "%Y-%m-%d"
+        
+        # Сначала пробуем через Resto API (Office), используя рекомендуемую структуру v2 (POST)
+        try:
+            # iiko Office (RMS) v2 (POST) ожидает ISO формат с миллисекундами
+            # Чтобы избежать ошибки 409 (пустой интервал) для одного дня, добавляем 1 день к 'to'
+            v2_from = date_from.strftime("%Y-%m-%dT00:00:00.000")
+            v2_to = (date_to + timedelta(days=1)).strftime("%Y-%m-%dT00:00:00.000")
+            
+            # Старый формат для v1 (Fallback)
+            v1_from = date_from.strftime("%d.%m.%Y")
+            v1_to = date_to.strftime("%d.%m.%Y")
+            
+            payload = {
+                "reportType": "SALES",
+                "groupByRowFields": ["Department", "OpenDate.Typed"],
+                "aggregateFields": [
+                    "DishDiscountSumInt", 
+                    "DiscountSum", 
+                    "GuestNum", 
+                    "DishAmountInt",
+                    "ProductCostBase.ProductCost",
+                    "ProductCostBase.MarkUp",
+                    "ProductCostBase.Profit",
+                    "ProductCostBase.Percent"
+                ],
+                "filters": {
+                    "OpenDate.Typed": {
+                        "filterType": "DateRange",
+                        "periodType": "CUSTOM",
+                        "from": v2_from,
+                        "to": v2_to,
+                        "includeLow": True,
+                        "includeHigh": False
+                    }
+                }
             }
-        ]
-        if include_deleted:
-            filters = []  # Если нужны все — убираем фильтры
+            
+            if not include_deleted:
+                payload["filters"]["OrderDeleted"] = {
+                    "filterType": "IncludeValues",
+                    "values": ["NOT_DELETED"]
+                }
 
-        payload = {
+            # Пытаемся вызвать v2 эндпоинт. 
+            try:
+                response = await self._resto_request(
+                    "POST", "/v2/reports/olap",
+                    json_data=payload,
+                    resto_url=resto_url,
+                    resto_login=resto_login,
+                    resto_password=resto_password
+                )
+            except httpx.HTTPStatusError as e:
+                # Если 404, значит v2 не поддерживается, пробуем v1 (GET)
+                if e.response.status_code == 404:
+                    logger.info("Resto API v2 not found, falling back to v1 (GET)")
+                    # В v1 (GET) агрегаты могут называться иначе, пробуем стандартные
+                    params = [
+                        ("key", "TOKEN"), # Заглушка, подставится в _resto_request
+                        ("reportType", "Sales"),
+                        ("from", v1_from),
+                        ("to", v1_to),
+                        ("groupRow", "OpenDate.Typed"),
+                        ("groupRow", "Department"),
+                        ("agg", "OrderSum"),
+                        ("agg", "DiscountSum"),
+                        ("agg", "GuestNum"),
+                    ]
+                    if not include_deleted:
+                        params.append(("filter", "OrderDeleted:is:NOT_DELETED"))
+                        
+                    response = await self._resto_request(
+                        "GET", "/reports/olap",
+                        params=params,
+                        resto_url=resto_url,
+                        resto_login=resto_login,
+                        resto_password=resto_password
+                    )
+                else:
+                    raise e
+            
+            # Парсинг ответа v2/v1
+            data_rows = []
+            if isinstance(response, dict):
+                if "data" in response:
+                    rows = response.get("data", [])
+                    # Проверяем формат данных (v2 это уже dict, v1 это list/array)
+                    if rows and isinstance(rows[0], dict):
+                        data_rows = rows
+                    else:
+                        cols = response.get("columnNames", [])
+                        if cols and rows:
+                            data_rows = [dict(zip(cols, r)) for r in rows]
+                else:
+                    # Некоторые версии RMS возвращают JSON-объект с полями сразу
+                    data_rows = [response] if "revenue" in str(response).lower() else []
+            elif isinstance(response, list):
+                data_rows = response
+
+            if data_rows:
+                result = []
+                for row_dict in data_rows:
+                    if not isinstance(row_dict, dict): continue
+                    
+                    # Пробуем разные варианты имен полей (v2 vs v1 vs aliases)
+                    rev = self._safe_float(row_dict.get("DishDiscountSumInt", 
+                                          row_dict.get("OrderSum", 
+                                          row_dict.get("fullSum", 0))))
+                    
+                    disc = self._safe_float(row_dict.get("DiscountSum", 
+                                           row_dict.get("DishDiscountSumInt", 0)))
+                    
+                    guests = self._safe_int(row_dict.get("GuestNum", 0))
+                    amount = self._safe_float(row_dict.get("DishAmountInt", 0))
+                    
+                    # Дата
+                    b_date = row_dict.get("OpenDate.Typed", row_dict.get("BusinessDate", ""))
+                    if b_date and "T" in str(b_date):
+                        b_date = str(b_date).split("T")[0]
+                    
+                    result.append({
+                        "organization_id": org_id,
+                        "organization_name": row_dict.get("Department", ""),
+                        "business_date": b_date,
+                        "average_check": rev / max(1, guests),
+                        "markup": self._safe_float(row_dict.get("ProductCostBase.Profit", 0.0)),
+                        "markup_percent": self._safe_float(row_dict.get("ProductCostBase.MarkUp", 0.0)),
+                        "cost_price": self._safe_float(row_dict.get("ProductCostBase.ProductCost", 0.0)),
+                        "cost_price_percent": self._safe_float(row_dict.get("ProductCostBase.Percent", 0.0)),
+                        "discount_sum": disc,
+                        "revenue": rev,
+                        "orders_count": int(amount) if amount > 0 else guests, # Используем количество блюд или гостей
+                    })
+                return result
+
+            # Если вернулся XML
+            if isinstance(response, str) and "<" in response:
+                logger.info("Получен XML от iiko Office. Парсинг не реализован, переходим к Cloud API.")
+                raise ValueError("XML response from Resto not supported yet")
+
+        except Exception as resto_err:
+            logger.warning(f"Resto OLAP failed: {resto_err}. Response sample: {str(response)[:200] if 'response' in locals() else 'None'}. Trying Cloud API fallback.")
+
+        # Fallback to Cloud API (с фиксом параметров)
+        fmt_cloud = "%Y-%m-%d %H:%M:%S.000"
+        filters = []
+        if not include_deleted:
+            filters.append({"filterType": "OrderDeleted", "field": "OrderDeleted", "relation": "is", "values": ["NOT_DELETED"]})
+
+        payload_cloud = {
+            "reportType": "Sales",
             "organizationIds": [org_id],
-            "groupByRowFields": [
-                "BusinessDate",
-                "Department"
-            ],
+            "groupByRowFields": ["BusinessDate", "Department"],
             "aggregateFields": [
-                "OrderSum",
-                "DiscountSum",
-                "GuestNum",
-                "DishDiscountSumInt",
-                "costPrice",
-                "costPricePercent",
-                "profitability",
-                "profitabilityPercent",
+                "OrderSum", "DiscountSum", "GuestNum", "DishDiscountSumInt",
+                "costPrice", "costPricePercent", "profitability", "profitabilityPercent",
             ],
             "filters": filters,
             "reportTimeRangeSettings": {
-                "dateFrom": date_from.strftime(fmt),
-                "dateTo": date_to.strftime(fmt)
+                "dateFrom": date_from.strftime(fmt_cloud),
+                "dateTo": date_to.strftime(fmt_cloud)
             }
         }
 
         try:
             response = await self._request(
-                "POST",
-                "/api/1/reports/olap",
-                payload,
-                api_login=api_login,
-                organization_id=org_id
+                "POST", "/api/1/reports/olap",
+                payload_cloud, api_login=api_login, organization_id=org_id
             )
-
-            # Ответ содержит correlationId и data (список строк)
             rows = response.get("data", [])
             columns = response.get("columnNames", [])
-
             result = []
             for row in rows:
-                # Строки могут быть в виде списка значений, сопоставим с именами колонок
-                if isinstance(row, list):
-                    row_dict = dict(zip(columns, row))
-                else:
-                    row_dict = row
-
-                # Преобразуем в единый формат
+                row_dict = dict(zip(columns, row)) if isinstance(row, list) else row
                 result.append({
                     "organization_id": org_id,
                     "organization_name": row_dict.get("Department", row_dict.get("department", "")),
@@ -979,10 +1260,86 @@ class IikoService:
                     "orders_count": self._safe_int(row_dict.get("GuestNum", 0)),
                 })
             return result
-
         except Exception as e:
-            logger.error(f"iiko OLAP report error: {e}")
+            logger.error(f"Ошибка OLAP-отчёта iiko (Cloud): {e}")
             raise
+
+    async def get_daily_revenue_olap(
+        self,
+        date_from: datetime,
+        date_to: datetime,
+        organization_id: Optional[str] = None,
+        api_login: Optional[str] = None
+    ) -> Dict[str, Dict[str, float]]:
+        """
+        Получение ежедневной выручки и скидок через OLAP для расчета чистой прибыли.
+        Возвращает словарь {дата: {"revenue": float, "discounts": float}}
+        """
+        fmt = "%Y-%m-%d"
+        org_id = organization_id or self.organization_id
+        
+        payload = {
+            "reportType": "SALES",
+            "groupByFields": ["OpenDate.Typed"],
+            "aggregateFields": ["OrderSum", "DiscountSum"],
+            "filters": {
+                "OpenDate.Typed": {
+                    "filterType": "Range",
+                    "from": date_from.strftime(fmt),
+                    "to": date_to.strftime(fmt)
+                },
+                "OrderType": {
+                    "filterType": "IncludeValues",
+                    "values": ["Delivery"] # Только доставка или все? Пользователь просил общую выручку.
+                }
+            }
+        }
+        
+        # Глобальная выручка (все типы заказов)
+        if "OrderType" in payload["filters"]:
+            del payload["filters"]["OrderType"]
+
+        try:
+            logger.info(f"Запрос OLAP-выручки за период {date_from.strftime(fmt)} - {date_to.strftime(fmt)}")
+            response = await self._request(
+                "POST", "/api/1/reports/olap",
+                payload, api_login=api_login, organization_id=org_id
+            )
+            
+            rows = response.get("data", [])
+            columns = response.get("columnNames", [])
+            logger.info(f"OLAP response: {len(rows)} строк, колонки: {columns}")
+            
+            result = {}
+            for row in rows:
+                if isinstance(row, list):
+                    rowData = dict(zip(columns, row))
+                else:
+                    rowData = row
+                
+                # Дата в OLAP может прийти как "2024-04-01T00:00:00.000" или просто "2024-04-01"
+                raw_date = rowData.get("OpenDate.Typed", "")
+                date_str = str(raw_date).split("T")[0] if raw_date else ""
+                
+                if date_str:
+                    # iiko может возвращать суммы как строки или числа
+                    try:
+                        rev = float(rowData.get("OrderSum", 0))
+                        disc = float(rowData.get("DiscountSum", 0))
+                        
+                        if date_str not in result:
+                            result[date_str] = {"revenue": 0.0, "discounts": 0.0}
+                        
+                        result[date_str]["revenue"] += round(rev, 2)
+                        result[date_str]["discounts"] += round(disc, 2)
+                    except (ValueError, TypeError) as e:
+                        logger.warning(f"Ошибка парсинга чисел в строке OLAP {date_str}: {e}")
+
+            logger.info(f"Итоговый словарь выручки: {list(result.keys())}")
+            return result
+        except Exception as e:
+            logger.error(f"Ошибка при получении выручки из OLAP: {e}")
+            return {}
 
     # =========================================================================
     # iiko Resto (Office API) - Прямое подключение
@@ -992,20 +1349,28 @@ class IikoService:
         self,
         method: str,
         endpoint: str,
-        resto_url: str,
-        resto_login: str,
-        resto_password: str,
+        resto_url: Optional[str] = None,
+        resto_login: Optional[str] = None,
+        resto_password: Optional[str] = None,
         params: Optional[Dict] = None,
+        json_data: Optional[Dict] = None,
         timeout: float = 30.0
     ) -> Any:
         """Метод для запросов к iiko Resto (Office) API с SHA-1 авторизацией"""
         import hashlib
         
+        url = resto_url or settings.IIKO_RESTO_URL
+        login = resto_login or settings.IIKO_RESTO_LOGIN
+        password = resto_password or settings.IIKO_RESTO_PASSWORD
+
+        if not url or not login:
+            raise ValueError("Данные iiko Resto (URL/Login) не настроены.")
+
         # Calculate SHA-1 hash of the password
-        password_sha1 = hashlib.sha1(resto_password.encode()).hexdigest()
+        password_sha1 = hashlib.sha1(password.encode()).hexdigest()
         
         # Normalize URL
-        base_url = resto_url.rstrip('/')
+        base_url = url.rstrip('/')
         if not base_url.endswith('/api'):
             if base_url.endswith('/resto'):
                 base_url = f"{base_url}/api"
@@ -1015,27 +1380,36 @@ class IikoService:
         # 1. Получаем токен
         async with httpx.AsyncClient(verify=False, timeout=timeout) as client:
             auth_url = f"{base_url}/auth"
-            auth_params = {"login": resto_login, "pass": password_sha1}
+            auth_params = {"login": login, "pass": password_sha1}
             
             auth_response = await client.get(auth_url, params=auth_params)
             if auth_response.status_code != 200:
-                # Попытка без хеширования (для старых версий или если пароль уже хеш)
-                auth_response = await client.get(auth_url, params={"login": resto_login, "pass": resto_password})
+                auth_response = await client.get(auth_url, params={"login": login, "pass": password})
                 if auth_response.status_code != 200:
-                    logger.error(f"Resto auth failed: {auth_response.status_code} | {auth_response.text}")
-                    raise HTTPException(status_code=401, detail=f"Resto auth failed: {auth_response.text}")
+                    logger.error(f"Ошибка авторизации Resto: {auth_response.status_code} | {auth_response.text}")
+                    raise HTTPException(status_code=401, detail=f"Ошибка авторизации Resto: {auth_response.text}")
             
             token = auth_response.text.strip().replace('"', '')
             
             # 2. Выполняем основной запрос
             request_url = f"{base_url}{endpoint}"
-            final_params = params or {}
-            final_params["key"] = token
             
-            response = await client.request(method, request_url, params=final_params)
-            response.raise_for_status()
+            # Поддержка как словаря, так и списка кортежей для параметров
+            if params is None:
+                final_params = {"key": token}
+            elif isinstance(params, list):
+                final_params = params.copy()
+                final_params.append(("key", token))
+            else:
+                final_params = params.copy()
+                final_params["key"] = token
             
-            # Пробуем распарсить JSON, если не выходит — возвращаем текст/XML
+            response = await client.request(method, request_url, params=final_params, json=json_data)
+            
+            if response.status_code >= 400:
+                logger.error(f"iiko Resto error {response.status_code}: {response.text}")
+                response.raise_for_status()
+
             try:
                 return response.json()
             except Exception:
@@ -1043,44 +1417,80 @@ class IikoService:
 
     async def get_resto_employees(
         self,
-        resto_url: str,
-        resto_login: str,
-        resto_password: str
+        resto_url: Optional[str] = None,
+        resto_login: Optional[str] = None,
+        resto_password: Optional[str] = None
     ) -> List[Dict[str, Any]]:
         """Получение детального списка сотрудников из iiko Resto"""
-        # iiko Resto возвращает XML по умолчанию, запрашиваем JSON если возможно или парсим XML
-        # Большинство современных iiko поддерживают JSON через заголовок Accept или расширение .json
+        # iiko Resto возвращает XML по умолчанию
         data = await self._resto_request(
             "GET", "/employees", 
-            resto_url, resto_login, resto_password
+            resto_url=resto_url or settings.IIKO_RESTO_URL,
+            resto_login=resto_login or settings.IIKO_RESTO_LOGIN,
+            resto_password=resto_password or settings.IIKO_RESTO_PASSWORD
         )
         
         # Если пришел XML (строка), нужно распарсить. 
         if isinstance(data, str):
             import xml.etree.ElementTree as ET
             root = ET.fromstring(data)
+            
             employees = []
             for emp in root.findall('employee'):
+                # Пользователь просил все данные о должностях и ролях
+                # В iiko RESTO XML: mainRoleCode - основная роль, roleCodes - список кодов через запятую
                 employees.append({
                     "id": emp.findtext('id'),
-                    "firstName": emp.findtext('firstName'),
-                    "lastName": emp.findtext('lastName'),
-                    "phone": emp.findtext('phone'),
+                    "firstName": emp.findtext('firstName') or emp.findtext('name'),
+                    "lastName": emp.findtext('lastName') or "",
+                    "code": emp.findtext('code'), # Внутренний код
+                    "org_id": emp.findtext('preferredDepartmentCode') or (emp.find('mainRole').findtext('organizationId') if emp.find('mainRole') is not None else None),
+                    "phone": emp.findtext('phone') or emp.findtext('cellPhone'),
                     "email": emp.findtext('email'),
-                    "role": emp.findtext('mainRole/name'),
+                    "role": self._extract_role(emp),
+                    "role_codes": emp.findtext('roleCodes'), # Все роли
+                    "main_role_code": emp.findtext('mainRoleCode'), # Основная роль
                     "cardNumber": emp.findtext('cardNumber'),
                     "inn": emp.findtext('inn'),
                     "snils": emp.findtext('snils'),
-                    "passportSeries": emp.findtext('passportSeries'),
-                    "passportNumber": emp.findtext('passportNumber'),
-                    "medicalCardNumber": emp.findtext('medicalCardNumber'),
-                    "medicalCardExpired": emp.findtext('medicalCardExpired'),
                     "birthday": emp.findtext('birthday'),
                     "address": emp.findtext('address'),
                     "salary": self._safe_float(emp.findtext('salary')),
+                    "deleted": emp.findtext('deleted') == 'true' or emp.findtext('fireDate') is not None
                 })
             return employees
         return data if isinstance(data, list) else []
+
+    async def get_resto_roles(
+        self,
+        resto_url: Optional[str] = None,
+        resto_login: Optional[str] = None,
+        resto_password: Optional[str] = None
+    ) -> List[Dict[str, Any]]:
+        """Получение списка ролей (должностей) из iiko Resto"""
+        try:
+            data = await self._resto_request(
+                "GET", "/employees/roles", 
+                resto_url=resto_url,
+                resto_login=resto_login,
+                resto_password=resto_password
+            )
+            
+            if isinstance(data, str):
+                import xml.etree.ElementTree as ET
+                root = ET.fromstring(data)
+                roles = []
+                for role in root.findall('role'):
+                    roles.append({
+                        "id": role.findtext('id'),
+                        "code": role.findtext('code'),
+                        "name": role.findtext('name')
+                    })
+                return roles
+            return data if isinstance(data, list) else []
+        except Exception as e:
+            logger.error(f"Error fetching resto roles: {e}")
+            return []
 
     async def get_resto_attendance(
         self,
@@ -1104,15 +1514,90 @@ class IikoService:
         if isinstance(data, str):
             import xml.etree.ElementTree as ET
             root = ET.fromstring(data)
+            
             records = []
             for rec in root.findall('attendance'):
+                # Пробуем найти ID как в теге, так и в атрибуте
+                rec_id = rec.findtext('id') or rec.get('id')
+                if not rec_id: continue
+                
                 records.append({
-                    "employeeId": rec.findtext('employee/id'),
-                    "dateOpen": rec.findtext('dateOpen'),
-                    "dateClose": rec.findtext('dateClose'),
+                    "id": rec_id,
+                    "employeeId": rec.find('employee').findtext('id') if rec.find('employee') is not None else rec.findtext('employeeId'),
+                    "dateOpen": rec.findtext('dateFrom'),
+                    "dateClose": rec.findtext('dateTo'),
                 })
             return records
         return data if isinstance(data, list) else []
+
+    async def get_resto_delivery_zones(
+        self,
+        resto_url: str,
+        resto_login: str,
+        resto_password: str
+    ) -> List[Dict[str, Any]]:
+        """Получение данных о зонах доставки из iiko Resto (Office)"""
+        # Эндпоинт в Office API: /delivery/zones (версия 1) или /delivery/zones.json (если поддерживается)
+        try:
+            logger.info(f"Запрос зон доставки из iiko Resto: {resto_url}/resto/api/delivery/zones")
+            data = await self._resto_request(
+                "GET", "/delivery/zones", 
+                resto_url, resto_login, resto_password
+            )
+            
+            if isinstance(data, str):
+                import xml.etree.ElementTree as ET
+                root = ET.fromstring(data)
+                
+                zones = []
+                for z in root.findall('deliveryZone'):
+                    zone_id = z.findtext('id')
+                    if not zone_id: continue
+                    
+                    zones.append({
+                        "id": zone_id,
+                        "name": z.findtext('name'),
+                        "description": z.findtext('description'),
+                        "active": z.findtext('active') == 'true',
+                        "addresses": [a.text for a in z.findall('.//address')],
+                        "raw_xml": ET.tostring(z, encoding='unicode')
+                    })
+                return zones
+            return data if isinstance(data, list) else []
+        except Exception as e:
+            logger.error(f"Error fetching delivery zones from Resto: {e}")
+            return []
+
+    def _extract_role(self, emp) -> str:
+        """Безопасное извлечение названия роли из разных структур XML iiko"""
+        # 1. mainRoleCode (фактически найден в логах)
+        role_code = emp.findtext('mainRoleCode')
+        if role_code: return role_code
+
+        # 2. roleCodes (список тегов)
+        role_codes = emp.findall('roleCodes')
+        if role_codes:
+            for rc in role_codes:
+                if rc.text and rc.text.lower() != 'apiuser':
+                    return rc.text
+
+        # 3. mainRole/name
+        role_el = emp.find('mainRole')
+        if role_el is not None:
+            name = role_el.findtext('name')
+            if name: return name
+            
+        # 4. role (прямой тег)
+        role = emp.findtext('role')
+        if role: return role
+                
+        return "Staff"
+
+    def _safe_float(self, val: Any) -> float:
+        try:
+            return float(val) if val is not None else 0.0
+        except (ValueError, TypeError):
+            return 0.0
 
     # =========================================================================
     # iiko Transport (Cloud API) - Дополнительная статистика

@@ -1,3 +1,5 @@
+from typing import Optional, List
+from datetime import datetime
 from sqlalchemy import Column, JSON
 from sqlmodel import Field, SQLModel, Relationship
 

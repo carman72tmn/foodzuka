@@ -44,12 +44,22 @@ async def main():
             token = bot_settings["token"]
             try:
                 validate_token(token)
-                logger.info("✅ Токен валиден, инициализация бота...")
+                logger.info("✅ Токен получен из БД и валиден.")
                 break
             except Exception:
-                logger.warning("⚠️ Токен в БД невалиден. Проверьте настройки в админ-панели.")
-        else:
-            logger.warning("⏳ Токен не найден в БД или бэкенд недоступен. Ожидание...")
+                logger.warning("⚠️ Токен в БД невалиден.")
+        
+        # Fallback to .env token
+        if settings.BOT_TOKEN:
+            token = settings.BOT_TOKEN
+            try:
+                validate_token(token)
+                logger.info("✅ Использование токена из .env (Fallback)")
+                break
+            except Exception:
+                logger.warning("⚠️ Токен в .env также невалиден.")
+
+        logger.warning("⏳ Токен не найден. Ожидание...")
         
         await asyncio.sleep(10)  # Проверяем каждые 10 секунд
 

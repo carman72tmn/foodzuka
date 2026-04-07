@@ -94,20 +94,21 @@ async def show_orders(message: Message):
 
         orders_text = "📝 Ваши заказы:\n\n"
         for order in orders[:5]:  # Показываем последние 5
-            status_emoji = {
-                "new": "🆕",
-                "confirmed": "✅",
-                "cooking": "👨‍🍳",
-                "ready": "🍕",
-                "delivering": "🚗",
-                "delivered": "✅",
-                "cancelled": "❌"
-            }.get(order["status"], "❓")
+            status_text = {
+                "new": "Новый",
+                "confirmed": "Посмотрено",
+                "preparing": "Готовится",
+                "cooking": "Готовится",
+                "ready": "Готов",
+                "delivering": "В пути",
+                "delivered": "Доставлен",
+                "cancelled": "Отменен"
+            }.get(order["status"], order["status"])
 
             orders_text += (
                 f"{status_emoji} Заказ #{order['id']}\n"
                 f"Сумма: {float(order['total_amount']):.0f}₽\n"
-                f"Статус: {order['status']}\n"
+                f"Статус: {status_text}\n"
                 f"Адрес: {order['delivery_address']}\n\n"
             )
 

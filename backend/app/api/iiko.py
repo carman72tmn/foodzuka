@@ -4,7 +4,7 @@ API эндпоинты для синхронизации с iiko и управл
 from typing import List, Optional
 from datetime import datetime
 import httpx
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request, BackgroundTasks
 from sqlmodel import Session, select
 from app.core.database import get_session
 from app.models.iiko_settings import IikoSettings
@@ -20,6 +20,8 @@ from app.schemas import (
 from app.models.iiko_webhook_event import IikoWebhookEvent
 from app.services.iiko_service import iiko_service
 from app.services.iiko_sync_service import iiko_sync_service
+from app.models.payment_type import PaymentType
+from app.models.company import DeliveryZone
 from app.core.config import settings as global_settings
 
 router = APIRouter(prefix="/iiko", tags=["iiko Integration"])
@@ -41,6 +43,7 @@ async def get_settings(session: Session = Depends(get_session)):
 @router.post("/settings", response_model=IikoSettingsResponse)
 async def save_settings(
     data: IikoSettingsCreate,
+    background_tasks: BackgroundTasks,
     session: Session = Depends(get_session)
 ):
     """Сохранить / обновить настройки iiko"""
@@ -52,12 +55,16 @@ async def save_settings(
         existing.updated_at = datetime.utcnow()
         session.commit()
         session.refresh(existing)
+        # Запускаем синхронизацию сотрудников в фоне сразу после обновления настроек
+        background_tasks.add_task(iiko_sync_service.sync_employees_full, session)
         return existing
     else:
         new_settings = IikoSettings(**data.model_dump())
         session.add(new_settings)
         session.commit()
         session.refresh(new_settings)
+        # Запускаем синхронизацию сотрудников в фоне сразу после сохранения
+        background_tasks.add_task(iiko_sync_service.sync_employees_full, session)
         return new_settings
 
 
@@ -139,10 +146,11 @@ async def test_resto_connection(
 
     try:
         import hashlib
+        import httpx
         # Calculate SHA-1 hash of the password
         password_sha1 = hashlib.sha1(password.encode()).hexdigest()
         
-        async with httpx.AsyncClient(verify=False) as client:
+        async with httpx.AsyncClient(verify=False, timeout=20.0) as client:
             # Attempt to login to get a token.
             # The URL usually ends with /resto/api, so we ensure it's correct
             base_url = url.rstrip('/')
@@ -206,17 +214,13 @@ async def get_terminal_groups(session: Session = Depends(get_session)):
 
 @router.get("/payment-types")
 async def get_payment_types(session: Session = Depends(get_session)):
-    """Получить типы оплаты"""
-    settings = session.exec(select(IikoSettings)).first()
-    if not settings:
-        raise HTTPException(status_code=404, detail="Settings not found")
-    try:
-        return await iiko_service.get_payment_types(
-            api_login=settings.api_login,
-            organization_id=settings.organization_id
-        )
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    """Получить типы оплаты из локальной БД"""
+    types = session.exec(select(PaymentType).where(PaymentType.is_active == True)).all()
+    if not types:
+        # Если в базе пусто, пробуем подтянуть из настроек для совместимости (старый метод)
+        # но лучше просто вернуть пустой список и заставить пользователя нажать "Синхронизировать"
+        return []
+    return [{"id": t.iiko_id, "name": t.name, "paymentTypeKind": t.kind} for t in types]
 
 
 @router.get("/order-types")
@@ -297,6 +301,33 @@ async def sync_stop_lists(session: Session = Depends(get_session)):
         return IikoSyncResponse(**result)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Stop-list sync error: {str(e)}")
+
+
+@router.post("/sync-payment-types")
+async def sync_payment_types(session: Session = Depends(get_session)):
+    """Синхронизация типов оплаты из iiko в локальную БД"""
+    try:
+        result = await iiko_sync_service.sync_payment_types(session)
+        return result
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Payment types sync error: {str(e)}")
+
+
+@router.post("/sync-delivery-zones")
+async def sync_delivery_zones(session: Session = Depends(get_session)):
+    """Синхронизация зон доставки из iiko в локальную БД"""
+    try:
+        result = await iiko_sync_service.sync_delivery_restrictions(session)
+        return result
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Delivery zones sync error: {str(e)}")
+
+
+@router.get("/delivery-zones")
+async def get_delivery_zones(session: Session = Depends(get_session)):
+    """Получить список зон доставки из локальной БД"""
+    zones = session.exec(select(DeliveryZone)).all()
+    return zones
 
 
 @router.post("/sync-vk-loyalty", response_model=IikoSyncResponse)

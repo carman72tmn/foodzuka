@@ -16,26 +16,30 @@ const selectedOrder = ref(null)
 
 const API_BASE = "/api/v1/orders"
 
+const search = ref("")
+
 const headers = [
   { title: "ID", key: "id", sortable: true, width: 70 },
-  { title: "iiko ID", key: "iiko_order_id", sortable: false },
+  { title: "iiko #", key: "external_number", sortable: true, width: 90 },
+  { title: "Оплата", key: "is_paid", sortable: true, width: 110 },
+  { title: "Город", key: "city", sortable: true, width: 100 },
   { title: "Клиент", key: "customer_name", sortable: true },
   { title: "Телефон", key: "customer_phone", sortable: false },
-  { title: "Адрес", key: "delivery_address", sortable: false },
-  { title: "Сумма", key: "total_amount", sortable: true },
-  { title: "Статус", key: "status", sortable: true },
-  { title: "Создан", key: "created_at", sortable: true },
+  { title: "Сумма", key: "total_amount", sortable: true, width: 100 },
+  { title: "Товары", key: "order_items_count", sortable: false, width: 90 },
+  { title: "Статус", key: "status", sortable: true, width: 130 },
+  { title: "Создан", key: "created_at", sortable: true, width: 140 },
 ]
 
 const statusColors = {
-  new: "info",
-  confirmed: "primary",
-  preparing: "warning",
-  cooking: "warning",
-  ready: "success",
-  delivering: "info",
-  delivered: "success",
-  cancelled: "error"
+  new: "blue-lighten-1",
+  confirmed: "indigo-darken-1",
+  preparing: "amber-darken-2",
+  cooking: "orange-darken-2",
+  ready: "light-green-darken-2",
+  delivering: "cyan-darken-1",
+  delivered: "green-darken-2",
+  cancelled: "red-darken-2"
 }
 
 const statusNames = {
@@ -62,7 +66,12 @@ const loadOrders = async (silent = false) => {
   try {
     const res = await fetch(`${API_BASE}/`)
     if (res.ok) {
-      orders.value = await res.json()
+      const data = await res.json()
+      // Добавляем вычисляемые поля для таблицы
+      orders.value = data.map(o => ({
+        ...o,
+        order_items_count: o.order_items_details?.length || o.items?.length || 0
+      }))
     }
   } catch (e) {
     if (!silent) showMessage("Ошибка загрузки заказов", "error")
@@ -146,15 +155,26 @@ onUnmounted(() => {
   <VRow>
     <VCol cols="12">
       <VCard>
-        <VCardTitle class="d-flex align-center">
+        <VCardTitle class="d-flex align-center flex-wrap ga-2 py-4">
           <VIcon icon="bx-cart" class="me-2" />
           Управление заказами
           <VSpacer />
-          <VBtn color="warning" @click="syncRecentOrders" class="me-2" :loading="syncing" variant="tonal" size="small">
-            <VIcon icon="bx-cloud-download" /> Обновить (23ч) из iiko
+          <VTextField
+            v-model="search"
+            prepend-inner-icon="bx-search"
+            label="Поиск по заказам..."
+            single-line
+            hide-details
+            density="compact"
+            variant="outlined"
+            style="max-width: 300px"
+            class="me-4"
+          />
+          <VBtn color="warning" @click="syncRecentOrders" :loading="syncing" variant="tonal" size="small">
+            <VIcon icon="bx-cloud-download" class="me-1" /> Синхронизировать iiko
           </VBtn>
           <VBtn color="primary" @click="loadOrders(false)" :loading="loading" variant="tonal" size="small">
-            <VIcon icon="bx-refresh" /> Обновить
+            <VIcon icon="bx-refresh" class="me-1" /> Обновить
           </VBtn>
         </VCardTitle>
         <VCardText>
@@ -162,6 +182,7 @@ onUnmounted(() => {
             :headers="headers"
             :items="orders"
             :loading="loading"
+            :search="search"
             :items-per-page="15"
             item-value="id"
             class="elevation-1"
@@ -170,13 +191,31 @@ onUnmounted(() => {
             @click:row="(_, { item }) => openOrderDetails(item)"
             style="cursor: pointer"
           >
-            <template #item.iiko_order_id="{ item }">
-              <span v-if="item.iiko_order_id" class="text-caption text-medium-emphasis">
-                {{ item.iiko_order_id.substring(0, 8) }}...
-              </span>
-              <VChip v-else size="x-small" color="grey" variant="tonal">В iiko не передан</VChip>
+            <template #item.is_paid="{ item }">
+              <VChip
+                :color="item.is_paid ? 'success' : 'error'"
+                :prepend-icon="item.is_paid ? 'bx-check-circle' : 'bx-x-circle'"
+                size="x-small"
+                variant="tonal"
+              >
+                {{ item.is_paid ? 'Оплачен' : 'Не оплачен' }}
+              </VChip>
             </template>
-            
+
+            <template #item.city="{ item }">
+              <span class="text-caption">{{ item.city || '—' }}</span>
+            </template>
+
+            <template #item.order_items_count="{ item }">
+              <VChip size="x-small" variant="outlined" color="primary">
+                {{ item.order_items_count }} поз.
+              </VChip>
+            </template>
+
+            <template #item.external_number="{ item }">
+              <span class="font-weight-bold">{{ item.external_number || '—' }}</span>
+            </template>
+
             <template #item.total_amount="{ item }">
               <strong>{{ item.total_amount }} ₽</strong>
             </template>

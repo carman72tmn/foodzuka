@@ -9,6 +9,12 @@ import asyncio
 import logging
 from app.services.iiko_sync_service import iiko_sync_service
 from app.core.database import Session, engine
+from app.api import (
+    categories, products, orders, companies, branches, iiko,
+    loyalty, promo_codes, actions, nps, customers, mailings,
+    stories, funnels, reports, employees, webhooks, vk, bot_settings
+)
+from app.services.revenue_sync import revenue_sync_service
 
 logger = logging.getLogger(__name__)
 
@@ -26,18 +32,20 @@ async def repeat_sync_employees():
     await asyncio.sleep(10) # Задержка перед первым запуском
     while True:
         try:
-            logger.info("Starting scheduled employee sync...")
+            logger.info("Запуск плановой синхронизации сотрудников...")
             with Session(engine) as session:
                 await iiko_sync_service.sync_employees_full(session, days=7)
-            logger.info("Scheduled employee sync completed successfully")
+            logger.info("Плановая синхронизация сотрудников успешно завершена")
         except Exception as e:
-            logger.error(f"Error in scheduled sync: {e}")
+            logger.error(f"Ошибка при плановой синхронизации: {e}")
         
         await asyncio.sleep(1800) # 30 минут
 
 @app.on_event("startup")
 async def startup_event():
     asyncio.create_task(repeat_sync_employees())
+    # Запуск планировщика синхронизации выручки
+    revenue_sync_service.start()
 
 # Настройка CORS для работы с фронтендом и Telegram Bot
 app.add_middleware(
@@ -45,8 +53,8 @@ app.add_middleware(
     allow_origins=[
         "http://localhost:5173", 
         "http://127.0.0.1:5173", 
-        "http://192.168.31.162:5173",
-        "http://192.168.31.162:8081",
+        "https://72roll.ru",
+        "http://72roll.ru",
         "*"
     ],  # В продакшене укажите конкретные домены
     allow_credentials=True,
@@ -80,10 +88,10 @@ app.include_router(bot_settings.router, prefix="/api/v1")
 async def root():
     """Корневой эндпоинт"""
     return {
-        "message": "FoodTech API",
-        "version": "1.0.0",
-        "docs": "/docs",
-        "status": "running"
+        "сообщение": "FoodTech API",
+        "версия": "1.0.0",
+        "документация": "/docs",
+        "статус": "работает"
     }
 
 
@@ -91,8 +99,8 @@ async def root():
 async def health_check():
     """Проверка здоровья приложения"""
     return {
-        "status": "healthy",
-        "database": "connected"
+        "статус": "здоров",
+        "база_данных": "подключено"
     }
 
 

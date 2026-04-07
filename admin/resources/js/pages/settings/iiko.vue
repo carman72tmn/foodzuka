@@ -1,18 +1,19 @@
 <script setup>
-import { ref, onMounted, computed } from "vue";
+import { ref, onMounted, computed } from "vue"
 
 // =========================================================================
 // Состояние формы
 // =========================================================================
 
 const loading = ref(false)
-const saving = ref(false);
-const testing = ref(false);
-const snackbar = ref(false);
-const snackbarColor = ref("success");
-const snackbarText = ref("");
+const saving = ref(false)
+const testing = ref(false)
+const snackbar = ref(false)
+const snackbarColor = ref("success")
+const snackbarText = ref("")
 
 // Настройки iiko
+const showPassword = ref(false)
 const settings = ref({
   api_login: "",
   organization_id: "",
@@ -34,206 +35,249 @@ const settings = ref({
   resto_url: "",
   resto_login: "",
   resto_password: "",
-});
+})
 
 // Справочники (загружаются из iiko)
-const organizations = ref([]);
-const terminalGroups = ref([]);
-const paymentTypes = ref([]);
-const externalMenus = ref([]);
-const discountTypes = ref([]);
+const organizations = ref([])
+const terminalGroups = ref([])
+const paymentTypes = ref([])
+const externalMenus = ref([])
+const discountTypes = ref([])
 
 // Статус подключения
-const connectionStatus = ref(null); // null, 'success', 'error'
-const restoConnectionStatus = ref(null);
-const testingResto = ref(false);
+const connectionStatus = ref(null) // null, 'success', 'error'
+const restoConnectionStatus = ref(null)
+const testingResto = ref(false)
 
-const activeTab = ref("general");
-const webhookLogs = ref([]);
-const loadingLogs = ref(false);
-const registeringWebhook = ref(false);
+const activeTab = ref("general")
+const webhookLogs = ref([])
+const loadingLogs = ref(false)
+const registeringWebhook = ref(false)
 
-const API_BASE = "/api/v1/iiko";
+const API_BASE = "/api/v1/iiko"
+const syncingPayments = ref(false)
+const syncingZones = ref(false)
+const deliveryZones = ref([])
 
 // =========================================================================
 // Методы
 // =========================================================================
 
 const showMessage = (text, color = "success") => {
-  snackbarText.value = text;
-  snackbarColor.value = color;
-  snackbar.value = true;
-};
+  snackbarText.value = text
+  snackbarColor.value = color
+  snackbar.value = true
+}
 
 // Загрузка текущих настроек
 const loadSettings = async () => {
-  loading.value = true;
+  loading.value = true
   try {
-    const res = await fetch(`${API_BASE}/settings`);
+    const res = await fetch(`${API_BASE}/settings`)
     if (res.ok) {
-      const data = await res.json();
+      const data = await res.json()
 
       Object.keys(settings.value).forEach((key) => {
         if (data[key] !== undefined && data[key] !== null) {
-          settings.value[key] = data[key];
+          settings.value[key] = data[key]
         }
-      });
+      })
     }
   } catch (e) {
     // Настройки ещё не созданы — это нормально
   } finally {
-    loading.value = false;
+    loading.value = false
   }
-};
+}
 
 // Сохранение настроек
 const saveSettings = async () => {
-  saving.value = true;
+  saving.value = true
   try {
     const res = await fetch(`${API_BASE}/settings`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(settings.value),
-    });
+    })
 
     if (res.ok) {
-      showMessage("Настройки успешно сохранены");
+      showMessage("Настройки успешно сохранены")
     } else {
-      const err = await res.json();
-
-      showMessage(err.detail || "Ошибка сохранения", "error");
+      const err = await res.json()
+      showMessage(err.detail || "Ошибка сохранения", "error")
     }
   } catch (e) {
-    showMessage("Ошибка подключения к серверу", "error");
+    showMessage("Ошибка подключения к серверу", "error")
   } finally {
-    saving.value = false;
+    saving.value = false
   }
-};
+}
 
 // Тест подключения
 const testConnection = async () => {
-  testing.value = true;
-  connectionStatus.value = null;
+  testing.value = true
+  connectionStatus.value = null
   try {
     const res = await fetch(`${API_BASE}/test-connection`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(settings.value),
-    });
-    const data = await res.json();
+    })
+    const data = await res.json()
     if (data.success) {
-      connectionStatus.value = "success";
-      showMessage("Подключение успешно!");
+      connectionStatus.value = "success"
+      showMessage("Подключение успешно!")
 
       // Загружаем справочники
       if (data.organizations?.length) {
         organizations.value = data.organizations.map((o) => ({
           title: o.name || o.id,
           value: o.id,
-        }));
+        }))
       }
     } else {
-      connectionStatus.value = "error";
-      showMessage(data.error || "Ошибка подключения", "error");
+      connectionStatus.value = "error"
+      showMessage(data.error || "Ошибка подключения", "error")
     }
   } catch (e) {
-    connectionStatus.value = "error";
-    showMessage("Не удалось подключиться к API iiko (port 8000)", "error");
+    connectionStatus.value = "error"
+    showMessage("Не удалось подключиться к API iiko (port 8000)", "error")
   } finally {
-    testing.value = false;
+    testing.value = false
   }
-};
+}
 
 // Тест подключения к Resto API
 const testRestoConnection = async () => {
-  testingResto.value = true;
-  restoConnectionStatus.value = null;
+  testingResto.value = true
+  restoConnectionStatus.value = null
   try {
     const res = await fetch(`${API_BASE}/test-resto-connection`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(settings.value),
-    });
-    const data = await res.json();
+    })
+    const data = await res.json()
     if (res.ok && data.success) {
-      restoConnectionStatus.value = "success";
-      showMessage(data.message || "Успешное подключение к iiko Resto API!");
+      restoConnectionStatus.value = "success"
+      showMessage(data.message || "Успешное подключение к iiko Resto API!")
     } else {
-      restoConnectionStatus.value = "error";
-      showMessage(data.error || data.detail || "Ошибка подключения", "error");
+      restoConnectionStatus.value = "error"
+      showMessage(data.error || data.detail || "Ошибка подключения", "error")
     }
   } catch (e) {
-    restoConnectionStatus.value = "error";
-    showMessage("Не удалось подключиться к API iiko Resto", "error");
+    restoConnectionStatus.value = "error"
+    showMessage("Не удалось подключиться к API iiko Resto", "error")
   } finally {
-    testingResto.value = false;
+    testingResto.value = false
   }
-};
+}
 
 // Загрузка справочников
 const loadTerminalGroups = async () => {
   try {
-    const res = await fetch(`${API_BASE}/terminal-groups`);
+    const res = await fetch(`${API_BASE}/terminal-groups`)
     if (res.ok) {
-      const data = await res.json();
-
+      const data = await res.json()
       terminalGroups.value = data.map((t) => ({
         title: t.name || t.id,
         value: t.id,
-      }));
+      }))
     }
   } catch (e) {
-    /* Справочник недоступен */
+    console.error(e)
   }
-};
+}
 
 const loadPaymentTypes = async () => {
   try {
-    const res = await fetch(`${API_BASE}/payment-types`);
+    const res = await fetch(`${API_BASE}/payment-types`)
     if (res.ok) {
-      const data = await res.json();
-
+      const data = await res.json()
       paymentTypes.value = data.map((p) => ({
         title: `${p.name} (${p.paymentTypeKind || ""})`,
         value: p.id,
-      }));
+      }))
     }
   } catch (e) {
-    /* Справочник недоступен */
+    console.error(e)
   }
-};
+}
+
+const syncPaymentTypes = async () => {
+  syncingPayments.value = true
+  try {
+    const res = await fetch(`${API_BASE}/sync-payment-types`, { method: "POST" })
+    if (res.ok) {
+      showMessage("Типы оплаты синхронизированы")
+      await loadPaymentTypes()
+    } else {
+      showMessage("Ошибка синхронизации оплат", "error")
+    }
+  } catch (e) {
+    showMessage("Ошибка соединения", "error")
+  } finally {
+    syncingPayments.value = false
+  }
+}
 
 const loadExternalMenus = async () => {
   try {
-    const res = await fetch(`${API_BASE}/external-menus`);
+    const res = await fetch(`${API_BASE}/external-menus`)
     if (res.ok) {
-      const data = await res.json();
-
+      const data = await res.json()
       externalMenus.value = data.map((m) => ({
         title: m.name || m.id,
         value: m.id,
-      }));
+      }))
     }
   } catch (e) {
-    /* Справочник недоступен */
+    console.error(e)
   }
-};
+}
 
 const loadDiscountTypes = async () => {
   try {
-    const res = await fetch(`${API_BASE}/discount-types`);
+    const res = await fetch(`${API_BASE}/discount-types`)
     if (res.ok) {
-      const data = await res.json();
-
+      const data = await res.json()
       discountTypes.value = data.map((d) => ({
         title: d.name || d.id,
         value: d.id,
-      }));
+      }))
     }
   } catch (e) {
-    /* Справочник недоступен */
+    console.error(e)
   }
-};
+}
+
+const loadDeliveryZones = async () => {
+  try {
+    const res = await fetch(`${API_BASE}/delivery-zones`)
+    if (res.ok) {
+      deliveryZones.value = await res.json()
+    }
+  } catch (e) {
+    console.error(e)
+  }
+}
+
+const syncDeliveryZones = async () => {
+  syncingZones.value = true
+  try {
+    const res = await fetch(`${API_BASE}/sync-delivery-zones`, { method: "POST" })
+    if (res.ok) {
+      showMessage("Зоны доставки синхронизированы")
+      await loadDeliveryZones()
+    } else {
+      showMessage("Ошибка синхронизации зон", "error")
+    }
+  } catch (e) {
+    showMessage("Ошибка соединения", "error")
+  } finally {
+    syncingZones.value = false
+  }
+}
 
 const loadAllReferences = async () => {
   await Promise.all([
@@ -241,141 +285,125 @@ const loadAllReferences = async () => {
     loadPaymentTypes(),
     loadExternalMenus(),
     loadDiscountTypes(),
-  ]);
-};
+    loadDeliveryZones(),
+  ])
+}
 
 // Webhooks
 const loadWebhookLogs = async () => {
-  loadingLogs.value = true;
+  loadingLogs.value = true
   try {
-    const res = await fetch(`${API_BASE}/webhooks/logs?limit=20`);
+    const res = await fetch(`${API_BASE}/webhooks/logs?limit=20`)
     if (res.ok) {
-      webhookLogs.value = await res.json();
+      webhookLogs.value = await res.json()
     }
   } finally {
-    loadingLogs.value = false;
+    loadingLogs.value = false
   }
-};
+}
 
 const registerWebhook = async () => {
-  registeringWebhook.value = true;
+  registeringWebhook.value = true
   try {
-    const url = new URL(`${API_BASE}/webhooks/register`);
-
-    url.searchParams.append("webhook_url", settings.value.webhook_url);
+    const url = new URL(`${API_BASE}/webhooks/register`, window.location.origin)
+    url.searchParams.append("webhook_url", settings.value.webhook_url)
     if (settings.value.webhook_auth_token) {
-      url.searchParams.append("auth_token", settings.value.webhook_auth_token);
+      url.searchParams.append("auth_token", settings.value.webhook_auth_token)
     }
 
-    const res = await fetch(url, { method: "POST" });
-
+    const res = await fetch(url, { method: "POST" })
     if (res.ok) {
-      showMessage("Вебхук успешно зарегистрирован");
+      showMessage("Вебхук успешно зарегистрирован")
     } else {
-      const err = await res.json();
-      showMessage(err.detail || "Ошибка регистрации", "error");
+      const err = await res.json()
+      showMessage(err.detail || "Ошибка регистрации", "error")
     }
   } catch (e) {
-    showMessage("Ошибка сети", "error");
+    showMessage("Ошибка сети", "error")
   } finally {
-    registeringWebhook.value = false;
+    registeringWebhook.value = false
   }
-};
+}
 
 const autoRegisterWebhook = async () => {
-  registeringWebhook.value = true;
+  registeringWebhook.value = true
   try {
-    const res = await fetch(`${API_BASE}/webhooks/register`, { method: "POST" });
-
+    const res = await fetch(`${API_BASE}/webhooks/register`, { method: "POST" })
     if (res.ok) {
-      const data = await res.json();
-      settings.value.webhook_url = data.webhook_url;
-      settings.value.webhook_auth_token = data.auth_token;
-      showMessage("Вебхук автоматически зарегистрирован!");
+      const data = await res.json()
+      settings.value.webhook_url = data.webhook_url
+      settings.value.webhook_auth_token = data.auth_token
+      showMessage("Вебхук автоматически зарегистрирован!")
     } else {
-      const err = await res.json();
-      showMessage(err.detail || "Ошибка авто-регистрации", "error");
+      const err = await res.json()
+      showMessage(err.detail || "Ошибка авто-регистрации", "error")
     }
   } catch (e) {
-    showMessage("Ошибка сети", "error");
+    showMessage("Ошибка сети", "error")
   } finally {
-    registeringWebhook.value = false;
+    registeringWebhook.value = false
   }
-};
+}
 
 // =========================================================================
 // Инициализация
 // =========================================================================
 
 onMounted(async () => {
-  await loadSettings();
+  await loadSettings()
   if (settings.value.api_login) {
-    loadAllReferences();
+    loadAllReferences()
   }
-});
+})
 </script>
 
 <template>
   <VRow>
     <VCol cols="12">
-      <VTabs v-model="activeTab"
-class="mb-4">
-        <VTab value="general"> Основные настройки </VTab>
-        <VTab value="webhooks"> Вебхуки </VTab>
+      <VTabs v-model="activeTab" class="mb-4">
+        <VTab value="general">Основные настройки</VTab>
+        <VTab value="payment">Оплата</VTab>
+        <VTab value="zones">Зоны доставки</VTab>
+        <VTab value="webhooks">Вебхуки</VTab>
       </VTabs>
 
-      <VWindow v-model="activeTab">
+      <VWindow v-model="activeTab" class="mt-4">
+        <!-- ==================== Вкладка Основные настройки ==================== -->
         <VWindowItem value="general">
           <VRow>
-            <!-- ==================== Подключение ==================== -->
+            <!-- Подключение API -->
             <VCol cols="12">
-              <VCard>
+              <VCard class="mb-6">
                 <VCardTitle class="d-flex align-center">
-                  <VIcon icon="mdi-connection"
-class="me-2" />
-                  Подключение к iiko Cloud API
+                  <VIcon icon="mdi-connection" class="me-2" />
+                  Подключение iiko Cloud
                   <VSpacer />
                   <VChip
-                    v-if="connectionStatus === 'success'"
-                    color="success"
-                    variant="tonal"
-                    prepend-icon="mdi-check-circle"
+                    v-if="connectionStatus"
+                    :color="connectionStatus === 'success' ? 'success' : 'error'"
+                    size="small"
                   >
-                    Подключено
-                  </VChip>
-                  <VChip
-                    v-if="connectionStatus === 'error'"
-                    color="error"
-                    variant="tonal"
-                    prepend-icon="mdi-alert-circle"
-                  >
-                    Ошибка
+                    {{ connectionStatus === 'success' ? 'Подключено' : 'Ошибка' }}
                   </VChip>
                 </VCardTitle>
                 <VCardText>
-                  <VRow>
-                    <VCol cols="12"
-md="8">
+                  <VRow align="center">
+                    <VCol cols="12" md="8">
                       <VTextField
-                        v-model.trim="settings.api_login"
-                        label="API Login (Cloud API Key)"
-                        hint="Ключ из iiko Cloud → Интеграции → API"
-                        persistent-hint
+                        v-model="settings.api_login"
+                        label="API Login (API Key)"
                         type="password"
-                        prepend-inner-icon="mdi-key"
+                        hide-details="auto"
                       />
                     </VCol>
-                    <VCol cols="12"
-md="4" class="d-flex align-center">
+                    <VCol cols="12" md="4">
                       <VBtn
                         color="primary"
-                        variant="elevated"
+                        block
                         :loading="testing"
-                        :disabled="!settings.api_login"
-                        prepend-icon="mdi-lan-check"
                         @click="testConnection"
                       >
-                        Проверить подключение
+                        Тест связи
                       </VBtn>
                     </VCol>
                   </VRow>
@@ -383,432 +411,232 @@ md="4" class="d-flex align-center">
               </VCard>
             </VCol>
 
-            <!-- ==================== Подключение Resto (Direct API) ==================== -->
-            <VCol cols="12">
-              <VCard class="mb-4">
-                <VCardTitle class="d-flex align-center">
-                  <VIcon icon="mdi-server-network" class="me-2" />
-                  Прямое подключение к iiko Resto (Office API)
-                  <VSpacer />
-                  <VChip
-                    v-if="restoConnectionStatus === 'success'"
-                    color="success"
-                    variant="tonal"
-                    prepend-icon="mdi-check-circle"
-                  >
-                    Подключено
-                  </VChip>
-                  <VChip
-                    v-if="restoConnectionStatus === 'error'"
-                    color="error"
-                    variant="tonal"
-                    prepend-icon="mdi-alert-circle"
-                  >
-                    Ошибка
-                  </VChip>
-                </VCardTitle>
+            <!-- iiko Resto API -->
+            <VCol cols="12" md="6">
+              <VCard title="iiko Resto API (Office)">
                 <VCardText>
-                  <VRow>
-                    <VCol cols="12" md="12">
-                      <VTextField
-                        v-model.trim="settings.resto_url"
-                        label="Resto API URL"
-                        hint="Прямая ссылка на сервер iiko Resto (Например: https://dovezzuka-tyumen.iiko.it/resto)"
-                        persistent-hint
-                        prepend-inner-icon="mdi-link"
-                      />
-                    </VCol>
-                    <VCol cols="12" md="4">
-                      <VTextField
-                        v-model.trim="settings.resto_login"
-                        label="Логин (Server API)"
-                        prepend-inner-icon="mdi-account"
-                      />
-                    </VCol>
-                    <VCol cols="12" md="4">
-                      <VTextField
-                        v-model.trim="settings.resto_password"
-                        label="Пароль (Server API)"
-                        type="password"
-                        prepend-inner-icon="mdi-key"
-                      />
-                    </VCol>
-                    <VCol cols="12" md="4" class="d-flex align-center">
-                      <VBtn
-                        color="primary"
-                        variant="elevated"
-                        :loading="testingResto"
-                        :disabled="!settings.resto_url || !settings.resto_login || !settings.resto_password"
-                        prepend-icon="mdi-lan-check"
-                        @click="testRestoConnection"
-                      >
-                        Проверить подключение
-                      </VBtn>
-                    </VCol>
-                  </VRow>
+                  <VTextField
+                    v-model="settings.resto_url"
+                    label="URL (https://.../resto)"
+                    class="mb-4"
+                  />
+                  <VTextField
+                    v-model="settings.resto_login"
+                    label="Login"
+                    class="mb-4"
+                  />
+                  <VTextField
+                    v-model="settings.resto_password"
+                    label="Password"
+                    type="password"
+                    class="mb-4"
+                  />
+                  <div class="d-flex align-center gap-2">
+                    <VBtn
+                      size="small"
+                      variant="outlined"
+                      :color="restoConnectionStatus === 'success' ? 'success' : (restoConnectionStatus === 'error' ? 'error' : 'primary')"
+                      :loading="testingResto"
+                      @click="testRestoConnection"
+                    >
+                      Проверить соединение
+                    </VBtn>
+                    <VIcon
+                      v-if="restoConnectionStatus === 'success'"
+                      icon="mdi-check-circle"
+                      color="success"
+                    />
+                    <VIcon
+                      v-if="restoConnectionStatus === 'error'"
+                      icon="mdi-alert-circle"
+                      color="error"
+                    />
+                  </div>
                 </VCardText>
               </VCard>
             </VCol>
 
-            <!-- ==================== Организация ==================== -->
-            <VCol cols="12"
-md="6">
-              <VCard>
-                <VCardTitle>
-                  <VIcon icon="mdi-office-building"
-class="me-2" />
-                  Организация
-                </VCardTitle>
+            <!-- Конфигурация -->
+            <VCol cols="12" md="6">
+              <VCard class="h-100">
+                <VCardTitle>Конфигурация iiko</VCardTitle>
                 <VCardText>
                   <VSelect
                     v-model="settings.organization_id"
                     :items="organizations"
                     label="Организация"
-                    hint="Выберите организацию после проверки подключения"
-                    persistent-hint
-                    clearable
+                    class="mb-4"
                   />
-                </VCardText>
-              </VCard>
-            </VCol>
-
-            <!-- ==================== Терминальная группа ==================== -->
-            <VCol cols="12"
-md="6">
-              <VCard>
-                <VCardTitle>
-                  <VIcon icon="mdi-monitor"
-class="me-2" />
-                  Терминальная группа
-                </VCardTitle>
-                <VCardText>
                   <VSelect
                     v-model="settings.terminal_group_id"
                     :items="terminalGroups"
-                    label="Терминальная группа"
-                    hint="Группа касс для приёма заказов"
-                    persistent-hint
-                    clearable
+                    label="Касса (Терм. группа)"
+                    class="mb-4"
                   />
-                </VCardText>
-              </VCard>
-            </VCol>
-
-            <!-- ==================== Внешнее меню ==================== -->
-            <VCol cols="12"
-md="6">
-              <VCard>
-                <VCardTitle>
-                  <VIcon icon="mdi-food"
-class="me-2" />
-                  Внешнее меню
-                </VCardTitle>
-                <VCardText>
                   <VSelect
                     v-model="settings.external_menu_id"
                     :items="externalMenus"
-                    label="Источник меню"
-                    hint="Настраивается в iiko Web → Внешние меню"
-                    persistent-hint
-                    clearable
+                    label="Внешнее меню"
                   />
                 </VCardText>
               </VCard>
             </VCol>
 
-            <!-- ==================== Скидки ==================== -->
-            <VCol cols="12"
-md="6">
-              <VCard>
-                <VCardTitle>
-                  <VIcon icon="mdi-percent"
-class="me-2" />
-                  Скидка
-                </VCardTitle>
+            <VCol cols="12" md="6">
+              <VCard class="h-100">
+                <VCardTitle>Дополнительно</VCardTitle>
                 <VCardText>
                   <VSelect
                     v-model="settings.discount_id"
                     :items="discountTypes"
-                    label="Универсальная скидка"
-                    hint="Скидка для передачи промокодов в iiko"
-                    persistent-hint
-                    clearable
-                  />
-                </VCardText>
-              </VCard>
-            </VCol>
-
-            <!-- ==================== Типы оплаты ==================== -->
-            <VCol cols="12">
-              <VCard>
-                <VCardTitle>
-                  <VIcon icon="mdi-credit-card"
-class="me-2" />
-                  Типы оплаты
-                </VCardTitle>
-                <VCardText>
-                  <VRow>
-                    <VCol cols="12"
-md="3">
-                      <VSelect
-                        v-model="settings.payment_type_cash"
-                        :items="paymentTypes"
-                        label="Наличные"
-                        clearable
-                      />
-                    </VCol>
-                    <VCol cols="12"
-md="3">
-                      <VSelect
-                        v-model="settings.payment_type_card"
-                        :items="paymentTypes"
-                        label="Карта"
-                        clearable
-                      />
-                    </VCol>
-                    <VCol cols="12"
-md="3">
-                      <VSelect
-                        v-model="settings.payment_type_online"
-                        :items="paymentTypes"
-                        label="Онлайн оплата"
-                        clearable
-                      />
-                    </VCol>
-                    <VCol cols="12"
-md="3">
-                      <VSelect
-                        v-model="settings.payment_type_bonus"
-                        :items="paymentTypes"
-                        label="Бонусы / баллы"
-                        clearable
-                      />
-                    </VCol>
-                  </VRow>
-                </VCardText>
-              </VCard>
-            </VCol>
-
-            <!-- ==================== Бонусная программа ==================== -->
-            <VCol cols="12"
-md="6">
-              <VCard>
-                <VCardTitle>
-                  <VIcon icon="mdi-star"
-class="me-2" />
-                  Бонусная программа
-                </VCardTitle>
-                <VCardText>
-                  <VSlider
-                    v-model="settings.bonus_limit_percent"
-                    label="Лимит списания баллов (%)"
-                    :min="0"
-                    :max="100"
-                    :step="5"
-                    thumb-label="always"
+                    label="Тип скидки для промокодов"
                     class="mb-4"
                   />
-                  <p class="text-caption text-medium-emphasis">
-                    Максимальный процент от суммы заказа, который можно оплатить
-                    бонусными баллами. 0 = без ограничений.
-                  </p>
-                </VCardText>
-              </VCard>
-            </VCol>
-
-            <!-- ==================== Флаги ==================== -->
-            <VCol cols="12"
-md="6">
-              <VCard>
-                <VCardTitle>
-                  <VIcon icon="mdi-toggle-switch"
-class="me-2" />
-                  Опции
-                </VCardTitle>
-                <VCardText>
-                  <VSwitch
-                    v-model="settings.no_pass_promo"
-                    label="Не передавать промокоды в iiko"
-                    color="primary"
-                    class="mb-2"
+                  <VTextField
+                    v-model="settings.fallback_email"
+                    label="Резервный Email"
+                    class="mb-4"
                   />
-                  <VSwitch
-                    v-model="settings.no_use_bonus"
-                    label="Не использовать оплату бонусами"
-                    color="primary"
-                    class="mb-2"
-                  />
-                  <VSwitch
-                    v-model="settings.no_use_iiko_promo"
-                    label="Не использовать промокоды из iiko"
-                    color="primary"
+                  <VTextField
+                    v-model="settings.fallback_telegram_id"
+                    label="Резервный Telegram ID"
                   />
                 </VCardText>
               </VCard>
             </VCol>
 
-            <!-- ==================== Резервные каналы ==================== -->
-            <VCol cols="12">
-              <VCard>
-                <VCardTitle>
-                  <VIcon icon="mdi-alert"
-class="me-2" />
-                  Резервные каналы при ошибке отправки заказа
-                </VCardTitle>
-                <VCardText>
-                  <VRow>
-                    <VCol cols="12"
-md="6">
-                      <VTextField
-                        v-model="settings.fallback_email"
-                        label="Email для уведомлений"
-                        prepend-inner-icon="mdi-email"
-                        type="email"
-                      />
-                    </VCol>
-                    <VCol cols="12"
-md="6">
-                      <VTextField
-                        v-model="settings.fallback_telegram_id"
-                        label="Telegram ID для уведомлений"
-                        prepend-inner-icon="mdi-send"
-                      />
-                    </VCol>
-                  </VRow>
-                </VCardText>
-              </VCard>
-            </VCol>
-
-            <!-- ==================== Кнопки ==================== -->
-            <VCol cols="12"
-class="d-flex gap-4">
-              <VBtn
-                color="primary"
-                size="large"
-                :loading="saving"
-                prepend-icon="mdi-content-save"
-                @click="saveSettings"
-              >
-                Сохранить настройки
-              </VBtn>
-              <VBtn
-                color="secondary"
-                size="large"
-                variant="outlined"
-                prepend-icon="mdi-refresh"
-                @click="loadAllReferences"
-              >
-                Обновить справочники
+            <VCol cols="12" class="mt-4">
+              <VBtn color="primary" :loading="saving" @click="saveSettings">
+                Сохранить всё
               </VBtn>
             </VCol>
           </VRow>
         </VWindowItem>
 
-        <VWindowItem value="webhooks">
-          <VCard class="mb-4">
-            <VCardTitle>Настройки Webhook</VCardTitle>
+        <!-- ==================== Вкладка Оплата ==================== -->
+        <VWindowItem value="payment">
+          <VCard>
+            <VCardTitle class="d-flex align-center">
+              Привязка оплат
+              <VSpacer />
+              <VBtn 
+                size="small" 
+                variant="outlined" 
+                color="warning" 
+                :loading="syncingPayments"
+                prepend-icon="mdi-sync"
+                @click="syncPaymentTypes"
+              >
+                Обновить список
+              </VBtn>
+            </VCardTitle>
             <VCardText>
+              <VAlert type="info" variant="tonal" class="mb-4">
+                Сопоставьте способы оплаты на сайте с типами оплат в iiko.
+              </VAlert>
               <VRow>
-                <VCol cols="12"
-md="8">
-                  <VTextField
-                    v-model="settings.webhook_url"
-                    label="Webhook URL"
-                    hint="Адрес, на который iiko будет отправлять уведомления"
-                    persistent-hint
-                  />
+                <VCol cols="12" md="6">
+                  <VSelect v-model="settings.payment_type_cash" :items="paymentTypes" label="Наличные" />
                 </VCol>
-                <VCol cols="12"
-md="4">
-                  <VTextField
-                    v-model="settings.webhook_auth_token"
-                    label="Auth Token"
-                    hint="Токен для защиты (Authorization header)"
-                    persistent-hint
-                  />
+                <VCol cols="12" md="6">
+                  <VSelect v-model="settings.payment_type_card" :items="paymentTypes" label="Карта курьеру" />
                 </VCol>
-                <VCol cols="12">
-                  <VBtn
-                    color="primary"
-                    :loading="registeringWebhook"
-                    prepend-icon="mdi-webhook"
-                    @click="registerWebhook"
-                  >
-                    Зарегистрировать вручную
-                  </VBtn>
-                  <VBtn
-                    color="success"
-                    variant="elevated"
-                    class="ms-2"
-                    :loading="registeringWebhook"
-                    prepend-icon="mdi-auto-fix"
-                    @click="autoRegisterWebhook"
-                  >
-                    Авто-генератор вебхука
-                  </VBtn>
-                  <VBtn
-                    variant="outlined"
-                    class="ms-2"
-                    @click="loadWebhookLogs"
-                  >
-                    Обновить логи
-                  </VBtn>
+                <VCol cols="12" md="6">
+                  <VSelect v-model="settings.payment_type_online" :items="paymentTypes" label="Онлайн оплата" />
+                </VCol>
+                <VCol cols="12" md="6">
+                  <VSelect v-model="settings.payment_type_bonus" :items="paymentTypes" label="Оплата баллами" />
                 </VCol>
               </VRow>
+              <VBtn color="primary" class="mt-4" @click="saveSettings">Сохранить</VBtn>
             </VCardText>
           </VCard>
+        </VWindowItem>
 
-          <VCard title="Журнал событий">
-            <VTable>
-              <thead>
-                <tr>
-                  <th>Дата</th>
-                  <th>Тип</th>
-                  <th>Payload</th>
-                  <th>Статус</th>
-                </tr>
-              </thead>
-              <tbody>
-                <tr v-for="log in webhookLogs"
-:key="log.id">
-                  <td>{{ new Date(log.created_at).toLocaleString() }}</td>
-                  <td>{{ log.event_type }}</td>
-                  <td>
-                    <pre
-                      style="font-size: 10px; max-height: 100px; overflow: auto"
-                      >{{ JSON.stringify(log.payload, null, 2) }}</pre
-                    >
-                  </td>
-                  <td>
-                    <VChip
-                      :color="log.processed ? 'success' : 'warning'"
-                      size="small"
-                    >
-                      {{ log.processed ? "Processed" : "Received" }}
-                    </VChip>
-                  </td>
-                </tr>
-                <tr v-if="webhookLogs.length === 0">
-                  <td colspan="4"
-class="text-center text-disabled">
-                    Нет событий
-                  </td>
-                </tr>
-              </tbody>
-            </VTable>
+        <!-- ==================== Вкладка Зоны доставки ==================== -->
+        <VWindowItem value="zones">
+          <VCard>
+            <VCardTitle class="d-flex align-center">
+              Зоны доставки (iiko)
+              <VSpacer />
+              <VBtn 
+                size="small" 
+                color="primary" 
+                :loading="syncingZones"
+                prepend-icon="mdi-refresh"
+                @click="syncDeliveryZones"
+              >
+                Синхронизировать
+              </VBtn>
+            </VCardTitle>
+            <VCardText>
+              <VTable density="compact">
+                <thead>
+                  <tr>
+                    <th>Зона</th>
+                    <th>Описание</th>
+                    <th>Мин. заказ</th>
+                    <th>Стоимость</th>
+                    <th>Время</th>
+                    <th>Статус</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr v-for="zone in deliveryZones" :key="zone.id">
+                    <td>{{ zone.name }}</td>
+                    <td class="text-caption" style="max-width: 200px; white-space: normal;">
+                      {{ zone.description || '-' }}
+                    </td>
+                    <td>{{ zone.min_sum }} р.</td>
+                    <td>{{ zone.delivery_cost }} р.</td>
+                    <td>{{ zone.min_delivery_time }}-{{ zone.max_delivery_time }} мин.</td>
+                    <td>
+                      <VChip :color="zone.is_active ? 'success' : 'grey'" size="x-small">
+                        {{ zone.is_active ? 'Да' : 'Нет' }}
+                      </VChip>
+                    </td>
+                  </tr>
+                  <tr v-if="!deliveryZones.length">
+                    <td colspan="5" class="text-center py-4">Данных нет. Запустите синхронизацию.</td>
+                  </tr>
+                </tbody>
+              </VTable>
+            </VCardText>
           </VCard>
+        </VWindowItem>
+
+        <!-- ==================== Вкладка Вебхуки ==================== -->
+        <VWindowItem value="webhooks">
+          <VRow>
+            <VCol cols="12" md="6">
+              <VCard title="Настройка вебхука">
+                <VCardText>
+                  <VTextField v-model="settings.webhook_url" label="URL вебхука" class="mb-4" />
+                  <VTextField v-model="settings.webhook_auth_token" label="Токен авторизации" class="mb-4" />
+                  <div class="d-flex gap-2">
+                    <VBtn color="primary" size="small" @click="registerWebhook">Manual</VBtn>
+                    <VBtn color="success" size="small" @click="autoRegisterWebhook">Auto</VBtn>
+                  </div>
+                </VCardText>
+              </VCard>
+            </VCol>
+            <VCol cols="12" md="6">
+              <VCard title="Последние события" class="h-100">
+                <VCardText>
+                  <VBtn size="x-small" variant="text" @click="loadWebhookLogs" class="mb-2">Обновить логи</VBtn>
+                  <div v-for="log in webhookLogs" :key="log.id" class="text-caption mb-1 border-bottom">
+                    {{ new Date(log.created_at).toLocaleTimeString() }} - {{ log.event_type }}
+                  </div>
+                </VCardText>
+              </VCard>
+            </VCol>
+          </VRow>
         </VWindowItem>
       </VWindow>
     </VCol>
   </VRow>
 
-  <!-- ==================== Snackbar ==================== -->
-  <VSnackbar
-    v-model="snackbar"
-    :color="snackbarColor"
-    :timeout="3000"
-    location="top"
-  >
+  <VSnackbar v-model="snackbar" :color="snackbarColor" :timeout="3000">
     {{ snackbarText }}
   </VSnackbar>
 </template>

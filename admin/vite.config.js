@@ -10,7 +10,12 @@ import svgLoader from 'vite-svg-loader'
 
 // https://vitejs.dev/config/
 export default defineConfig({
-  base: '/admin/build/',
+  base: '/admin/',
+  experimental: {
+    renderBuiltUrl(filename) {
+      return '/admin/build/' + filename
+    },
+  },
   plugins: [vue({
     template: {
       transformAssetUrls: {
@@ -65,6 +70,10 @@ export default defineConfig({
     },
   },
   server: {
+    host: '0.0.0.0',
+    port: 5173,
+    strictPort: true,
+    allowedHosts: ['72roll.ru', 'www.72roll.ru', 'localhost'],
     proxy: {
       '/api/v1': {
         target: 'http://backend:8000',

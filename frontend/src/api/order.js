@@ -1,4 +1,4 @@
-const API_URL = 'http://192.168.31.162:8000/api/v1'
+const API_URL = 'https://72roll.ru/api/v1'
 
 export const createOrder = async (orderData) => {
   try {

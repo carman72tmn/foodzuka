@@ -28,7 +28,6 @@ const formatDate = (dateString) => {
   }).format(date)
 }
 
-// Map links
 const yandexMapLink = computed(() => {
   if (!props.order?.delivery_address) return '#'
   return `https://yandex.ru/maps/?text=${encodeURIComponent(props.order.delivery_address)}`
@@ -69,8 +68,15 @@ const statusName = computed(() => {
     <VCard v-if="order">
       <VCardTitle class="d-flex align-center bg-primary text-white py-3">
         Заказ #{{ order.id }} 
+        <span v-if="order.external_number" class="ms-2 text-caption opacity-80">(iiko: {{ order.external_number }})</span>
         <VChip size="small" :color="statusColor" variant="elevated" class="ms-3">
           {{ statusName }}
+        </VChip>
+        <VChip v-if="order.source" size="x-small" color="secondary" variant="tonal" class="ms-2">
+          {{ order.source }}
+        </VChip>
+        <VChip size="small" :color="order.is_paid ? 'success' : 'warning'" variant="elevated" class="ms-2">
+          {{ order.is_paid ? 'Оплачен' : 'Не оплачен' }}
         </VChip>
         <VSpacer />
         <VBtn icon variant="text" @click="dialog = false" color="white">
@@ -80,36 +86,25 @@ const statusName = computed(() => {
 
       <VCardText class="pa-4 pt-6">
         <VRow>
-          <!-- Левая колонка: Детали клиента и доставки -->
+          <!-- Клиент и Доставка -->
           <VCol cols="12" md="6">
             <h3 class="text-h6 mb-3 d-flex align-center">
               <VIcon icon="bx-user" class="me-2" color="primary" /> О клиенте
             </h3>
-            <VList density="compact" class="bg-transparent pa-0">
+            <VList density="compact" class="bg-transparent pa-0 mb-6">
               <VListItem class="px-0">
                 <template #prepend><VIcon icon="bx-user-circle" size="small" class="me-3 text-medium-emphasis" /></template>
-                <VListItemTitle class="font-weight-medium">{{ order.customer_name || 'Не указано' }}</VListItemTitle>
-                <VListItemSubtitle>Имя</VListItemSubtitle>
+                <VListItemTitle class="font-weight-bold">{{ order.customer_name || 'Гость' }}</VListItemTitle>
+                <VListItemSubtitle>Имя клиента</VListItemSubtitle>
               </VListItem>
-              
               <VListItem class="px-0">
                 <template #prepend><VIcon icon="bx-phone" size="small" class="me-3 text-medium-emphasis" /></template>
                 <VListItemTitle>
-                  <a :href="'tel:' + order.customer_phone" class="text-primary text-decoration-none">
-                    {{ order.customer_phone || 'Не указано' }}
+                  <a :href="'tel:' + order.customer_phone" class="text-primary text-decoration-none font-weight-medium">
+                    {{ order.customer_phone || 'Не указан' }}
                   </a>
                 </VListItemTitle>
                 <VListItemSubtitle>Телефон</VListItemSubtitle>
-              </VListItem>
-
-              <VListItem class="px-0" v-if="order.telegram_username">
-                <template #prepend><VIcon icon="bxl-telegram" size="small" class="me-3 text-medium-emphasis" /></template>
-                <VListItemTitle>
-                  <a :href="'https://t.me/' + order.telegram_username" target="_blank" class="text-primary text-decoration-none">
-                    @{{ order.telegram_username }}
-                  </a>
-                </VListItemTitle>
-                <VListItemSubtitle>Telegram</VListItemSubtitle>
               </VListItem>
             </VList>
 
@@ -118,26 +113,24 @@ const statusName = computed(() => {
             <h3 class="text-h6 mb-3 d-flex align-center">
               <VIcon icon="bx-map-pin" class="me-2" color="primary" /> Доставка
             </h3>
-            <p class="mb-2 font-weight-medium text-body-1">{{ order.delivery_address || 'Самовывоз / Не указано' }}</p>
-            
-            <div class="d-flex gap-2 mb-4" v-if="order.delivery_address">
-              <VBtn :href="yandexMapLink" target="_blank" size="small" variant="tonal" color="success" prepend-icon="bx-map">
-                Я.Карты
-              </VBtn>
-              <VBtn :href="twoGisLink" target="_blank" size="small" variant="tonal" color="primary" prepend-icon="bx-map-alt">
-                2GIS
-              </VBtn>
+            <div class="mb-4">
+              <p class="mb-1 fw-bold text-primary" v-if="order.city">г. {{ order.city }}</p>
+              <p class="mb-2 text-body-1">{{ order.delivery_address || 'Самовывоз' }}</p>
+              <div class="d-flex gap-2" v-if="order.delivery_address">
+                <VBtn :href="yandexMapLink" target="_blank" size="x-small" variant="tonal" color="success">Яндекс</VBtn>
+                <VBtn :href="twoGisLink" target="_blank" size="x-small" variant="tonal" color="primary">2GIS</VBtn>
+              </div>
             </div>
 
             <VList density="compact" class="bg-transparent pa-0">
               <VListItem class="px-0">
                 <template #prepend><VIcon icon="bx-package" size="small" class="me-3 text-medium-emphasis" /></template>
-                <VListItemTitle>{{ order.order_type || 'Не указан' }}</VListItemTitle>
+                <VListItemTitle>{{ order.order_type || 'Доставка' }}</VListItemTitle>
                 <VListItemSubtitle>Тип заказа</VListItemSubtitle>
               </VListItem>
-              <VListItem class="px-0">
-                <template #prepend><VIcon icon="bx-user" size="small" class="me-3 text-medium-emphasis" /></template>
-                <VListItemTitle>{{ order.courier_name || 'Не назначен' }}</VListItemTitle>
+              <VListItem class="px-0" v-if="order.courier_name">
+                <template #prepend><VIcon icon="bx-cycling" size="small" class="me-3 text-medium-emphasis" /></template>
+                <VListItemTitle>{{ order.courier_name }}</VListItemTitle>
                 <VListItemSubtitle>Курьер</VListItemSubtitle>
               </VListItem>
               <VListItem class="px-0" v-if="order.delivery_zone">
@@ -150,63 +143,31 @@ const statusName = computed(() => {
             <VDivider class="my-4" />
 
             <h3 class="text-h6 mb-3 d-flex align-center">
-              <VIcon icon="bx-time" class="me-2" color="primary" /> Тайминг (iiko)
+              <VIcon icon="bx-time" class="me-2" color="primary" /> Тайминг
             </h3>
             <VList density="compact" class="bg-transparent pa-0">
               <VListItem class="px-0">
-                <VListItemTitle>{{ formatDate(order.iiko_creation_time || order.created_at) }}</VListItemTitle>
-                <VListItemSubtitle>Создан</VListItemSubtitle>
+                <VListItemTitle>{{ formatDate(order.created_at) }}</VListItemTitle>
+                <VListItemSubtitle>Время заказа</VListItemSubtitle>
               </VListItem>
-              <VListItem class="px-0">
-                <VListItemTitle>{{ formatDate(order.expected_time) }}</VListItemTitle>
-                <VListItemSubtitle>Обещано</VListItemSubtitle>
+              <VListItem class="px-0" v-if="order.expected_time">
+                <VListItemTitle class="font-weight-bold text-warning">{{ formatDate(order.expected_time) }}</VListItemTitle>
+                <VListItemSubtitle>Обещано клиенту</VListItemSubtitle>
               </VListItem>
-              <VListItem class="px-0">
-                <VListItemTitle>{{ formatDate(order.actual_time) }}</VListItemTitle>
-                <VListItemSubtitle>Фактически выдано/доставлено</VListItemSubtitle>
-              </VListItem>
-              <VListItem class="px-0" v-if="order.delay_minutes > 0">
-                <VListItemTitle class="text-error font-weight-bold">{{ order.delay_minutes }} мин.</VListItemTitle>
-                <VListItemSubtitle>Опоздание</VListItemSubtitle>
-              </VListItem>
-              <VListItem class="px-0" v-else-if="order.actual_time">
-                <VListItemTitle class="text-success font-weight-bold">
-                  Вовремя
-                </VListItemTitle>
-                <VListItemSubtitle>Статус доставки</VListItemSubtitle>
-              </VListItem>
-              <VListItem 
-                v-if="order.is_on_time"
-                class="px-0"
-              >
-                <template #prepend>
-                  <VIcon 
-                    icon="bx-calendar-event" 
-                    size="small" 
-                    class="me-3 text-warning" 
-                  />
-                </template>
-                <VListItemTitle class="text-warning font-weight-bold">
-                  Предзаказ (на время)
-                </VListItemTitle>
-                <VListItemSubtitle>Тип времени</VListItemSubtitle>
-              </VListItem>
-              <VListItem class="px-0" v-if="order.admin_name">
-                <template #prepend><VIcon icon="bx-user-check" size="small" class="me-3 text-medium-emphasis" /></template>
-                <VListItemTitle>{{ order.admin_name }}</VListItemTitle>
-                <VListItemSubtitle>Администратор (iiko)</VListItemSubtitle>
+              <VListItem class="px-0" v-if="order.actual_time">
+                <VListItemTitle class="font-weight-bold text-success">{{ formatDate(order.actual_time) }}</VListItemTitle>
+                <VListItemSubtitle>Фактическая выдача</VListItemSubtitle>
               </VListItem>
             </VList>
-
           </VCol>
 
-          <!-- Правая колонка: Состав и финансы -->
+          <!-- Состав и финансы -->
           <VCol cols="12" md="6">
             <h3 class="text-h6 mb-3 d-flex align-center">
               <VIcon icon="bx-receipt" class="me-2" color="primary" /> Состав заказа
             </h3>
             
-            <VTable density="compact" class="border rounded mb-4">
+            <VTable density="compact" class="border rounded mb-6">
               <thead>
                 <tr>
                   <th>Позиция</th>
@@ -215,80 +176,73 @@ const statusName = computed(() => {
                 </tr>
               </thead>
               <tbody>
-                <tr v-for="item in order.items" :key="item.id">
+                <template v-if="order.order_items_details && order.order_items_details.length > 0">
+                  <template v-for="item in order.order_items_details" :key="item.id">
+                    <tr>
+                      <td class="font-weight-medium">{{ item.name }}</td>
+                      <td class="text-center">{{ item.amount }}</td>
+                      <td class="text-right">{{ item.sum }} ₽</td>
+                    </tr>
+                    <tr v-for="mod in item.modifiers" :key="mod.id" class="text-caption opacity-70">
+                      <td class="ps-4">• {{ mod.name }}</td>
+                      <td class="text-center">{{ mod.amount }}</td>
+                      <td class="text-right">{{ mod.sum ? mod.sum + ' ₽' : '—' }}</td>
+                    </tr>
+                  </template>
+                </template>
+                <tr v-else-if="order.items && order.items.length > 0" v-for="item in order.items" :key="item.id">
                   <td>{{ item.product_name }}</td>
                   <td class="text-center">{{ item.quantity }}</td>
                   <td class="text-right">{{ item.total }} ₽</td>
                 </tr>
-                <tr v-if="!order.items || order.items.length === 0">
-                  <td colspan="3" class="text-center text-medium-emphasis py-4">
-                    Детали товаров отсутствуют
-                  </td>
+                <tr v-else>
+                  <td colspan="3" class="text-center py-4 text-disabled">Нет данных о товарах</td>
                 </tr>
               </tbody>
             </VTable>
 
-            <h3 class="text-h6 mb-3 d-flex align-center mt-6">
-              <VIcon icon="bx-wallet" class="me-2" color="primary" /> Финансы
-            </h3>
-
-            <VCard variant="outlined" color="primary" class="pa-3 bg-var-theme-background">
+            <VCard variant="outlined" color="primary" class="pa-4 bg-lightprimary">
               <div class="d-flex justify-space-between mb-2">
-                <span class="text-body-2">Сумма товаров:</span>
-                <span class="font-weight-medium">{{ order.total_amount }} ₽</span>
+                <span>Сумма:</span>
+                <span class="font-weight-bold">{{ order.total_amount }} ₽</span>
               </div>
-              <div class="mb-2" v-if="order.total_discount > 0">
-                <div class="d-flex justify-space-between text-error">
-                  <span class="text-body-2">Скидка:</span>
-                  <span class="font-weight-medium">-{{ order.total_discount }} ₽</span>
-                </div>
-                <div v-if="order.discounts_details && order.discounts_details.discounts" class="ms-4">
-                  <div v-for="d in order.discounts_details.discounts" :key="d.name" class="d-flex justify-space-between text-caption text-error opacity-70">
-                    <span>• {{ d.name }}</span>
-                    <span>-{{ d.sum }} ₽</span>
-                  </div>
-                </div>
+              <div v-if="order.total_discount > 0" class="d-flex justify-space-between mb-2 text-error">
+                <span>Скидка:</span>
+                <span class="font-weight-bold">-{{ order.total_discount }} ₽</span>
               </div>
-              <div class="d-flex justify-space-between mb-2 text-warning" v-if="order.bonus_spent > 0">
-                <span class="text-body-2">Оплачено бонусами:</span>
-                <span class="font-weight-medium">-{{ order.bonus_spent }} ₽</span>
+              <div v-if="order.bonus_spent > 0" class="d-flex justify-space-between mb-2 text-warning">
+                <span>Бонусы:</span>
+                <span class="font-weight-bold">-{{ order.bonus_spent }} ₽</span>
               </div>
               <VDivider class="my-2" />
               <div class="d-flex justify-space-between align-center">
-                <span class="text-subtitle-1 font-weight-bold">Итого к оплате:</span>
-                <span class="text-h5 font-weight-bold text-primary">{{ order.total_with_discount || order.total_amount - (order.total_discount || 0) }} ₽</span>
+                <span class="text-h6">Итого:</span>
+                <span class="text-h5 font-weight-black text-primary">{{ order.total_with_discount || (order.total_amount - order.total_discount) }} ₽</span>
               </div>
-              <div class="d-flex justify-space-between mt-2 text-medium-emphasis">
-                <span class="text-caption">Способ оплаты:</span>
-                <span class="text-caption font-weight-medium">{{ order.payment_method || 'Не указан' }}</span>
+              <div class="mt-2 text-right">
+                <VChip size="x-small" variant="outlined">{{ order.payment_method || 'Способ оплаты не указан' }}</VChip>
               </div>
             </VCard>
 
-            <div class="d-flex align-center mt-4 text-success" v-if="order.bonus_accrued > 0">
-              <VIcon icon="bx-gift" class="me-2" />
-              <span class="text-body-2 font-weight-medium">Начислено бонусов: +{{ order.bonus_accrued }}</span>
-            </div>
-
-            <VAlert v-if="order.comment" type="info" variant="tonal" class="mt-4 text-body-2" density="compact" icon="bx-message-square-detail">
+            <VAlert v-if="order.comment" type="info" variant="tonal" icon="bx-message-detail" class="mt-4 text-caption">
               <strong>Комментарий:</strong> {{ order.comment }}
             </VAlert>
-
-            <div class="mt-4 text-right">
-              <div class="text-caption text-medium-emphasis">
-                iiko Order ID: {{ order.iiko_order_id || 'Нет' }}
-              </div>
-            </div>
-
           </VCol>
         </VRow>
       </VCardText>
       
       <VDivider />
       
-      <VCardActions class="pa-4 bg-var-theme-background">
+      <VCardActions class="pa-4">
         <VSpacer />
-        <VBtn variant="outlined" @click="dialog = false">Закрыть</VBtn>
+        <VBtn variant="tonal" @click="dialog = false">Закрыть</VBtn>
       </VCardActions>
     </VCard>
   </VDialog>
 </template>
+
+<style scoped>
+.bg-lightprimary {
+  background-color: rgba(var(--v-theme-primary), 0.05);
+}
+</style>

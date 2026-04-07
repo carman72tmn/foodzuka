@@ -7,8 +7,8 @@ async def test_get():
     urls = [
         "http://localhost:8000/api/v1/employees",
         "http://127.0.0.1:8000/api/v1/employees",
-        "http://192.168.31.162:8000/api/v1/employees",
-        "http://192.168.31.162/api/v1/employees"
+        "https://72roll.ru/api/v1/employees",
+        "http://72roll.ru/api/v1/employees"
     ]
     
     for url in urls:

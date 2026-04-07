@@ -1,0 +1,7 @@
+DATABASE_URL=postgresql://foodtech_user:postgres@db:5432/foodtech_db
+SECRET_KEY=5aVqE4Buca_n1QaBuYxyncZ5SbiZ3obsSuXDVxi46Ik
+IIKO_API_LOGIN=86dfd64bd15c42199b789edf6adcb289
+IIKO_ORGANIZATION_ID=2704eeae-dc5f-4c9f-9b81-375c454dd5bd
+API_RELOAD=True
+DEBUG=True
+APP_PUBLIC_URL=https://72roll.ru

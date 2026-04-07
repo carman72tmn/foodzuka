@@ -4,9 +4,9 @@ services:
     container_name: foodtech-db
     restart: always
     environment:
-      POSTGRES_DB: ${DB_DATABASE:-foodtech_db}
-      POSTGRES_USER: ${DB_USERNAME:-foodtech_user}
-      POSTGRES_PASSWORD: ${DB_PASSWORD:-postgres}
+      - POSTGRES_DB=${DB_DATABASE:-foodtech_db}
+      - POSTGRES_USER=${DB_USERNAME:-foodtech_user}
+      - POSTGRES_PASSWORD=postgres
     ports:
       - "5432:5432"
     volumes:
@@ -30,10 +30,12 @@ services:
     container_name: foodtech-backend
     restart: always
     environment:
-      - DATABASE_URL=postgresql://${DB_USERNAME:-foodtech_user}:${DB_PASSWORD:-postgres}@db:5432/${DB_DATABASE:-foodtech_db}
+      - DATABASE_URL=postgresql://${DB_USERNAME:-foodtech_user}:postgres@db:5432/${DB_DATABASE:-foodtech_db}
       - REDIS_URL=redis://redis:6379/0
       - API_RELOAD=True
-      - APP_PUBLIC_URL=http://192.168.31.162:8000
+      - APP_PUBLIC_URL=https://72roll.ru
+    volumes:
+      - ./backend:/app
     expose:
       - "8000"
     depends_on:
@@ -49,6 +51,8 @@ services:
     restart: always
     environment:
       - API_URL=http://backend:8000/api/v1
+    volumes:
+      - ./bot:/app
     depends_on:
       - backend
 
@@ -57,17 +61,22 @@ services:
       context: ./admin
     container_name: foodtech-admin
     restart: always
+    command: php-fpm
     environment:
       - DB_HOST=db
       - DB_CONNECTION=pgsql
       - DB_PORT=5432
       - DB_DATABASE=${DB_DATABASE:-foodtech_db}
       - DB_USERNAME=${DB_USERNAME:-foodtech_user}
-      - DB_PASSWORD=${DB_PASSWORD:-postgres}
+      - DB_PASSWORD=postgres
       - REDIS_HOST=redis
+      - APP_URL=https://72roll.ru/admin
+    volumes:
+      - ./admin:/var/www/html
     expose:
       - "8000"
       - "5173"
+      - "9000"
     depends_on:
       db:
         condition: service_healthy
@@ -89,8 +98,10 @@ services:
       - "443:443"
     volumes:
       - ./configs/nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
-      - ./certbot/conf:/etc/letsencrypt:ro
-      - ./certbot/www:/var/www/certbot:ro
+      - ./foodtech/certbot/conf:/etc/letsencrypt:ro
+      - ./foodtech/certbot/www:/var/www/certbot:ro
+      - ./admin/public:/var/www/html/admin/public:ro
+      - ./admin:/var/www/html/admin:ro
     depends_on:
       - frontend
       - admin
@@ -100,8 +111,8 @@ services:
     image: certbot/certbot:latest
     container_name: foodtech-certbot
     volumes:
-      - ./certbot/conf:/etc/letsencrypt
-      - ./certbot/www:/var/www/certbot
+      - ./foodtech/certbot/conf:/etc/letsencrypt
+      - ./foodtech/certbot/www:/var/www/certbot
     entrypoint: "/bin/sh -c 'trap exit TERM; while :; do certbot renew; sleep 12h & wait $${!}; done;'"
 
 volumes:

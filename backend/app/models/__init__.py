@@ -24,6 +24,7 @@ from .vk_user import VkUser
 from .vk_activity import VkActivity
 from .vk_settings import VkSettings
 from .bot_settings import BotSettings
+from .payment_type import PaymentType
 
 __all__ = [
     "User",
@@ -58,4 +59,5 @@ __all__ = [
     "VkActivity",
     "VkSettings",
     "BotSettings",
+    "PaymentType",
 ]

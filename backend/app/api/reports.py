@@ -10,6 +10,7 @@ from app.core.database import get_session
 from app.models.iiko_settings import IikoSettings
 from app.models.olap_revenue import OlapRevenueRecord
 from app.services.iiko_service import iiko_service
+from app.services.revenue_sync import revenue_sync_service
 
 
 router = APIRouter(prefix="/reports", tags=["Reports"])
@@ -94,6 +95,9 @@ async def get_revenue_report(
             api_login=settings.api_login,
             organization_id=settings.organization_id,
             include_deleted=include_deleted,
+            resto_url=settings.resto_url,
+            resto_login=settings.resto_login,
+            resto_password=settings.resto_password,
         )
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"iiko API error: {str(e)}")
@@ -144,6 +148,20 @@ async def get_revenue_report(
         "source": "iiko_live" if is_today else "iiko_refreshed",
         "data": rows,
     }
+
+
+@router.post("/olap/sync")
+async def sync_revenue(
+    period: str = Query(default="today", description="Период для синхронизации: today, yesterday")
+):
+    """
+    Принудительный запуск синхронизации выручки из iiko.
+    """
+    try:
+        await revenue_sync_service.sync_period(period)
+        return {"success": True, "message": f"Синхронизация выручки за {period} запущена и завершена"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Ошибка при синхронизации: {str(e)}")
 
 
 def _record_to_dict(r: OlapRevenueRecord) -> dict:

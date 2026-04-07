@@ -1,6 +1,8 @@
 from typing import Optional, List
 from datetime import datetime
 from sqlmodel import SQLModel, Field, Relationship
+from sqlalchemy import Column
+from sqlalchemy.dialects.postgresql import JSONB
 
 class CompanyBase(SQLModel):
     name: str
@@ -60,15 +62,22 @@ class Branch(BranchBase, table=True):
 
 
 class DeliveryZoneBase(SQLModel):
+    iiko_id: Optional[str] = Field(default=None, index=True, description="UUID зоны из iiko")
     name: str
     branch_id: int = Field(foreign_key="branches.id")
     
     # Coordinates for polygon (GeoJSON or simple list of points stringified for MVP)
-    polygon_coordinates: str = Field(description="JSON string of lat/lng coordinate pairs")
+    polygon_coordinates: Optional[str] = Field(default=None, description="JSON string of lat/lng coordinate pairs")
     
     min_order_amount: float = Field(default=0.0)
     delivery_cost: float = Field(default=0.0)
-    free_delivery_from: Optional[float] = None
+    min_delivery_time: Optional[int] = Field(default=None, description="Мин. время доставки (мин)")
+    max_delivery_time: Optional[int] = Field(default=None, description="Макс. время доставки (мин)")
+    
+    # Дополнительно из iiko Resto (Office)
+    description: Optional[str] = Field(default=None, description="Текстовое описание зоны")
+    additional_info: Optional[List] = Field(default=None, sa_column=Column(JSONB), description="Все остальные параметры из Resto")
+    
     is_active: bool = True
 
 

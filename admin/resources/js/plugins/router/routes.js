@@ -45,6 +45,10 @@ export const routes = [
         component: () => import('@/pages/branches/index.vue'),
       },
       {
+        path: 'branches/zones',
+        component: () => import('@/pages/branches/zones.vue'),
+      },
+      {
         path: 'promo',
         component: () => import('@/pages/promo/index.vue'),
       },
