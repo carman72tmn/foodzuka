@@ -1724,9 +1724,11 @@ class IikoService:
         api_login: Optional[str] = None
     ) -> List[Dict[str, Any]]:
         """Получение ограничений и зон доставки из iiko Cloud"""
+        payload = {"organizationIds": [organization_id]}
         try:
             res = await self._request(
-                "GET", f"/api/1/delivery_restrictions?organizationIds={organization_id}",
+                "POST", "/api/1/delivery_restrictions",
+                payload,
                 api_login=api_login,
                 organization_id=organization_id
             )
