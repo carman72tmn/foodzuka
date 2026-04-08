@@ -1638,6 +1638,76 @@ class IikoService:
                 
         return list(stats.values())
 
+    async def get_courier_revenue_olap(
+        self,
+        date_from: datetime,
+        date_to: datetime,
+        resto_url: Optional[str] = None,
+        resto_login: Optional[str] = None,
+        resto_password: Optional[str] = None
+    ) -> Dict[str, Dict[str, float]]:
+        """
+        Получение выручки по курьерам через OLAP-отчет iiko Resto (Office).
+        Возвращает словарь {courier_id: {date_iso: revenue}}.
+        """
+        from datetime import timedelta
+        try:
+            # iiko Office (RMS) v2 (POST) ожидает ISO формат
+            v2_from = date_from.strftime("%Y-%m-%dT00:00:00.000")
+            v2_to = (date_to + timedelta(days=1)).strftime("%Y-%m-%dT00:00:00.000")
+
+            payload = {
+                "reportType": "SALES",
+                "groupByRowFields": ["Courier.Id", "OpenDate.Typed"],
+                "aggregateFields": ["DishDiscountSum"],
+                "filters": {
+                    "OpenDate.Typed": {
+                        "filterType": "DateRange",
+                        "periodType": "CUSTOM",
+                        "from": v2_from,
+                        "to": v2_to,
+                        "includeLow": True,
+                        "includeHigh": False
+                    },
+                    "OrderDeleted": {
+                        "filterType": "IncludeValues",
+                        "values": ["NOT_DELETED"]
+                    }
+                }
+            }
+
+            res = await self._resto_request(
+                "POST", "/v2/reports/olap",
+                json_data=payload,
+                resto_url=resto_url,
+                resto_login=resto_login,
+                resto_password=resto_password
+            )
+
+            # revenues[courier_id][date_str] = revenue
+            revenues = {}
+            if isinstance(res, dict) and "data" in res:
+                for row in res.get("data", []):
+                    c_id = row.get("Courier.Id")
+                    # OpenDate.Typed может приходить как "2024-03-27T00:00:00.000"
+                    date_val = row.get("OpenDate.Typed")
+                    if date_val and "T" in date_val:
+                        date_str = date_val.split("T")[0]
+                    else:
+                        date_str = str(date_val)
+                        
+                    rev = self._safe_float(row.get("DishDiscountSum"))
+                    
+                    if c_id:
+                        if c_id not in revenues:
+                            revenues[c_id] = {}
+                        revenues[c_id][date_str] = rev
+            
+            return revenues
+        except Exception as e:
+            logger.error(f"Error getting courier revenue OLAP: {e}")
+            return {}
+
     @staticmethod
     def _safe_float(value) -> float:
         """Безопасное преобразование значения к float"""

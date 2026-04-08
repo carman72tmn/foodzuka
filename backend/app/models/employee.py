@@ -37,6 +37,7 @@ class Shift(SQLModel, table=True):
     status: str = Field(default="OPEN", description="Статус: OPEN или CLOSED")
     work_hours: Optional[float] = Field(default=0.0, description="Отработанные часы")
     deliveries_count: int = Field(default=0, description="Количество доставок")
+    deliveries_revenue: float = Field(default=0.0, description="Выручка за доставки")
     
     created_at: datetime = Field(default_factory=datetime.utcnow)
     updated_at: datetime = Field(default_factory=datetime.utcnow)

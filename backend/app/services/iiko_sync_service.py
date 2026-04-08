@@ -1029,6 +1029,18 @@ class IikoSyncService:
                 except Exception as e:
                     logger.warning(f"Courier stats failed for {company.name}: {e}")
 
+                # 2.2.1. Выручка курьеров из OLAP (Office)
+                # Инициализируем пустым словарем, чтобы избежать NameError ниже
+                courier_revenues = {}
+                if resto_url and resto_login and resto_password:
+                    try:
+                        courier_revenues = await iiko_service.get_courier_revenue_olap(
+                            date_from, date_to, resto_url, resto_login, resto_password
+                        )
+                        logger.info(f"Fetched OLAP revenue for {len(courier_revenues)} couriers")
+                    except Exception as e:
+                        logger.warning(f"Courier OLAP revenue failed: {e}")
+
                 # 2.3. Объединяем и синхронизируем сотрудников
                 cloud_ids = {e["id"] for e in cloud_employees if e.get("id")}
                 # Используем всех сотрудников из Resto (с фильтрацией по организации если возможно, но для 72roll пока берем всех)
@@ -1135,6 +1147,9 @@ class IikoSyncService:
                             shift.date_close = d_close
                             shift.status = status
                             shift.work_hours = hours
+                            # Обновляем выручку курьера
+                            d_str = d_open.strftime("%Y-%m-%d")
+                            shift.deliveries_revenue = courier_revenues.get(e_id, {}).get(d_str, 0.0)
                             shift.updated_at = datetime.utcnow()
                         else:
                             shift = Shift(
@@ -1144,7 +1159,8 @@ class IikoSyncService:
                                 date_close=d_close,
                                 status=status,
                                 work_hours=hours,
-                                deliveries_count=courier_stats.get(e_id, 0)
+                                deliveries_count=courier_stats.get(e_id, 0),
+                                deliveries_revenue=courier_revenues.get(e_id, {}).get(d_open.strftime("%Y-%m-%d"), 0.0)
                             )
                             session.add(shift)
                         

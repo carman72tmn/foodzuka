@@ -133,9 +133,10 @@ async def get_courier_report(
     df = datetime.fromisoformat(date_from) if date_from else datetime.utcnow().replace(hour=0, minute=0, second=0)
     dt = datetime.fromisoformat(date_to) if date_to else datetime.utcnow()
     
-    # Получаем всех курьеров (фильтруем по ролям CUR, Courier, курьер, Delivery)
-    courier_roles = ["Courier", "CUR", "курьер", "Delivery"]
-    couriers = session.exec(select(Employee).where(Employee.role.in_(courier_roles))).all()
+    # Получаем всех курьеров (фильтруем по ролям, содержащим "курьер 2000")
+    # Это универсальный фильтр по просьбе пользователя
+    employees = session.exec(select(Employee)).all()
+    couriers = [e for e in employees if e.role and "курьер 2000" in e.role.lower()]
     
     report = []
     for courier in couriers:
@@ -150,11 +151,13 @@ async def get_courier_report(
         
         total_deliveries = sum(s.deliveries_count or 0 for s in shifts)
         total_hours = sum(s.work_hours or 0.0 for s in shifts)
+        total_revenue = sum(getattr(s, "deliveries_revenue", 0.0) or 0.0 for s in shifts)
         
         report.append({
             "id": courier.id,
             "name": courier.name,
             "deliveries": total_deliveries,
+            "revenue": round(total_revenue, 2),
             "hours": round(total_hours, 2),
             "shifts_count": len(shifts)
         })
