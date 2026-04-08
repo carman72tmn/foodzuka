@@ -1092,20 +1092,25 @@ class IikoSyncService:
                 # 3. СИНХРОНИЗАЦИЯ СМЕН (Явок)
                 all_shifts = []
                 
-                # 3.1. Берем из Resto (самый детальный источник)
+                # 3.1. Берем из Resto (самый детальный источник или резервный канал при 401 в Cloud)
                 if resto_url and resto_login and resto_password:
                     try:
-                        r_attendance = await iiko_service.get_resto_attendance(resto_url, resto_login, resto_password, date_from, date_to)
+                        r_attendance = await iiko_service.get_resto_personal_sessions(
+                            date_from, date_to,
+                            resto_url=resto_url, 
+                            resto_login=resto_login, 
+                            resto_password=resto_password
+                        )
                         for ra in r_attendance:
                             all_shifts.append({
                                 "id": ra["id"],
                                 "employee_iiko_id": ra["employeeId"],
-                                "date_open": ra["dateOpen"],
-                                "date_close": ra["dateClose"],
+                                "date_open": ra["openTime"],
+                                "date_close": ra.get("closeTime"),
                                 "source": "resto"
                             })
                     except Exception as e:
-                        logger.error(f"Resto attendance failed: {e}")
+                        logger.error(f"Resto attendance (sessions) failed: {e}")
 
                 # 3.2. Дополняем из Cloud (если есть)
                 try:
@@ -1176,7 +1181,19 @@ class IikoSyncService:
 
                 # 4. СИНХРОНИЗАЦИЯ ДЕТАЛЬНЫХ ЗАКАЗОВ КУРЬЕРОВ
                 try:
-                    detailed_orders = await iiko_service.get_detailed_deliveries(date_from, date_to, org_id, api_login=api_login)
+                    detailed_orders = []
+                    try:
+                        detailed_orders = await iiko_service.get_detailed_deliveries(date_from, date_to, org_id, api_login=api_login)
+                    except Exception as cloud_e:
+                        if resto_url and ("401" in str(cloud_e) or "Unauthorized" in str(cloud_e)):
+                            logger.info("Cloud API 401, trying Resto for detailed deliveries...")
+                            detailed_orders = await iiko_service.get_resto_detailed_deliveries(
+                                date_from, date_to, org_id,
+                                resto_url=resto_url, resto_login=resto_login, resto_password=resto_password
+                            )
+                        else:
+                            raise cloud_e
+
                     restrictions = await iiko_service.get_delivery_restrictions(org_id, api_login=api_login)
                     
                     # Маппинг терминал -> зона
@@ -1264,7 +1281,13 @@ class IikoSyncService:
 
                 # 5. СИНХРОНИЗАЦИЯ ГРАФИКОВ
                 try:
-                    await self.sync_schedules(session, date_from, date_to, org_id, api_login=api_login)
+                    await self.sync_schedules(
+                        session, date_from, date_to, org_id, 
+                        api_login=api_login,
+                        resto_url=resto_url,
+                        resto_login=resto_login,
+                        resto_password=resto_password
+                    )
                 except Exception as e:
                     logger.warning(f"Schedules failed: {e}")
 
@@ -1381,15 +1404,33 @@ class IikoSyncService:
             "mode": mode
         }
 
-    async def sync_schedules(self, session: Session, date_from: datetime, date_to: datetime, organization_id: str, api_login: Optional[str] = None):
+    async def sync_schedules(
+        self, session: Session, date_from: datetime, date_to: datetime, organization_id: str,
+        api_login: Optional[str] = None,
+        resto_url: Optional[str] = None,
+        resto_login: Optional[str] = None,
+        resto_password: Optional[str] = None
+    ):
         """
         Синхронизация запланированного графика смен
         """
         try:
-            iiko_schedules = await iiko_service.get_schedules(
-                date_from, date_to, organization_id,
-                api_login=api_login
-            )
+            iiko_schedules = []
+            try:
+                iiko_schedules = await iiko_service.get_schedules(
+                    date_from, date_to, organization_id,
+                    api_login=api_login
+                )
+            except Exception as cloud_e:
+                if resto_url and ("401" in str(cloud_e) or "Unauthorized" in str(cloud_e)):
+                    logger.info("Cloud API 401, trying Resto for schedules...")
+                    iiko_schedules = await iiko_service.get_resto_schedules(
+                        date_from, date_to,
+                        resto_url=resto_url, resto_login=resto_login, resto_password=resto_password
+                    )
+                else:
+                    logger.error(f"Cloud schedules failed: {cloud_e}")
+                    raise cloud_e
             for item in iiko_schedules:
                 iiko_id = item.get("id")
                 if not iiko_id:

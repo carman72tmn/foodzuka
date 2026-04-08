@@ -1461,6 +1461,168 @@ class IikoService:
             return employees
         return data if isinstance(data, list) else []
 
+    async def get_resto_personal_sessions(
+        self,
+        date_from: datetime,
+        date_to: datetime,
+        resto_url: Optional[str] = None,
+        resto_login: Optional[str] = None,
+        resto_password: Optional[str] = None
+    ) -> List[Dict[str, Any]]:
+        """Получение личных смен сотрудников из iiko Resto (Office) API"""
+        try:
+            # iiko Resto API v2: GET /resto/api/personalSessions?from=...&to=...
+            params = {
+                "from": date_from.strftime("%Y-%m-%d"),
+                "to": date_to.strftime("%Y-%m-%d")
+            }
+            data = await self._resto_request(
+                "GET", "/personalSessions",
+                params=params,
+                resto_url=resto_url,
+                resto_login=resto_login,
+                resto_password=resto_password
+            )
+            
+            if isinstance(data, str):
+                import xml.etree.ElementTree as ET
+                root = ET.fromstring(data)
+                sessions = []
+                for att in root.findall('.//attendance'):
+                    sessions.append({
+                        "id": att.findtext('id'),
+                        "employeeId": att.findtext('employeeId'),
+                        "openTime": att.findtext('dateFrom'),
+                        "closeTime": att.findtext('dateTo'),
+                        "status": "CLOSED" if att.findtext('dateTo') else "OPEN"
+                    })
+                return sessions
+            return []
+        except Exception as e:
+            logger.error(f"Error getting personal sessions from Resto: {e}")
+            return []
+
+    async def get_resto_schedules(
+        self,
+        date_from: datetime,
+        date_to: datetime,
+        resto_url: Optional[str] = None,
+        resto_login: Optional[str] = None,
+        resto_password: Optional[str] = None
+    ) -> List[Dict[str, Any]]:
+        """Получение графиков работы сотрудников из iiko Resto (Office) API"""
+        try:
+            params = {
+                "from": date_from.strftime("%Y-%m-%d"),
+                "to": date_to.strftime("%Y-%m-%d")
+            }
+            data = await self._resto_request(
+                "GET", "/employees/schedule",
+                params=params,
+                resto_url=resto_url,
+                resto_login=resto_login,
+                resto_password=resto_password
+            )
+            
+            if isinstance(data, str):
+                import xml.etree.ElementTree as ET
+                root = ET.fromstring(data)
+                schedules = []
+                for sch in root.findall('.//schedule'):
+                    schedules.append({
+                        "employeeId": sch.findtext('employeeId'),
+                        "dateFrom": sch.findtext('dateFrom'),
+                        "dateTo": sch.findtext('dateTo')
+                    })
+                return schedules
+            return []
+        except Exception as e:
+            logger.error(f"Error getting schedules from Resto: {e}")
+            return []
+
+    async def get_resto_detailed_deliveries(
+        self,
+        date_from: datetime,
+        date_to: datetime,
+        organization_id: str,
+        resto_url: Optional[str] = None,
+        resto_login: Optional[str] = None,
+        resto_password: Optional[str] = None
+    ) -> List[Dict[str, Any]]:
+        """Получение детальной истории доставок из iiko Resto через OLAP"""
+        try:
+            from datetime import timedelta
+            v2_from = date_from.strftime("%Y-%m-%dT00:00:00.000")
+            v2_to = (date_to + timedelta(days=1)).strftime("%Y-%m-%dT00:00:00.000")
+            
+            payload = {
+                "reportType": "DELIVERIES",
+                "groupByRowFields": [
+                    "OrderNum", 
+                    "Courier.Name", 
+                    "Address.Street.Name", 
+                    "Address.House", 
+                    "Address.Flat",
+                    "DeliveryZone",
+                    "DeliveryTerminal.Name"
+                ],
+                "aggregateFields": [
+                    "OrderSum", 
+                    "CookingFinishTime", 
+                    "ExpectedDeliveryTime", 
+                    "ActualDeliveryTime"
+                ],
+                "filters": {
+                    "ActualDeliveryTime": {
+                        "filterType": "DateRange",
+                        "periodType": "CUSTOM",
+                        "from": v2_from,
+                        "to": v2_to,
+                        "includeLow": True,
+                        "includeHigh": False
+                    }
+                }
+            }
+            
+            response = await self._resto_request(
+                "POST", "/v2/reports/olap",
+                json_data=payload,
+                resto_url=resto_url,
+                resto_login=resto_login,
+                resto_password=resto_password
+            )
+            
+            data_rows = []
+            if isinstance(response, dict):
+                rows = response.get("data", [])
+                cols = response.get("columnNames", [])
+                if cols and rows:
+                    data_rows = [dict(zip(cols, r)) for r in rows]
+            
+            transformed = []
+            for row in data_rows:
+                transformed.append({
+                    "id": row.get("OrderNum"),
+                    "address": {
+                        "street": row.get("Address.Street.Name"),
+                        "house": row.get("Address.House"),
+                        "flat": row.get("Address.Flat")
+                    },
+                    "courierInfo": {
+                        "courier": {"name": row.get("Courier.Name")}
+                    },
+                    "deliveryZone": row.get("DeliveryZone"),
+                    "terminalName": row.get("DeliveryTerminal.Name"),
+                    "sum": self._safe_float(row.get("OrderSum")),
+                    "whenCookingCompleted": row.get("CookingFinishTime"),
+                    "expectedDeliveryTime": row.get("ExpectedDeliveryTime"),
+                    "whenDelivered": row.get("ActualDeliveryTime")
+                })
+            return transformed
+        except Exception as e:
+            logger.error(f"Error getting detailed deliveries from Resto: {e}")
+            return []
+
     async def get_resto_roles(
         self,
         resto_url: Optional[str] = None,
