@@ -1626,17 +1626,27 @@ class IikoService:
             organization_id=organization_id
         )
         
-        # Группируем по курьеру
+        # Группируем по курьеру и ДАТЕ для точного маппинга в смены
+        # stats[courier_id][date_str] = count
         stats = {}
         for order in data.get("orders", []):
             courier = order.get("courierInfo", {}).get("courier", {})
             courier_id = courier.get("id")
-            if courier_id:
-                if courier_id not in stats:
-                    stats[courier_id] = {"id": courier_id, "name": courier.get("name"), "count": 0}
-                stats[courier_id]["count"] += 1
+            if not courier_id: continue
+            
+            # Извлекаем дату (используем completeTime или creationTime)
+            # Пример: "2024-03-27 15:30:00.000"
+            dt_str = order.get("completeTime") or order.get("creationTime")
+            if not dt_str: continue
+            
+            date_str = dt_str.split(" ")[0] # "2024-03-27"
+            
+            if courier_id not in stats:
+                stats[courier_id] = {}
+            
+            stats[courier_id][date_str] = stats[courier_id].get(date_str, 0) + 1
                 
-        return list(stats.values())
+        return stats
 
     async def get_courier_revenue_olap(
         self,

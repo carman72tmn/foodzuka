@@ -1020,14 +1020,13 @@ class IikoSyncService:
                 except Exception as e:
                     logger.warning(f"Cloud API employees failed for {company.name} (likely 401), using Resto only: {e}")
 
-                # 2.2. Синхронизация курьеров (статистика доставок)
-                courier_stats = {}
-                try:
-                    c_stats = await iiko_service.get_courier_statistics(date_from, date_to, org_id, api_login=api_login)
-                    for cs in c_stats:
-                        courier_stats[cs["id"]] = cs["count"]
-                except Exception as e:
-                    logger.warning(f"Courier stats failed for {company.name}: {e}")
+                    # 2.2. Синхронизация курьеров (статистика доставок)
+                    courier_stats = {}
+                    try:
+                        courier_stats = await iiko_service.get_courier_statistics(date_from, date_to, org_id, api_login=api_login)
+                        logger.info(f"Fetched delivery stats for {len(courier_stats)} couriers")
+                    except Exception as e:
+                        logger.warning(f"Courier stats failed for {company.name}: {e}")
 
                 # 2.2.1. Выручка курьеров из OLAP (Office)
                 # Инициализируем пустым словарем, чтобы избежать NameError ниже
@@ -1147,9 +1146,13 @@ class IikoSyncService:
                             shift.date_close = d_close
                             shift.status = status
                             shift.work_hours = hours
-                            # Обновляем выручку курьера
+                            
                             d_str = d_open.strftime("%Y-%m-%d")
+                            # Обновляем количество доставок
+                            shift.deliveries_count = courier_stats.get(e_id, {}).get(d_str, 0)
+                            # Обновляем выручку курьера
                             shift.deliveries_revenue = courier_revenues.get(e_id, {}).get(d_str, 0.0)
+                            
                             shift.updated_at = datetime.utcnow()
                         else:
                             shift = Shift(
@@ -1159,7 +1162,7 @@ class IikoSyncService:
                                 date_close=d_close,
                                 status=status,
                                 work_hours=hours,
-                                deliveries_count=courier_stats.get(e_id, 0),
+                                deliveries_count=courier_stats.get(e_id, {}).get(d_open.strftime("%Y-%m-%d"), 0),
                                 deliveries_revenue=courier_revenues.get(e_id, {}).get(d_open.strftime("%Y-%m-%d"), 0.0)
                             )
                             session.add(shift)
