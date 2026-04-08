@@ -23,6 +23,7 @@ class Employee(SQLModel, table=True):
     # Отношения
     shifts: List["Shift"] = Relationship(back_populates="employee")
     schedules: List["Schedule"] = Relationship(back_populates="employee")
+    courier_orders: List["CourierOrder"] = Relationship(back_populates="employee")
 
 
 class Shift(SQLModel, table=True):
@@ -89,8 +90,5 @@ class CourierOrder(SQLModel, table=True):
     updated_at: datetime = Field(default_factory=datetime.utcnow)
     
     # Отношения
-    employee: Optional[Employee] = Relationship()
+    employee: Optional[Employee] = Relationship(back_populates="courier_orders")
     shift: Optional[Shift] = Relationship(back_populates="courier_orders")
-    
-    # Реляции
-    employee: Optional[Employee] = Relationship(back_populates="schedules")
