@@ -44,6 +44,7 @@ class Shift(SQLModel, table=True):
     
     # Реляции
     employee: Optional[Employee] = Relationship(back_populates="shifts")
+    courier_orders: List["CourierOrder"] = Relationship(back_populates="shift")
 
 
 class Schedule(SQLModel, table=True):
@@ -58,6 +59,38 @@ class Schedule(SQLModel, table=True):
     
     created_at: datetime = Field(default_factory=datetime.utcnow)
     updated_at: datetime = Field(default_factory=datetime.utcnow)
+
+    # Реляции
+    employee: Optional[Employee] = Relationship(back_populates="schedules")
+
+
+class CourierOrder(SQLModel, table=True):
+    __tablename__ = "courier_orders"
+    
+    id: Optional[int] = Field(default=None, primary_key=True)
+    iiko_id: str = Field(index=True, unique=True, description="ID заказа в iiko")
+    employee_id: int = Field(foreign_key="employees.id", description="ID сотрудника (курьера)")
+    shift_id: Optional[int] = Field(default=None, foreign_key="shifts.id", description="ID смены")
+    
+    address: Optional[str] = Field(default=None, description="Адрес доставки")
+    items_summary: Optional[str] = Field(default=None, description="Состав заказа (текст)")
+    delivery_zone: Optional[str] = Field(default=None, description="Зона доставки")
+    
+    # Временные метки iiko
+    created_at_iiko: datetime = Field(description="Время создания заказа")
+    cooking_completed_at: Optional[datetime] = Field(default=None, description="Время готовности")
+    expected_delivery_time: Optional[datetime] = Field(default=None, description="Ожидаемое время доставки")
+    actual_delivery_time: Optional[datetime] = Field(default=None, description="Фактическое время вручения")
+    
+    is_late: bool = Field(default=False, description="Опоздание курьера")
+    cooking_late: bool = Field(default=False, description="Опоздание кухни")
+    
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    updated_at: datetime = Field(default_factory=datetime.utcnow)
+    
+    # Отношения
+    employee: Optional[Employee] = Relationship()
+    shift: Optional[Shift] = Relationship(back_populates="courier_orders")
     
     # Реляции
     employee: Optional[Employee] = Relationship(back_populates="schedules")

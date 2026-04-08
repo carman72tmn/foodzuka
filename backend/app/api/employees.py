@@ -4,7 +4,7 @@ from sqlmodel import Session, select
 from typing import List, Optional
 
 from app.core.database import get_session, engine
-from app.models.employee import Employee, Shift, Schedule
+from app.models.employee import Employee, Shift, Schedule, CourierOrder
 from app.services.iiko_sync_service import iiko_sync_service
 import logging
 
@@ -140,7 +140,26 @@ async def get_courier_report(
     
     report = []
     for courier in couriers:
-        # Считаем доставки из смен за период
+        # Получаем заказы курьера за период
+        orders = session.exec(
+            select(CourierOrder).where(
+                CourierOrder.employee_id == courier.id,
+                CourierOrder.created_at_iiko >= df,
+                CourierOrder.created_at_iiko <= dt
+            )
+        ).all()
+        
+        # Статистика по зонам
+        zones = {}
+        for o in orders:
+            z_name = o.delivery_zone or "Не указана"
+            zones[z_name] = zones.get(z_name, 0) + 1
+            
+        # Опоздания
+        late_count = sum(1 for o in orders if o.is_late)
+        cooking_late_count = sum(1 for o in orders if o.cooking_late)
+        
+        # Считаем часы и выручку из смен
         shifts = session.exec(
             select(Shift).where(
                 Shift.employee_id == courier.id,
@@ -149,7 +168,8 @@ async def get_courier_report(
             )
         ).all()
         
-        total_deliveries = sum(s.deliveries_count or 0 for s in shifts)
+        # FALLBACK: Если deliveries_count в сменах пуст, используем количество из CourierOrder
+        total_deliveries = len(orders) if len(orders) > 0 else sum(s.deliveries_count or 0 for s in shifts)
         total_hours = sum(s.work_hours or 0.0 for s in shifts)
         total_revenue = sum(getattr(s, "deliveries_revenue", 0.0) or 0.0 for s in shifts)
         
@@ -159,7 +179,10 @@ async def get_courier_report(
             "deliveries": total_deliveries,
             "revenue": round(total_revenue, 2),
             "hours": round(total_hours, 2),
-            "shifts_count": len(shifts)
+            "shifts_count": len(shifts),
+            "late_deliveries": late_count,
+            "cooking_lates": cooking_late_count,
+            "zones": zones
         })
         
     return {"status": "success", "data": report}

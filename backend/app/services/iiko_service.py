@@ -1718,6 +1718,50 @@ class IikoService:
             logger.error(f"Error getting courier revenue OLAP: {e}")
             return {}
 
+    async def get_delivery_restrictions(
+        self,
+        organization_id: str,
+        api_login: Optional[str] = None
+    ) -> List[Dict[str, Any]]:
+        """Получение ограничений и зон доставки из iiko Cloud"""
+        try:
+            res = await self._request(
+                "GET", f"/api/1/delivery_restrictions?organizationIds={organization_id}",
+                api_login=api_login,
+                organization_id=organization_id
+            )
+            # Возвращает список ограничений, в каждом есть deliveryZones
+            return res.get("deliveryRestrictions", [])
+        except Exception as e:
+            logger.error(f"Error getting delivery restrictions: {e}")
+            return []
+
+    async def get_detailed_deliveries(
+        self,
+        date_from: datetime,
+        date_to: datetime,
+        organization_id: str,
+        api_login: Optional[str] = None
+    ) -> List[Dict[str, Any]]:
+        """Получение детальной истории доставок из iiko Cloud API"""
+        date_format = "%Y-%m-%d %H:%M:%S.000"
+        payload = {
+            "organizationIds": [organization_id],
+            "deliveryDateFrom": date_from.strftime(date_format),
+            "deliveryDateTo": date_to.strftime(date_format)
+        }
+        try:
+            data = await self._request(
+                "POST", "/api/1/deliveries/history", 
+                payload,
+                api_login=api_login,
+                organization_id=organization_id
+            )
+            return data.get("orders", [])
+        except Exception as e:
+            logger.error(f"Error getting detailed deliveries: {e}")
+            return []
+
     @staticmethod
     def _safe_float(value) -> float:
         """Безопасное преобразование значения к float"""

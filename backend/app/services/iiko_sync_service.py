@@ -11,7 +11,7 @@ from app.models.category import Category
 from app.models.product import Product, ProductSize, ProductModifierGroup, ProductModifier
 from app.models.sync_log import SyncLog
 from app.models.order import Order, OrderItem, OrderStatus
-from app.models.employee import Employee, Shift, Schedule
+from app.models.employee import Employee, Shift, Schedule, CourierOrder
 from app.models.company import Branch, Company
 from app.models.customer import Customer
 from app.models.vk_user import VkUser
@@ -1174,7 +1174,95 @@ class IikoSyncService:
                         session.rollback() # Откатываем только эту смену
                         continue
 
-                # 4. СИНХРОНИЗАЦИЯ ГРАФИКОВ
+                # 4. СИНХРОНИЗАЦИЯ ДЕТАЛЬНЫХ ЗАКАЗОВ КУРЬЕРОВ
+                try:
+                    detailed_orders = await iiko_service.get_detailed_deliveries(date_from, date_to, org_id, api_login=api_login)
+                    restrictions = await iiko_service.get_delivery_restrictions(org_id, api_login=api_login)
+                    
+                    # Маппинг терминал -> зона
+                    terminal_zones = {}
+                    for restr in restrictions:
+                        t_id = restr.get("deliveryTerminalId")
+                        zones = restr.get("deliveryZones", [])
+                        if t_id and zones:
+                            terminal_zones[t_id] = zones[0].get("name")
+                    
+                    for order_data in detailed_orders:
+                        o_id = order_data.get("id")
+                        courier = order_data.get("courierInfo", {}).get("courier", {})
+                        courier_iiko_id = courier.get("id")
+                        
+                        if not o_id or not courier_iiko_id: continue
+                        
+                        # Находим сотрудника
+                        db_emp = session.exec(select(Employee).where(Employee.iiko_id == courier_iiko_id)).first()
+                        if not db_emp: continue
+                        
+                        # Временные метки
+                        when_created = self._parse_iiko_time(order_data.get("whenCreated"))
+                        when_delivered = self._parse_iiko_time(order_data.get("whenDelivered") or order_data.get("completeTime"))
+                        expected_time = self._parse_iiko_time(order_data.get("deliveryDate"))
+                        when_cooking_completed = self._parse_iiko_time(order_data.get("whenCookingCompleted"))
+                        
+                        if not when_created: continue
+                        
+                        # Состав заказа
+                        items = order_data.get("order", {}).get("items", [])
+                        items_text = ", ".join([f"{i.get('name')} x{i.get('amount')}" for i in items])
+                        
+                        # Адрес
+                        addr_data = order_data.get("order", {}).get("address", {})
+                        address = f"{addr_data.get('street', '')} {addr_data.get('house', '')}, кв. {addr_data.get('flat', '')}".strip(", ")
+                        
+                        # Зона
+                        zone = terminal_zones.get(order_data.get("deliveryTerminalId"))
+                        
+                        # Расчет опозданий
+                        is_late = False
+                        if when_delivered and expected_time:
+                            is_late = when_delivered > expected_time
+                            
+                        cooking_late = False
+                        if when_cooking_completed and expected_time:
+                            # Опоздание кухни - если готовность позже ожидаемого времени доставки (или по своей логике)
+                            cooking_late = when_cooking_completed > expected_time
+                            
+                        # Находим смену
+                        shift_obj = session.exec(
+                            select(Shift)
+                            .where(Shift.employee_id == db_emp.id)
+                            .where(Shift.date_open <= (when_delivered or when_created))
+                            .order_by(Shift.date_open.desc())
+                        ).first()
+                        
+                        db_order = session.exec(select(CourierOrder).where(CourierOrder.iiko_id == o_id)).first()
+                        if db_order:
+                            db_order.actual_delivery_time = when_delivered
+                            db_order.is_late = is_late
+                            db_order.cooking_late = cooking_late
+                            db_order.updated_at = datetime.utcnow()
+                        else:
+                            db_order = CourierOrder(
+                                iiko_id=o_id,
+                                employee_id=db_emp.id,
+                                shift_id=shift_obj.id if shift_obj else None,
+                                address=address,
+                                items_summary=items_text[:500],
+                                delivery_zone=zone,
+                                created_at_iiko=when_created,
+                                cooking_completed_at=when_cooking_completed,
+                                expected_delivery_time=expected_time,
+                                actual_delivery_time=when_delivered,
+                                is_late=is_late,
+                                cooking_late=cooking_late
+                            )
+                            session.add(db_order)
+                    
+                    logger.info(f"Synced {len(detailed_orders)} detailed courier orders for {company.name}")
+                except Exception as e:
+                    logger.error(f"Error syncing detailed courier orders for {company.name}: {e}")
+
+                # 5. СИНХРОНИЗАЦИЯ ГРАФИКОВ
                 try:
                     await self.sync_schedules(session, date_from, date_to, org_id, api_login=api_login)
                 except Exception as e:
@@ -1448,6 +1536,21 @@ class IikoSyncService:
             "synced_activities": synced_count,
             "errors": error_count
         }
+
+
+    def _parse_iiko_time(self, timestr: Optional[str]) -> Optional[datetime]:
+        """Парсинг времени из iiko (формат '2024-03-27 15:30:00.000' или ISO)"""
+        if not timestr:
+            return None
+        try:
+            # iiko Cloud часто присылает '2024-03-27 15:30:00.000'
+            if " " in timestr and "." in timestr:
+                return datetime.strptime(timestr, "%Y-%m-%d %H:%M:%S.%f")
+            if " " in timestr:
+                return datetime.strptime(timestr, "%Y-%m-%d %H:%M:%S")
+            return datetime.fromisoformat(timestr.replace("Z", "+00:00"))
+        except:
+            return None
 
 
 # Глобальный экземпляр
