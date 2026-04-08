@@ -1020,13 +1020,13 @@ class IikoSyncService:
                 except Exception as e:
                     logger.warning(f"Cloud API employees failed for {company.name} (likely 401), using Resto only: {e}")
 
-                    # 2.2. Синхронизация курьеров (статистика доставок)
-                    courier_stats = {}
-                    try:
-                        courier_stats = await iiko_service.get_courier_statistics(date_from, date_to, org_id, api_login=api_login)
-                        logger.info(f"Fetched delivery stats for {len(courier_stats)} couriers")
-                    except Exception as e:
-                        logger.warning(f"Courier stats failed for {company.name}: {e}")
+                # 2.2. Синхронизация курьеров (статистика доставок)
+                courier_stats = {}
+                try:
+                    courier_stats = await iiko_service.get_courier_statistics(date_from, date_to, org_id, api_login=api_login)
+                    logger.info(f"Fetched delivery stats for {len(courier_stats)} couriers")
+                except Exception as e:
+                    logger.warning(f"Courier stats failed for {company.name}: {e}")
 
                 # 2.2.1. Выручка курьеров из OLAP (Office)
                 # Инициализируем пустым словарем, чтобы избежать NameError ниже
