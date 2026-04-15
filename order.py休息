@@ -61,12 +61,16 @@ class Order(SQLModel, table=True):
     delivery_zone: Optional[str] = Field(default=None, description="Зона доставки")
     is_paid: bool = Field(default=False, description="Заказ оплачен")
     
+    # Данные для отмены заказа
+    cancellation_reason: Optional[str] = Field(default=None, description="Причина отмены заказа из iiko")
+    cancelled_by: Optional[str] = Field(default=None, description="Кем отменён заказ")
+    
     # Данные антиспам проверки
     spam_score: Optional[int] = Field(default=None, description="Оценка спама (0-100)")
     spam_info: Optional[str] = Field(default=None, description="Информация о спаме")
     
     # JSON-поля для хранения детализированных данных, если они нужны
-    order_items_details: Optional[Dict[str, Any]] = Field(default=None, sa_column=Column(JSON), description="Полный состав заказа из iiko")
+    order_items_details: Optional[List[Dict[str, Any]]] = Field(default=None, sa_column=Column(JSON), description="Полный состав заказа из iiko")
     discounts_details: Optional[Dict[str, Any]] = Field(default=None, sa_column=Column(JSON), description="Детали скидок")
     customer_info_details: Optional[Dict[str, Any]] = Field(default=None, sa_column=Column(JSON), description="Полные данные заказчика")
     
@@ -105,6 +109,16 @@ class OrderItem(SQLModel, table=True):
     quantity: int = Field(default=1, ge=1)
     price: Decimal = Field(sa_type=Numeric(10, 2))  # Цена на момент заказа
     total: Decimal = Field(sa_type=Numeric(10, 2))  # quantity * price
+    
+    # Новые поля для детализации
+    size_name: Optional[str] = Field(default=None, max_length=255, description="Название размера (напр. '30 см')")
+    size_iiko_id: Optional[str] = Field(default=None, max_length=255, description="iiko ID размера")
+    comment: Optional[str] = Field(default=None, description="Комментарий к позиции заказа")
+    modifiers: Optional[List[Dict[str, Any]]] = Field(
+        default=None,
+        sa_column=Column(JSON),
+        description="Список выбранных модификаторов [{name, iiko_id, price, amount}]"
+    )
 
     class Config:
         """Настройки модели"""

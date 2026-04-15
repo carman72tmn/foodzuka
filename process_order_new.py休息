@@ -1,0 +1,171 @@
+# Updated process_iiko_order method
+
+    async def process_iiko_order(self, session: Session, iiko_order_data: Dict[str, Any], organization_id: str, iiko_card_data: Optional[Dict[str, Any]] = None):
+        \"\"\"
+        Обработка данных заказа из iiko.
+        Создает новый или обновляет существующий заказ в БД.
+        \"\"\"
+        order_id_iiko = iiko_order_data.get("id")
+        logger.info(f"Processing iiko order: {order_id_iiko} for org {organization_id}")
+        
+        if not order_id_iiko:
+            logger.warning(f"Order data missing ID: {iiko_order_data}")
+            return
+
+        # ... (terminal group cache logic remains the same)
+        if not hasattr(self, "_terminal_groups_cache"):
+            self._terminal_groups_cache = {}
+        settings_db = session.exec(select(IikoSettings)).first()
+        api_login = settings_db.api_login if settings_db else None
+        if not self._terminal_groups_cache:
+            try:
+                tgs = await iiko_service.get_terminal_groups(api_login=api_login, organization_id=organization_id)
+                for tg_entry in tgs:
+                    for tg in tg_entry.get("items", []):
+                        self._terminal_groups_cache[tg["id"]] = tg["name"]
+            except Exception as e:
+                logger.error(f"Failed to fetch terminal groups for naming: {e}")
+
+        # Ищем заказ по iiko_order_id
+        order = session.exec(select(Order).where(Order.iiko_order_id == order_id_iiko)).first()
+        
+        # Пытаемся безопасно извлечь данные заказа
+        o_data = iiko_order_data.get("order", iiko_order_data)
+        
+        # Status mapping
+        iiko_status = iiko_order_data.get("creationStatus") or o_data.get("status", "")
+        status_map = {
+            "New": OrderStatus.NEW, "Unconfirmed": OrderStatus.NEW,
+            "WaitCooking": OrderStatus.CONFIRMED, "ReadyForCooking": OrderStatus.CONFIRMED,
+            "CookingStarted": OrderStatus.COOKING, "CookingCompleted": OrderStatus.READY,
+            "Waiting": OrderStatus.READY, "OnWay": OrderStatus.DELIVERING,
+            "Delivered": OrderStatus.DELIVERED, "Cancelled": OrderStatus.CANCELLED,
+            "Error": OrderStatus.CANCELLED, "NotConfirmed": OrderStatus.CANCELLED
+        }
+        mapped_status = status_map.get(str(iiko_status), OrderStatus.CONFIRMED)
+
+        # Данные заказчика
+        customer_info = o_data.get("customer") or {}
+        phone = o_data.get("phone") or customer_info.get("phone", "")
+        firstname = customer_info.get("name", "Гость")
+        surname = customer_info.get("surname", "")
+        name = f"{firstname} {surname}".strip() if surname else firstname
+
+        # Данные об отмене
+        cancel_info = o_data.get("cancellationInfo")
+        c_reason = None
+        c_by = None
+        if cancel_info:
+            c_reason = cancel_info.get("message") or (cancel_info.get("cause", {}).get("name") if cancel_info.get("cause") else None)
+            # Иногда в iiko Front указывают причину текстом
+            c_by = "iiko Front / CallCenter"
+
+        # ... (тайминг, оплата, адрес, зоны - оставляем как было, 
+        # но убеждаемся что используем новые поля в Order)
+        
+        # Финансы
+        sum_total = Decimal(str(o_data.get("sum", 0)))
+        total_with_discount = Decimal(str(o_data.get("totalSum", sum_total)))
+        total_discount = sum_total - total_with_discount
+        source = o_data.get("sourceKey") or o_data.get("source")
+        comment = o_data.get("comment")
+        external_number = iiko_order_data.get("externalNumber") or o_data.get("externalNumber") or o_data.get("number")
+
+        # ... (поиск customer_id)
+        customer = session.exec(select(Customer).where(Customer.phone == phone)).first() if phone else None
+        
+        terminal_group_id = iiko_order_data.get("terminalGroupId") or o_data.get("terminalGroupId")
+        terminal_group_name = self._terminal_groups_cache.get(terminal_group_id) if terminal_group_id else None
+
+        if not order:
+            branch = session.exec(select(Branch).where(Branch.iiko_terminal_id == terminal_group_id)).first() if terminal_group_id else None
+            order = Order(
+                iiko_order_id=order_id_iiko,
+                external_number=external_number,
+                terminal_group_id=terminal_group_id,
+                terminal_group_name=terminal_group_name,
+                source=source,
+                customer_name=name,
+                customer_phone=phone,
+                customer_id=customer.id if customer else None,
+                branch_id=branch.id if branch else 1,
+                total_amount=sum_total,
+                status=mapped_status,
+                comment=comment,
+                total_with_discount=total_with_discount,
+                total_discount=total_discount,
+                cancellation_reason=c_reason,
+                cancelled_by=c_by,
+                order_items_details=o_data.get("items", []), # Сохраняем и JSON для подстраховки
+                # ... прочие поля
+            )
+            # Заполняем остальные поля (copying from original)
+            order.iiko_creation_time = self._parse_iiko_time(o_data.get("creationTime"))
+            order.expected_time = self._parse_iiko_time(o_data.get("completeBefore"))
+            order.city = "Тюмень" # default
+            session.add(order)
+            session.flush()
+        else:
+            order.status = mapped_status
+            order.total_amount = sum_total
+            order.total_with_discount = total_with_discount
+            order.total_discount = total_discount
+            order.cancellation_reason = c_reason or order.cancellation_reason
+            order.cancelled_by = c_by or order.cancelled_by
+            order.comment = comment or order.comment
+            order.order_items_details = o_data.get("items", []) or order.order_items_details
+            flag_modified(order, "order_items_details")
+            session.add(order)
+
+        # РАЗБОР ПОЗИЦИЙ ЗАКАЗА (ITEMS)
+        items_data = o_data.get("items", [])
+        if isinstance(items_data, list):
+            # Удаляем старые позиции для обновления
+            existing_items = session.exec(select(OrderItem).where(OrderItem.order_id == order.id)).all()
+            for ei in existing_items:
+                session.delete(ei)
+            
+            for item_data in items_data:
+                product_name = item_data.get("name") or "Товар"
+                quantity = float(item_data.get("amount", 1)) # Может быть дробным для весовых товаров
+                price = Decimal(str(item_data.get("price", 0)))
+                total = Decimal(str(item_data.get("sum", price * Decimal(str(quantity)))))
+                
+                # Размер
+                size_info = item_data.get("size")
+                size_name = None
+                size_id = None
+                if isinstance(size_info, dict):
+                    size_name = size_info.get("name")
+                    size_id = size_info.get("id")
+
+                # Модификаторы
+                modifiers_parsed = []
+                modifiers_data = item_data.get("modifiers", [])
+                for mod in modifiers_data:
+                    modifiers_parsed.append({
+                        "name": mod.get("name"),
+                        "iiko_id": mod.get("productId"),
+                        "price": mod.get("price"),
+                        "amount": mod.get("amount"),
+                        "sum": mod.get("sum")
+                    })
+
+                p_id_iiko = item_data.get("productId")
+                product = session.exec(select(Product).where(Product.iiko_id == p_id_iiko)).first() if p_id_iiko else None
+                
+                new_item = OrderItem(
+                    order_id=order.id,
+                    product_id=product.id if product else None,
+                    product_name=product_name,
+                    quantity=int(quantity), # В БД у нас integer, если нужно дробное - придется менять тип
+                    price=price,
+                    total=total,
+                    size_name=size_name,
+                    size_iiko_id=size_id,
+                    comment=item_data.get("comment"),
+                    modifiers=modifiers_parsed
+                )
+                session.add(new_item)
+        
+        session.commit()

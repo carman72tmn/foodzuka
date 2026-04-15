@@ -26,6 +26,11 @@ class IikoSettings(SQLModel, table=True):
         default=None, max_length=255,
         description="UUID терминальной группы"
     )
+    price_category_id: Optional[str] = Field(
+        default=None, max_length=255,
+        description="UUID выбранной категории цен для выгрузки меню"
+    )
+
 
     # Типы оплаты
     payment_type_cash: Optional[str] = Field(

@@ -1,0 +1,83 @@
+import re
+import os
+
+def patch_file(filepath, patterns_replacements):
+    with open(filepath, 'r', encoding='utf-8') as f:
+        content = f.read()
+    
+    for pattern, replacement in patterns_replacements:
+        content = re.sub(pattern, replacement, content, flags=re.DOTALL)
+    
+    with open(filepath, 'w', encoding='utf-8') as f:
+        f.write(content)
+
+# 1. Patching schemas/__init__.py
+# Adding fields to OrderItemResponse and OrderResponse
+schemas_patch = [
+    (
+        r'class OrderItemResponse\(BaseModel\):.*?model_config = ConfigDict\(from_attributes=True\)',
+        '''class OrderItemResponse(BaseModel):
+    """Ответ API с позицией заказа"""
+    id: int
+    product_id: Optional[int] = None
+    product_name: str
+    quantity: int
+    price: Decimal
+    total: Decimal
+    size_name: Optional[str] = None
+    size_iiko_id: Optional[str] = None
+    comment: Optional[str] = None
+    modifiers: Optional[List[Dict[str, Any]]] = []
+
+    model_config = ConfigDict(from_attributes=True)'''
+    ),
+    (
+        r'class OrderResponse\(BaseModel\):.*?model_config = ConfigDict\(from_attributes=True\)',
+        '''class OrderResponse(BaseModel):
+    """Ответ API с заказом"""
+    id: int
+    telegram_user_id: Optional[int] = None
+    telegram_username: Optional[str] = None
+    customer_name: Optional[str] = None
+    customer_phone: Optional[str] = None
+    delivery_address: Optional[str] = None
+    total_amount: Decimal
+    bonus_spent: Decimal
+    total_discount: Decimal
+    total_with_discount: Decimal = Decimal("0.00")
+    branch_id: Optional[int] = None
+    customer_id: Optional[int] = None
+    iiko_order_id: Optional[str] = None
+    external_number: Optional[str] = None
+    terminal_group_id: Optional[str] = None
+    terminal_group_name: Optional[str] = None
+    payment_method: Optional[str] = None
+    order_type: Optional[str] = None
+    courier_name: Optional[str] = None
+    delivery_zone: Optional[str] = None
+    is_paid: bool = False
+    city: Optional[str] = None
+    status: OrderStatus
+    spam_score: Optional[int] = None
+    spam_info: Optional[str] = None
+    comment: Optional[str] = None
+    cancellation_reason: Optional[str] = None
+    cancelled_by: Optional[str] = None
+    promo_code_id: Optional[int] = None
+    created_at: datetime
+    updated_at: datetime
+    items: List[OrderItemResponse] = []
+    order_items_details: Optional[List[Dict[str, Any]]] = None
+    customer_info_details: Optional[Dict[str, Any]] = None
+
+    model_config = ConfigDict(from_attributes=True)'''
+    )
+]
+
+# 2. Patching iiko_sync_service.py
+# We need to insert methods and replace complex ones.
+# This part is hardest. I'll use placeholders in the regex.
+
+print("Patching schemas...")
+patch_file('/root/foodzuka/backend/app/schemas/__init__.py', schemas_patch)
+print("Done.")

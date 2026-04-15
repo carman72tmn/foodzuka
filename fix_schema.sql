@@ -1,7 +1,8 @@
--- Migration: Add fields for sizes, modifiers and cancellation details
+-- Fix missing columns after failed migration
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS cancellation_reason TEXT;
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS cancelled_by VARCHAR(255);
+
 ALTER TABLE order_items ADD COLUMN IF NOT EXISTS size_name VARCHAR(255);
 ALTER TABLE order_items ADD COLUMN IF NOT EXISTS size_iiko_id VARCHAR(255);
 ALTER TABLE order_items ADD COLUMN IF NOT EXISTS comment TEXT;
 ALTER TABLE order_items ADD COLUMN IF NOT EXISTS modifiers JSONB DEFAULT '[]'::jsonb;
-ALTER TABLE orders ADD COLUMN IF NOT EXISTS cancellation_reason TEXT;
-ALTER TABLE orders ADD COLUMN IF NOT EXISTS cancelled_by VARCHAR(255);

@@ -79,7 +79,8 @@ class IikoService:
         json_data: Optional[Dict] = None,
         timeout: float = 30.0,
         api_login: Optional[str] = None,
-        organization_id: Optional[str] = None
+        organization_id: Optional[str] = None,
+        _is_retry: bool = False
     ) -> Dict[str, Any]:
         """Универсальный метод для запросов к iiko API с авторизацией"""
         token = await self._get_access_token(api_login=api_login)
@@ -89,33 +90,49 @@ class IikoService:
         if org_id and (org_id.startswith("your_") or "placeholder" in org_id.lower()):
             org_id = None
 
-        # Если в json_data есть organizationId или organizationIds - подменяем если передали organization_id
-        if json_data and org_id:
+        # Подготовка данных (копия чтобы не менять оригинал)
+        payload = json_data.copy() if json_data else {}
+
+        # Если в payload есть organizationId или organizationIds - подменяем если передали organization_id
+        if org_id:
             # Всегда стараемся добавить оба варианта для совместимости с разными версиями iiko Cloud
-            if "organizationId" in json_data or any(k in endpoint for k in ["/by_id", "/create", "/nomenclature", "/stop_lists"]):
-                json_data["organizationId"] = org_id
+            if "organizationId" in payload or any(k in endpoint for k in ["/by_id", "/create", "/nomenclature", "/stop_lists"]):
+                payload["organizationId"] = org_id
             
-            if "organizationIds" in json_data or any(k in endpoint for k in [
+            if "organizationIds" in payload or any(k in endpoint for k in [
                 "/organizations", "/terminal_groups", "/payment_types", "/deliveries/order_types", 
                 "/discounts", "/menu", "/stop_lists", "/by_delivery_date_and_status", "/employees", 
                 "/shift", "/schedule", "/reports/olap"
             ]):
-                if "organizationIds" not in json_data or not isinstance(json_data["organizationIds"], list):
-                    json_data["organizationIds"] = [org_id]
-                elif not json_data["organizationIds"]:
-                    json_data["organizationIds"] = [org_id]
+                if "organizationIds" not in payload or not isinstance(payload["organizationIds"], list):
+                    payload["organizationIds"] = [org_id]
+                elif not payload["organizationIds"]:
+                    payload["organizationIds"] = [org_id]
 
-        print(f"DEBUG iiko request: {endpoint} | Payload: {json_data}")
+        logger.debug(f"iiko request: {method} {endpoint} | Payload keys: {list(payload.keys()) if payload else 'None'}")
+        
         async with httpx.AsyncClient(timeout=timeout) as client:
             response = await client.request(
                 method,
                 f"{self.api_url}{endpoint}",
                 headers={"Authorization": f"Bearer {token}"},
-                json=json_data
+                json=payload
             )
+            
+            # Обработка 401 (Unauthorized) - пробуем обновить токен один раз
+            if response.status_code == 401 and not _is_retry:
+                logger.warning(f"iiko API 401 Unauthorized for {endpoint}. Retrying with fresh token...")
+                self.access_token = None
+                self.token_expires_at = None
+                return await self._request(
+                    method, endpoint, json_data, timeout, 
+                    api_login, organization_id, _is_retry=True
+                )
+
             if response.status_code >= 400:
-                print(f"DEBUG iiko error response: {response.status_code} | Body: {response.text}")
-            response.raise_for_status()
+                logger.error(f"iiko API Error: {response.status_code} | URL: {endpoint} | Body: {response.text}")
+                response.raise_for_status()
+                
             return response.json()
 
     # =========================================================================
@@ -327,26 +344,97 @@ class IikoService:
         organization_id: Optional[str] = None
     ) -> Dict[str, Any]:
         """
-        Получение конкретного внешнего меню по ID
-
-        Args:
-            external_menu_id: ID внешнего меню
-            price_category_id: ID ценовой категории (опционально)
+        Получение конкретного внешнего меню по ID через API v2.
+        
+        Использует прямой HTTP-запрос (минуя _request) во избежание
+        автодобавления 'organizationId' (без s), что вызывает ошибку 400.
+        
+        Если iiko возвращает ошибку 'Price category id is not correct',
+        автоматически пытается использовать базовую категорию или находит 
+        первую доступную в списке меню и повторяет запрос.
         """
         org_id = organization_id or self.organization_id
-        payload: Dict[str, Any] = {
-            "externalMenuId": external_menu_id,
-            "organizationIds": [org_id]
-        }
-        if price_category_id:
-            payload["priceCategoryId"] = price_category_id
+        token = await self._get_access_token(api_login=api_login)
+        
+        async def _do_raw_request(pcid: Optional[str] = None) -> httpx.Response:
+            payload: Dict[str, Any] = {
+                "externalMenuId": external_menu_id,
+                "organizationIds": [org_id]
+            }
+            if pcid:
+                payload["priceCategoryId"] = pcid
+            
+            logger.info(f"Запрос iiko меню ID={external_menu_id} (org={org_id}, priceCategoryId={pcid})")
+            async with httpx.AsyncClient(timeout=60.0) as client:
+                resp = await client.post(
+                    f"{self.api_url}/api/2/menu/by_id",
+                    headers={"Authorization": f"Bearer {token}"},
+                    json=payload
+                )
+            return resp
 
-        return await self._request(
-            "POST", "/api/2/menu/by_id", 
-            payload,
-            api_login=api_login,
-            organization_id=org_id
-        )
+        # 1. Пробуем основной запрос
+        response = await _do_raw_request(price_category_id)
+        
+        if response.status_code == 401:
+            self.access_token = None
+            self.token_expires_at = None
+            token = await self._get_access_token(api_login=api_login)
+            response = await _do_raw_request(price_category_id)
+            
+        # 2. Если 400 и ошибка в ценовой категории — пробуем авто-исправление
+        if response.status_code == 400:
+            try:
+                err_body = response.json()
+            except:
+                err_body = {}
+            
+            if "Price category" in err_body.get("errorDescription", "") or err_body.get("error") == "EXTERNAL_MENU_DATA_MISSED":
+                logger.warning(f"iiko требует priceCategoryId для меню {external_menu_id}. Пробуем авто-подбор...")
+                
+                # Сначала пробуем "нулевую" (базовую) категорию
+                base_pcid = "00000000-0000-0000-0000-000000000000"
+                if price_category_id != base_pcid:
+                    logger.info(f"Пробуем базовую ценовую категорию: {base_pcid}")
+                    response = await _do_raw_request(base_pcid)
+                
+                # Если всё еще 400 — запрашиваем список всех доступных ценовых категорий для этого меню
+                if response.status_code == 400:
+                    try:
+                        async with httpx.AsyncClient(timeout=30.0) as client:
+                            menu_list_resp = await client.post(
+                                f"{self.api_url}/api/2/menu",
+                                headers={"Authorization": f"Bearer {token}"},
+                                json={"organizationIds": [org_id]}
+                            )
+                        if menu_list_resp.status_code == 200:
+                            menus_data = menu_list_resp.json()
+                            # Ищем наше меню в списке
+                            found_pcid = None
+                            for menu in menus_data.get("externalMenus", []):
+                                if str(menu.get("id")) == str(external_menu_id):
+                                    price_cats = menu.get("priceCategories", [])
+                                    if price_cats:
+                                        found_pcid = price_cats[0].get("id") or price_cats[0].get("priceCategoryId")
+                                        break
+                            
+                            # Если не нашли в меню, попробуем первую из общего списка priceCategories (если есть)
+                            if not found_pcid and menus_data.get("priceCategories"):
+                                found_pcid = menus_data["priceCategories"][0].get("id")
+
+                            if found_pcid:
+                                logger.info(f"Найдена подходящая категория: {found_pcid}. Повторяем запрос.")
+                                response = await _do_raw_request(found_pcid)
+                    except Exception as e:
+                        logger.error(f"Ошибка при попытке авто-подбора ценовой категории: {e}")
+
+        if response.status_code >= 400:
+            logger.error(f"iiko /api/2/menu/by_id критическая ошибка {response.status_code}: {response.text}")
+            response.raise_for_status()
+            
+        return response.json()
+
+
 
     # =========================================================================
     # Стоп-листы
@@ -1730,6 +1818,45 @@ class IikoService:
             logger.error(f"Error fetching delivery zones from Resto: {e}")
             return []
 
+    async def get_resto_delivery_history(
+        self,
+        date_from: datetime,
+        date_to: datetime,
+        resto_url: Optional[str] = None,
+        resto_login: Optional[str] = None,
+        resto_password: Optional[str] = None
+    ) -> List[str]:
+        """
+        Получение списка GUID заказов из iiko Resto.
+        В RMS методе by_date параметрыfrom и to в формате yyyy-MM-dd
+        """
+        try:
+            params = {
+                "from": date_from.strftime("%Y-%m-%d"),
+                "to": date_to.strftime("%Y-%m-%d")
+            }
+            data = await self._resto_request(
+                "GET", "/deliveries/by_date",
+                params=params,
+                resto_url=resto_url,
+                resto_login=resto_login,
+                resto_password=resto_password
+            )
+            
+            if isinstance(data, str):
+                import xml.etree.ElementTree as ET
+                root = ET.fromstring(data)
+                order_ids = []
+                for delivery in root.findall('.//deliveryOrder'):
+                    oid = delivery.findtext('id')
+                    if oid:
+                        order_ids.append(oid)
+                return order_ids
+            return []
+        except Exception as e:
+            logger.error(f"Error getting delivery history from Resto: {e}")
+            return []
+
     def _extract_role(self, emp) -> str:
         """Безопасное извлечение названия роли из разных структур XML iiko"""
         # 1. mainRoleCode (фактически найден в логах)
@@ -1900,6 +2027,40 @@ class IikoService:
             logger.error(f"Error getting delivery restrictions: {e}")
             return []
 
+    async def get_orders_by_date(
+        self,
+        date_from: datetime,
+        date_to: datetime,
+        organization_id: str,
+        api_login: Optional[str] = None
+    ) -> List[Dict[str, Any]]:
+        """
+        Получение списка заказов из iiko Cloud по интервалу дат.
+        Использует эндпоинт /api/1/deliveries/by_delivery_date_and_status
+        """
+        # Формат iiko: yyyy-MM-dd HH:mm:ss.fff
+        date_format = "%Y-%m-%d %H:%M:%S.000"
+        payload = {
+            "organizationIds": [organization_id],
+            "deliveryDateFrom": date_from.strftime(date_format),
+            "deliveryDateTo": date_to.strftime(date_format),
+            "statuses": [
+                "Unconfirmed", "WaitCooking", "ReadyForCooking", "CookingStarted", 
+                "CookingCompleted", "Waiting", "OnWay", "Delivered", "Cancelled"
+            ]
+        }
+        try:
+            res = await self._request(
+                "POST", "/api/1/deliveries/by_delivery_date_and_status",
+                payload,
+                api_login=api_login,
+                organization_id=organization_id
+            )
+            return res.get("orders", [])
+        except Exception as e:
+            logger.error(f"Error getting delivery orders by date: {e}")
+            return []
+
     async def get_detailed_deliveries(
         self,
         date_from: datetime,
@@ -1924,6 +2085,49 @@ class IikoService:
             return data.get("orders", [])
         except Exception as e:
             logger.error(f"Error getting detailed deliveries: {e}")
+            return []
+
+    async def get_resto_delivery_history(self, date_from: str, date_to: str, resto_url: str = None, key: str = None, **kwargs) -> List[str]:
+        """
+        Получение истории доставок из iiko Office (Resto) API v2.
+        Возвращает список ID заказов (GUID).
+        """
+        if not resto_url or not key:
+            return []
+            
+        endpoint = f"{resto_url.rstrip('/')}/resto/api/deliveries/history"
+        
+        # Параметры POST запроса согласно документации v2
+        payload = {
+            "deliveryDateFrom": date_from,
+            "deliveryDateTo": date_to
+        }
+        
+        params = {"key": key}
+        
+        try:
+            async with httpx.AsyncClient(timeout=30.0, verify=False) as client:
+                response = await client.post(endpoint, params=params, json=payload)
+                
+                if response.status_code != 200:
+                    logger.error(f"iiko Resto error {response.status_code}: {response.text}")
+                    return []
+                
+                # Парсим ответ
+                import xml.etree.ElementTree as ET
+                try:
+                    root = ET.fromstring(response.content)
+                    return [node.text for node in root.findall(".//id")]
+                except:
+                    # Если вдруг пришел JSON
+                    try:
+                        data = response.json()
+                        return data if isinstance(data, list) else []
+                    except:
+                        return []
+                    
+        except Exception as e:
+            logger.error(f"Error getting delivery history from Resto: {e}")
             return []
 
     @staticmethod

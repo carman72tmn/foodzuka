@@ -43,6 +43,8 @@ const statusColor = computed(() => {
     new: "info",
     confirmed: "primary",
     preparing: "warning",
+    cooking: "warning",
+    ready: "success",
     delivering: "info",
     delivered: "success",
     cancelled: "error"
@@ -54,7 +56,9 @@ const statusName = computed(() => {
   const statusNames = {
     new: "Новый",
     confirmed: "Подтвержден",
-    preparing: "Готовится",
+    preparing: "В подготовке",
+    cooking: "Готовится",
+    ready: "Готов",
     delivering: "В пути",
     delivered: "Доставлен",
     cancelled: "Отменен"
@@ -85,6 +89,19 @@ const statusName = computed(() => {
       </VCardTitle>
 
       <VCardText class="pa-4 pt-6">
+        <VAlert
+          v-if="order.status === 'cancelled' && (order.cancellation_reason || order.comment)"
+          type="error"
+          variant="tonal"
+          density="compact"
+          class="mb-4 text-caption"
+          icon="bx-error-circle"
+        >
+          <strong>Заказ отменен!</strong>
+          <div v-if="order.cancellation_reason" class="mt-1">Причина: {{ order.cancellation_reason }}</div>
+          <div v-if="order.cancelled_by" class="mt-1 opacity-70 italic text-right">Отменил: {{ order.cancelled_by }}</div>
+        </VAlert>
+
         <VRow>
           <!-- Клиент и Доставка -->
           <VCol cols="12" md="6">
@@ -99,8 +116,8 @@ const statusName = computed(() => {
               </VListItem>
               <VListItem class="px-0">
                 <template #prepend><VIcon icon="bx-phone" size="small" class="me-3 text-medium-emphasis" /></template>
-                <VListItemTitle class="d-flex align-center">
-                  <a :href="'tel:' + order.customer_phone" class="text-primary text-decoration-none font-weight-medium">
+                <VListItemTitle class="font-weight-bold">
+                  <a :href="'tel:' + order.customer_phone" class="text-decoration-none text-primary">
                     {{ order.customer_phone || 'Не указан' }}
                   </a>
                   <VChip
@@ -116,7 +133,6 @@ const statusName = computed(() => {
                 <VListItemSubtitle>Телефон</VListItemSubtitle>
               </VListItem>
 
-              <!-- Инфо о спаме -->
               <VAlert
                 v-if="order.spam_score > 0"
                 :type="order.spam_score >= 80 ? 'error' : 'warning'"
@@ -160,26 +176,6 @@ const statusName = computed(() => {
                 <VListItemSubtitle>Зона доставки</VListItemSubtitle>
               </VListItem>
             </VList>
-
-            <VDivider class="my-4" />
-
-            <h3 class="text-h6 mb-3 d-flex align-center">
-              <VIcon icon="bx-time" class="me-2" color="primary" /> Тайминг
-            </h3>
-            <VList density="compact" class="bg-transparent pa-0">
-              <VListItem class="px-0">
-                <VListItemTitle>{{ formatDate(order.created_at) }}</VListItemTitle>
-                <VListItemSubtitle>Время заказа</VListItemSubtitle>
-              </VListItem>
-              <VListItem class="px-0" v-if="order.expected_time">
-                <VListItemTitle class="font-weight-bold text-warning">{{ formatDate(order.expected_time) }}</VListItemTitle>
-                <VListItemSubtitle>Обещано клиенту</VListItemSubtitle>
-              </VListItem>
-              <VListItem class="px-0" v-if="order.actual_time">
-                <VListItemTitle class="font-weight-bold text-success">{{ formatDate(order.actual_time) }}</VListItemTitle>
-                <VListItemSubtitle>Фактическая выдача</VListItemSubtitle>
-              </VListItem>
-            </VList>
           </VCol>
 
           <!-- Состав и финансы -->
@@ -200,7 +196,7 @@ const statusName = computed(() => {
                 <template v-if="order.items && order.items.length > 0">
                   <template v-for="item in order.items" :key="item.id">
                     <tr>
-                      <td class="font-weight-medium text-wrap">
+                      <td class="font-weight-medium">
                         {{ item.product_name }}
                         <VChip v-if="item.size_name" size="x-small" variant="tonal" color="secondary" class="ms-1">
                           {{ item.size_name }}
@@ -213,7 +209,7 @@ const statusName = computed(() => {
                       <td class="text-right">{{ item.total }} ₽</td>
                     </tr>
                     <!-- Модификаторы -->
-                    <tr v-for="(mod, modIdx) in item.modifiers" :key="mod.iiko_id || mod.id || 'mod-' + modIdx" class="text-caption opacity-70">
+                    <tr v-for="mod in item.modifiers" :key="mod.iiko_id" class="text-caption opacity-70">
                       <td class="ps-6">• {{ mod.name }}</td>
                       <td class="text-center">{{ mod.amount }}</td>
                       <td class="text-right">{{ mod.sum ? mod.sum + ' ₽' : '—' }}</td>
@@ -221,18 +217,18 @@ const statusName = computed(() => {
                   </template>
                 </template>
                 <template v-else-if="order.order_items_details && order.order_items_details.length > 0">
-                  <template v-for="(item, itemIdx) in order.order_items_details" :key="item.id || 'item-' + itemIdx">
+                  <template v-for="item in order.order_items_details" :key="item.id">
                     <tr>
-                      <td class="font-weight-medium text-wrap">
+                      <td class="font-weight-medium">
                         {{ item.name }}
                         <VChip v-if="item.size" size="x-small" variant="tonal" color="secondary" class="ms-1">
-                            {{ (typeof item.size === 'object' && item.size !== null) ? item.size.name : item.size }}
+                            {{ typeof item.size === 'object' ? item.size.name : item.size }}
                         </VChip>
                       </td>
                       <td class="text-center">{{ item.amount }}</td>
                       <td class="text-right">{{ item.sum }} ₽</td>
                     </tr>
-                    <tr v-for="(mod, modIdx) in item.modifiers" :key="mod.id || mod.productId || 'mod-det-' + modIdx" class="text-caption opacity-70">
+                    <tr v-for="mod in item.modifiers" :key="mod.id" class="text-caption opacity-70">
                       <td class="ps-6">• {{ mod.name }}</td>
                       <td class="text-center">{{ mod.amount }}</td>
                       <td class="text-right">{{ mod.sum ? mod.sum + ' ₽' : '—' }}</td>
@@ -264,15 +260,16 @@ const statusName = computed(() => {
               <VDivider class="my-2" />
               <div class="d-flex justify-space-between align-center">
                 <span class="text-h6">Итого:</span>
-                <span class="text-h5 font-weight-black text-primary">{{ order.total_with_discount || (order.total_amount - order.total_discount) }} ₽</span>
+                <span class="text-h5 font-weight-black text-primary">{{ order.total_with_discount || (order.total_amount - order.total_discount - order.bonus_spent) }} ₽</span>
               </div>
-              <div class="mt-2 text-right">
+              <div class="mt-2 text-right d-flex gap-2 justify-end">
                 <VChip size="x-small" variant="outlined">{{ order.payment_method || 'Способ оплаты не указан' }}</VChip>
+                <VChip v-if="order.terminal_group_name" size="x-small" color="primary" variant="tonal">{{ order.terminal_group_name }}</VChip>
               </div>
             </VCard>
 
             <VAlert v-if="order.comment" type="info" variant="tonal" icon="bx-message-detail" class="mt-4 text-caption">
-              <strong>Комментарий:</strong> {{ order.comment }}
+              <strong>Комментарий к заказу:</strong> {{ order.comment }}
             </VAlert>
           </VCol>
         </VRow>

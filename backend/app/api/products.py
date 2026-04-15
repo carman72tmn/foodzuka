@@ -43,6 +43,53 @@ async def get_products(
     return products
 
 
+@router.post("/sync-stop-list")
+async def sync_stop_list_products(session: Session = Depends(get_session)):
+    """Синхронизировать стоп-лист из iiko"""
+    from app.services.iiko_sync_service import iiko_sync_service
+    result = await iiko_sync_service.sync_stop_lists(session)
+    return result
+
+
+@router.get("/modifiers/all")
+async def get_all_modifiers(session: Session = Depends(get_session)):
+    """Получить все группы модификаторов со вложенными модификаторами"""
+    from app.models.product import ProductModifierGroup
+    from sqlalchemy.orm import selectinload
+    groups = session.exec(
+        select(ProductModifierGroup).options(
+            selectinload(ProductModifierGroup.modifiers)
+        )
+    ).all()
+    result = []
+    for g in groups:
+        # Найти имя товара
+        product = session.get(Product, g.product_id)
+        result.append({
+            "id": g.id,
+            "iiko_id": g.iiko_id,
+            "name": g.name,
+            "product_id": g.product_id,
+            "product_name": product.name if product else "—",
+            "min_amount": g.min_amount,
+            "max_amount": g.max_amount,
+            "is_required": g.is_required,
+            "modifiers": [
+                {
+                    "id": m.id,
+                    "iiko_id": m.iiko_id,
+                    "name": m.name,
+                    "price": float(m.price),
+                    "min_amount": m.min_amount,
+                    "max_amount": m.max_amount,
+                    "default_amount": m.default_amount,
+                }
+                for m in g.modifiers
+            ]
+        })
+    return result
+
+
 @router.get("/{product_id}", response_model=ProductResponse)
 async def get_product(product_id: int, session: Session = Depends(get_session)):
     """Получить товар по ID"""
@@ -59,12 +106,38 @@ async def get_product(product_id: int, session: Session = Depends(get_session)):
     return product
 
 
+@router.get("/{product_id}/iiko-details")
+async def get_product_iiko_details(product_id: int, session: Session = Depends(get_session)):
+    """Получить расширенные данные товара напрямую из iiko External Menu"""
+    from app.services.iiko_service import iiko_service
+    from app.models.iiko_settings import IikoSettings
+    product = session.get(Product, product_id)
+    if not product or not product.iiko_id:
+        raise HTTPException(status_code=404, detail="Товар не найден или не синхронизирован с iiko")
+
+    settings = session.exec(select(IikoSettings)).first()
+    if not settings or not settings.external_menu_id:
+        raise HTTPException(status_code=400, detail="iiko не настроен или не задан External Menu ID")
+
+    ext_menu = await iiko_service.get_external_menu_by_id(
+        settings.external_menu_id,
+        api_login=settings.api_login,
+        organization_id=settings.organization_id
+    )
+    for cat in ext_menu.get("itemCategories", []):
+        for item in cat.get("items", []):
+            if item.get("itemId") == product.iiko_id:
+                return item
+
+    raise HTTPException(status_code=404, detail="Товар не найден в iiko меню")
+
+
 @router.post("/", response_model=ProductResponse, status_code=status.HTTP_201_CREATED)
 async def create_product(
     product_data: ProductCreate,
     session: Session = Depends(get_session)
 ):
-    """Создать новый товар"""
+    """Создать новую категорию"""
     product = Product(**product_data.model_dump())
     session.add(product)
     session.commit()

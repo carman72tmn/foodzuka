@@ -21,6 +21,14 @@ export const routes = [
         component: () => import('@/pages/menu/categories.vue'),
       },
       {
+        path: 'menu/options',
+        component: () => import('@/pages/menu/options.vue'),
+      },
+      {
+        path: 'menu/import',
+        component: () => import('@/pages/menu/import.vue'),
+      },
+      {
         path: 'settings/iiko',
         component: () => import('@/pages/settings/iiko.vue'),
       },

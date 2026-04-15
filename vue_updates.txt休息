@@ -1,0 +1,43 @@
+<!-- Chunks for updating OrderDetailModal.vue -->
+
+<!-- 1. Cancellation Reason Alert (Add after Status Chip) -->
+<VAlert
+  v-if="order.status === 'cancelled' && order.cancellation_reason"
+  type="error"
+  variant="tonal"
+  density="compact"
+  class="mt-4 text-caption"
+  icon="bx-error-circle"
+>
+  <strong>Причина отмены:</strong> {{ order.cancellation_reason }}
+  <div v-if="order.cancelled_by" class="mt-1 opacity-70 italic text-right">Отменил: {{ order.cancelled_by }}</div>
+</VAlert>
+
+<!-- 2. Updated Table Body for Items -->
+<template v-if="order.items && order.items.length > 0">
+  <template v-for="item in order.items" :key="item.id">
+    <tr>
+      <td class="font-weight-medium">
+        {{ item.product_name }}
+        <VChip v-if="item.size_name" size="x-small" variant="tonal" color="secondary" class="ms-2">
+          {{ item.size_name }}
+        </VChip>
+        <div v-if="item.comment" class="text-caption text-info mt-1 italic">
+          <VIcon icon="bx-comment-dots" size="12" class="me-1" /> {{ item.comment }}
+        </div>
+      </td>
+      <td class="text-center">{{ item.quantity }}</td>
+      <td class="text-right">{{ item.total }} ₽</td>
+    </tr>
+    <!-- Modifiers list -->
+    <tr v-for="mod in item.modifiers" :key="mod.iiko_id" class="text-caption opacity-70 bg-lightgray">
+      <td class="ps-6">• {{ mod.name }}</td>
+      <td class="text-center">{{ mod.amount }}</td>
+      <td class="text-right text-xs">{{ mod.sum ? mod.sum + ' ₽' : (mod.price ? mod.price + ' ₽' : '—') }}</td>
+    </tr>
+  </template>
+</template>
+<template v-else-if="order.order_items_details && order.order_items_details.length > 0">
+    <!-- Fallback to raw JSON details if items relationship is missing -->
+    ...
+</template>

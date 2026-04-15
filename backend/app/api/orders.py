@@ -444,6 +444,7 @@ async def iiko_webhook(request: Request, session: Session = Depends(get_session)
         if event_type == "DeliveryOrderUpdate":
             event_info = event.get("eventInfo", {})
             org_id = event.get("organizationId")
+            print(f"INFO: [iiko_webhook] Received DeliveryOrderUpdate for org {org_id}. Event status: {event_info.get('status')}")
             if event_info:
                 await iiko_sync_service.process_iiko_order(session, event_info, org_id)
                 

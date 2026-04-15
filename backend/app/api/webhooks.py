@@ -50,48 +50,63 @@ async def iiko_webhook(
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid JSON")
 
-    event_type = payload.get("eventType")
-    event_id = payload.get("eventId") or payload.get("correlationId")
+    # iiko Cloud присылает список событий
+    events = payload if isinstance(payload, list) else [payload]
+    processed_ids = []
 
-    logger.info(f"Received iiko webhook: {event_type} (ID: {event_id})")
+    for event in events:
+        event_type = event.get("eventType")
+        event_id = event.get("eventId") or event.get("correlationId")
 
-    # 4. Логирование события в БД
-    log_entry = IikoWebhookEvent(
-        event_type=event_type or "Unknown",
-        event_id=event_id or "unknown",
-        payload=payload,
-        processed=False
-    )
-    session.add(log_entry)
-    session.commit()
-    session.refresh(log_entry)
+        logger.info(f"Received iiko webhook: {event_type} (ID: {event_id})")
 
-    # 5. Реакция на события
-    if event_type == "StopListUpdate" and background_tasks:
-        background_tasks.add_task(process_stop_list_update)
-        log_entry.processed = True
-        log_entry.error = "Background sync started"
+        # 4. Логирование события в БД
+        log_entry = IikoWebhookEvent(
+            event_type=event_type or "Unknown",
+            event_id=event_id or "unknown",
+            payload=event,
+            processed=False
+        )
         session.add(log_entry)
         session.commit()
+        session.refresh(log_entry)
+        processed_ids.append(log_entry.id)
 
-    elif event_type == "DeliveryOrderUpdate":
-        # Синхронизация конкретного заказа при его обновлении
-        order_id = payload.get("eventInfo", {}).get("id")
-        org_id = payload.get("organizationId")
-        if order_id and org_id and background_tasks:
-            background_tasks.add_task(iiko_sync_service.sync_order_by_id, session, order_id, org_id)
+        # 5. Реакция на события
+        if event_type == "StopListUpdate" and background_tasks:
+            background_tasks.add_task(process_stop_list_update)
             log_entry.processed = True
-            log_entry.error = "Background order sync started"
+            log_entry.error = "Background sync started"
             session.add(log_entry)
             session.commit()
 
-    elif event_type in ["PersonalSessionUpdate", "CashShiftUpdate"]:
-        # Триггер полной синхронизации сотрудников при открытии/закрытии смен
-        if background_tasks:
-            background_tasks.add_task(iiko_sync_service.sync_employees_full, session)
-            log_entry.processed = True
-            log_entry.error = "Background employee sync started"
-            session.add(log_entry)
-            session.commit()
+        elif event_type == "DeliveryOrderUpdate":
+            # Используем данные заказа напрямую из пейлоада вебхука
+            event_info = event.get("eventInfo", {})
+            order_data = event_info.get("order")
+            order_id = event_info.get("id")
+            org_id = event.get("organizationId")
+            
+            if order_id and org_id and background_tasks:
+                if order_data:
+                    logger.info(f"Processing order sync from webhook payload: {order_id}")
+                    background_tasks.add_task(iiko_sync_service.process_iiko_order, session, event_info, org_id)
+                else:
+                    logger.info(f"Triggering background API sync for order {order_id} (no payload data)")
+                    background_tasks.add_task(iiko_sync_service.sync_order_by_id, session, order_id, org_id)
+                
+                log_entry.processed = True
+                log_entry.error = "Background order sync started"
+                session.add(log_entry)
+                session.commit()
 
-    return {"status": "ok", "id": log_entry.id}
+        elif event_type in ["PersonalSessionUpdate", "CashShiftUpdate"]:
+            # Триггер полной синхронизации сотрудников при открытии/закрытии смен
+            if background_tasks:
+                background_tasks.add_task(iiko_sync_service.sync_employees_full, session)
+                log_entry.processed = True
+                log_entry.error = "Background employee sync started"
+                session.add(log_entry)
+                session.commit()
+
+    return {"status": "ok", "ids": processed_ids}

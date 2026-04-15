@@ -30,3 +30,4 @@ passlib[bcrypt]==1.7.4
 # Утилиты
 python-dateutil==2.8.2
 pytz==2024.1
+APScheduler==3.10.4

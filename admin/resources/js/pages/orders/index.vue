@@ -24,7 +24,7 @@ const headers = [
   { title: "Оплата", key: "is_paid", sortable: true, width: 110 },
   { title: "Город", key: "city", sortable: true, width: 100 },
   { title: "Клиент", key: "customer_name", sortable: true },
-  { title: "Телефон", key: "customer_phone", sortable: false },
+  { title: "Телефон", key: "customer_phone", sortable: false, width: 150 },
   { title: "Сумма", key: "total_amount", sortable: true, width: 100 },
   { title: "Товары", key: "order_items_count", sortable: false, width: 90 },
   { title: "Статус", key: "status", sortable: true, width: 130 },
@@ -200,6 +200,24 @@ onUnmounted(() => {
               >
                 {{ item.is_paid ? 'Оплачен' : 'Не оплачен' }}
               </VChip>
+            </template>
+
+            <template #item.customer_phone="{ item }">
+              <div class="d-flex align-center">
+                <span>{{ item.customer_phone || '—' }}</span>
+                <VTooltip v-if="item.spam_score > 0" location="top">
+                  <template #activator="{ props }">
+                    <VIcon
+                      v-bind="props"
+                      :icon="item.spam_score >= 80 ? 'bx-error-circle' : 'bx-info-circle'"
+                      :color="item.spam_score >= 80 ? 'error' : 'warning'"
+                      size="small"
+                      class="ms-1"
+                    />
+                  </template>
+                  <span>{{ item.spam_info }}</span>
+                </VTooltip>
+              </div>
             </template>
 
             <template #item.city="{ item }">

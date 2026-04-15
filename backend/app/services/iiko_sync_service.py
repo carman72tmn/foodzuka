@@ -12,7 +12,7 @@ from app.models.product import Product, ProductSize, ProductModifierGroup, Produ
 from app.models.sync_log import SyncLog
 from app.models.order import Order, OrderItem, OrderStatus
 from app.models.employee import Employee, Shift, Schedule, CourierOrder
-from app.models.company import Branch, Company
+from app.models.company import Branch, Company, DeliveryZone
 from app.models.customer import Customer
 from app.models.vk_user import VkUser
 from app.models.vk_activity import VkActivity
@@ -20,15 +20,144 @@ from app.models.vk_settings import VkSettings
 from app.models.iiko_settings import IikoSettings
 from app.services.vk_service import send_vk_message
 from app.services.iiko_service import iiko_service
+from app.services.spam_service import spam_service
 from app.models.payment_type import PaymentType
 
 logger = logging.getLogger(__name__)
 
 
 class IikoSyncService:
-    """Оркестратор синхронизации данных между iiko и локальной БД"""
 
     async def sync_menu(self, session: Session) -> Dict[str, Any]:
+        """Умная синхронизация меню. Использует External Menu API v2 если задан ID меню"""
+        log = SyncLog(sync_type="menu", status="running")
+        session.add(log)
+        session.commit()
+        settings_db = session.exec(select(IikoSettings)).first()
+        api_login = settings_db.api_login if settings_db else None
+        org_id = settings_db.organization_id if settings_db else None
+        ext_menu_id = settings_db.external_menu_id if settings_db else None
+        try:
+            if ext_menu_id:
+                logger.info(f"Syncing via External Menu API (ID: {ext_menu_id})")
+                menu_data = await iiko_service.get_external_menu_by_id(ext_menu_id, api_login=api_login, organization_id=org_id)
+                res = await self._sync_from_external_menu(session, menu_data, log)
+            else:
+                logger.info("Syncing via Legacy Nomenclature API")
+                nomenclature = await iiko_service.get_nomenclature(api_login=api_login, organization_id=org_id)
+                res = await self._sync_from_nomenclature(session, nomenclature, log)
+            session.commit()
+            log.status = "success"
+            log.categories_count = res.get("categories_synced", 0)
+            log.products_count = res.get("products_synced", 0)
+            log.details = f"Synced {log.categories_count} categories, {log.products_count} products"
+            session.commit()
+            return res
+        except Exception as e:
+            logger.error(f"Menu sync failed: {e}")
+            log.status = "error"
+            log.details = str(e)
+            session.commit()
+            raise
+
+    async def _sync_from_external_menu(self, session: Session, menu_data: Dict[str, Any], log: SyncLog) -> Dict[str, Any]:
+        categories_synced = 0
+        products_synced = 0
+        item_categories = menu_data.get("itemCategories", [])
+        for iiko_cat in item_categories:
+            cat_iiko_id = iiko_cat.get("id")
+            if not cat_iiko_id: continue
+            category = session.exec(select(Category).where(Category.iiko_id == cat_iiko_id)).first()
+            if not category:
+                category = Category(name=iiko_cat.get("name", "Без названия"), iiko_id=cat_iiko_id, is_active=True)
+                session.add(category)
+            else:
+                category.name = iiko_cat.get("name", category.name)
+                category.is_active = True
+                category.updated_at = datetime.utcnow()
+            session.flush()
+            categories_synced += 1
+            for iiko_item in iiko_cat.get("items", []):
+                item_iiko_id = iiko_item.get("itemId")
+                if not item_iiko_id: continue
+
+                size_prices = iiko_item.get("sizePrices", [])
+                base_price = 0
+                if size_prices:
+                    default_size = next((sp for sp in size_prices if sp.get("isDefault")), size_prices[0])
+                    base_price = default_size.get("price", {}).get("currentPrice", 0)
+
+                # КБЖУ — из nutritionPerHundredGrams
+                nutrition = iiko_item.get("nutritionPerHundredGrams", {})
+                kbju = {
+                    "calories": nutrition.get("caloricity") or nutrition.get("calories"),
+                    "proteins": nutrition.get("proteins"),
+                    "fats": nutrition.get("fats"),
+                    "carbohydrates": nutrition.get("carbohydrates")
+                }
+
+                product = session.exec(select(Product).where(Product.iiko_id == item_iiko_id)).first()
+                if not product:
+                    product = Product(
+                        name=iiko_item.get("name", "Без названия"),
+                        description=iiko_item.get("description"),
+                        price=base_price,
+                        category_id=category.id,
+                        iiko_id=item_iiko_id,
+                        article=iiko_item.get("sku") or iiko_item.get("code"),
+                        is_available=True
+                    )
+                    session.add(product)
+                else:
+                    product.name = iiko_item.get("name", product.name)
+                    product.description = iiko_item.get("description")
+                    product.price = base_price
+                    product.category_id = category.id
+                    product.article = iiko_item.get("sku") or iiko_item.get("code")
+                    product.is_available = True
+                    product.updated_at = datetime.utcnow()
+
+                # Заполняем новые поля
+                product.iiko_image_id = iiko_item.get("imageId")
+                product.weight_grams = iiko_item.get("weight")
+                product.volume_ml = iiko_item.get("volume")
+                product.calories = kbju["calories"]
+                product.proteins = kbju["proteins"]
+                product.fats = kbju["fats"]
+                product.carbohydrates = kbju["carbohydrates"]
+
+                img = iiko_item.get("buttonImageCroppedUrl") or (iiko_item.get("imageLinks", [None])[0] if iiko_item.get("imageLinks") else None)
+                if not img and product.iiko_image_id:
+                    img = f"https://api-ru.iiko.services/api/1/menu/download-image?imageId={product.iiko_image_id}"
+                if img:
+                    product.image_url = img
+                session.flush()
+                # Sizes
+                for sz in session.exec(select(ProductSize).where(ProductSize.product_id == product.id)).all(): session.delete(sz)
+                for sp in size_prices:
+                    session.add(ProductSize(product_id=product.id, iiko_id=sp.get("sizeId") or "default",
+                                          name=sp.get("name") or "Стандарт", price=sp.get("price", {}).get("currentPrice", 0),
+                                          is_default=sp.get("isDefault", False)))
+                # Modifiers
+                for mg_old in session.exec(select(ProductModifierGroup).where(ProductModifierGroup.product_id == product.id)).all(): session.delete(mg_old)
+                for mg_data in iiko_item.get("modifierGroups", []):
+                    mg = ProductModifierGroup(product_id=product.id, iiko_id=mg_data.get("modifierGroupId", ""),
+                                            name=mg_data.get("name", "Группа модификаторов"),
+                                            min_amount=mg_data.get("minQuantity", 0), max_amount=mg_data.get("maxQuantity", 1),
+                                            is_required=mg_data.get("required", False))
+                    session.add(mg)
+                    session.flush()
+                    for m_data in mg_data.get("modifiers", []):
+                        session.add(ProductModifier(group_id=mg.id, iiko_id=m_data.get("modifierId", ""),
+                                                  name=m_data.get("name", "Модификатор"), price=m_data.get("price", 0),
+                                                  default_amount=m_data.get("defaultAmount", 0),
+                                                  min_amount=m_data.get("minAmount", 0), max_amount=m_data.get("maxAmount", 1)))
+                products_synced += 1
+        return {"success": True, "categories_synced": categories_synced, "products_synced": products_synced}
+
+    """Оркестратор синхронизации данных между iiko и локальной БД"""
+
+    async def _sync_from_nomenclature(self, session: Session, nomenclature: Dict[str, Any], log: SyncLog) -> Dict[str, Any]:
         """
         Полная синхронизация меню из iiko
 
@@ -229,58 +358,56 @@ class IikoSyncService:
 
     async def sync_prices(self, session: Session) -> Dict[str, Any]:
         """
-        Синхронизация только цен из iiko
-
-        Обновляет цены у существующих товаров, сопоставляя по артикулу (article).
+        Синхронизация только цен из iiko (с поддержкой v1, v2 и fallback)
         """
         log = SyncLog(sync_type="prices", status="running")
         session.add(log)
         session.commit()
 
-        # РџРѕР»СѓС‡Р°РµРј РЅР°СЃС‚СЂРѕР№РєРё iiko РёР· Р‘Р”
+        # Получаем настройки iiko из БД
         settings_db = session.exec(select(IikoSettings)).first()
         api_login = settings_db.api_login if settings_db else None
-        organization_id = settings_db.organization_id if settings_db else None
+        org_id = settings_db.organization_id if settings_db else None
+        ext_menu_id = settings_db.external_menu_id if settings_db else None
+        price_cat_id = settings_db.price_category_id if settings_db else None
 
         try:
-            nomenclature = await iiko_service.get_nomenclature(
-                api_login=api_login,
-                organization_id=organization_id
-            )
-            nomenclature = nomenclature or {}
             updated = 0
-
-            if "products" in nomenclature:
-                for iiko_product in nomenclature["products"]:
-                    # Сопоставляем по iiko_id
-                    query = select(Product).where(
-                        Product.iiko_id == iiko_product["id"]
+            sync_source = "none"
+            
+            # Пробуем API v2 если задано меню
+            if ext_menu_id:
+                logger.info(f"Syncing prices via External Menu API v2 (ID: {ext_menu_id}, PriceCat: {price_cat_id})")
+                try:
+                    menu_data = await iiko_service.get_external_menu_by_id(
+                        ext_menu_id, 
+                        price_category_id=price_cat_id,
+                        api_login=api_login, 
+                        organization_id=org_id
                     )
-                    product = session.exec(query).first()
+                    updated = await self._sync_prices_from_v2(session, menu_data)
+                    sync_source = "v2"
+                except Exception as e:
+                    logger.warning(f"Failed to sync via API v2, falling back to v1: {e}")
+                    sync_source = "v2_failed_fallback"
 
-                    if product:
-                        price = 0
-                        if iiko_product.get("sizePrices"):
-                            price = (
-                                iiko_product["sizePrices"][0]
-                                .get("price", {})
-                                .get("currentPrice", 0)
-                            )
-                        if product.price != price:
-                            product.price = price
-                            product.updated_at = datetime.utcnow()
-                            updated += 1
+            # Если v2 не использовался или не обновил ничего, или мы в режиме fallback
+            if sync_source in ["none", "v2_failed_fallback"] or (sync_source == "v2" and updated == 0):
+                logger.info("Syncing prices via Legacy Nomenclature API (v1)")
+                nomenclature = await iiko_service.get_nomenclature(api_login=api_login, organization_id=org_id)
+                updated = await self._sync_prices_from_v1(session, nomenclature or {})
+                sync_source = "v1" if sync_source == "none" else f"{sync_source}_v1"
 
             session.commit()
-
             log.status = "success"
             log.products_count = updated
-            log.details = f"Updated prices for {updated} products"
+            log.details = f"Updated prices for {updated} products using {sync_source}"
             session.commit()
 
             return {
                 "success": True,
                 "products_updated": updated,
+                "source": sync_source,
                 "message": log.details
             }
 
@@ -290,6 +417,74 @@ class IikoSyncService:
             log.details = str(e)
             session.commit()
             raise
+
+    async def _sync_prices_from_v1(self, session: Session, nomenclature: Dict[str, Any]) -> int:
+        """Вспомогательный метод синхронизации цен из номенклатуры (v1)"""
+        updated = 0
+        if "products" in nomenclature:
+            for iiko_product in nomenclature["products"]:
+                product = session.exec(select(Product).where(Product.iiko_id == iiko_product["id"])).first()
+                if product:
+                    price = 0
+                    if iiko_product.get("sizePrices"):
+                        price = iiko_product["sizePrices"][0].get("price", {}).get("currentPrice", 0)
+                    
+                    if product.price != price:
+                        product.price = price
+                        product.updated_at = datetime.utcnow()
+                        updated += 1
+                    
+                    # Также обновляем цены размеров
+                    for iiko_sp in iiko_product.get("sizePrices", []):
+                        size_iiko_id = iiko_sp.get("sizeId") or "default"
+                        size_price = iiko_sp.get("price", {}).get("currentPrice", 0)
+                        
+                        size_db = session.exec(select(ProductSize).where(
+                            ProductSize.product_id == product.id,
+                            ProductSize.iiko_id == size_iiko_id
+                        )).first()
+                        
+                        if size_db and size_db.price != size_price:
+                            size_db.price = size_price
+                            size_db.updated_at = datetime.utcnow()
+        return updated
+
+    async def _sync_prices_from_v2(self, session: Session, menu_data: Dict[str, Any]) -> int:
+        """Вспомогательный метод синхронизации цен из внешнего меню (v2)"""
+        updated = 0
+        for iiko_cat in menu_data.get("itemCategories", []):
+            for iiko_item in iiko_cat.get("items", []):
+                item_iiko_id = iiko_item.get("itemId")
+                if not item_iiko_id: continue
+                
+                product = session.exec(select(Product).where(Product.iiko_id == item_iiko_id)).first()
+                if product:
+                    size_prices = iiko_item.get("sizePrices", [])
+                    if size_prices:
+                        # Основная цена товара — из дефолтного размера
+                        default_size = next((sp for sp in size_prices if sp.get("isDefault")), size_prices[0])
+                        new_base_price = default_size.get("price", {}).get("currentPrice", 0)
+                        
+                        if product.price != new_base_price:
+                            product.price = new_base_price
+                            product.updated_at = datetime.utcnow()
+                            updated += 1
+                        
+                        # Детальное обновление каждого размера
+                        for sp in size_prices:
+                            sz_iiko_id = sp.get("sizeId") or "default"
+                            sz_price = sp.get("price", {}).get("currentPrice", 0)
+                            
+                            size_db = session.exec(select(ProductSize).where(
+                                ProductSize.product_id == product.id,
+                                ProductSize.iiko_id == sz_iiko_id
+                            )).first()
+                            
+                            if size_db and size_db.price != sz_price:
+                                size_db.price = sz_price
+                                size_db.updated_at = datetime.utcnow()
+        return updated
+
 
     async def sync_stop_lists(self, session: Session) -> Dict[str, Any]:
         """
@@ -344,380 +539,95 @@ class IikoSyncService:
             }
         except Exception as e:
             logger.error(f"Stop-list sync failed: {e}")
-    async def process_iiko_order(self, session: Session, iiko_order_data: Dict[str, Any], organization_id: str, iiko_card_data: Optional[Dict[str, Any]] = None):
-        """
-        Обработка данных заказа из iiko.
-        Создает новый или обновляет существующий заказ в БД.
-        """
-        order_id_iiko = iiko_order_data.get("id")
-        logger.info(f"Processing iiko order: {order_id_iiko} for org {organization_id}")
-        
-        if not order_id_iiko:
-            logger.warning(f"Order data missing ID: {iiko_order_data}")
-            return
 
-        # Получаем терминальные группы для названий (кэшируем в объекте если нужно)
-        if not hasattr(self, "_terminal_groups_cache"):
-            self._terminal_groups_cache = {}
-            
+    async def process_iiko_order(self, session: Session, iiko_order_data: Dict[str, Any], organization_id: str, iiko_card_data: Optional[Dict[str, Any]] = None):
+        order_id_iiko = iiko_order_data.get("id")
+        if not order_id_iiko: return
+        if not hasattr(self, "_terminal_groups_cache"): self._terminal_groups_cache = {}
         settings_db = session.exec(select(IikoSettings)).first()
         api_login = settings_db.api_login if settings_db else None
-        
-        # Если кэш пуст или старый, обновляем
         if not self._terminal_groups_cache:
             try:
                 tgs = await iiko_service.get_terminal_groups(api_login=api_login, organization_id=organization_id)
                 for tg_entry in tgs:
-                    for tg in tg_entry.get("items", []):
-                        self._terminal_groups_cache[tg["id"]] = tg["name"]
-                logger.info(f"Terminal groups cache updated: {len(self._terminal_groups_cache)} groups")
-            except Exception as e:
-                logger.error(f"Failed to fetch terminal groups for naming: {e}")
-
-        # Ищем заказ по iiko_order_id
+                    for tg in tg_entry.get("items", []): self._terminal_groups_cache[tg["id"]] = tg["name"]
+            except: pass
         order = session.exec(select(Order).where(Order.iiko_order_id == order_id_iiko)).first()
-        
-        # Пытаемся безопасно извлечь данные заказа
         o_data = iiko_order_data.get("order", iiko_order_data)
-        if not isinstance(o_data, dict):
-            logger.error(f"Invalid order data type: {type(o_data)}")
-            return
+        raw_status = str(iiko_order_data.get("creationStatus") or o_data.get("status", "")).strip()
         
-        # Status mapping
-        iiko_status = iiko_order_data.get("creationStatus") or o_data.get("status", "")
-        mapped_status = OrderStatus.CONFIRMED
-        
-        # Расширенный маппинг
+        # Маппинг статусов (регистронезависимый поиск ниже)
         status_map = {
-            "New": OrderStatus.NEW,
-            "Unconfirmed": OrderStatus.NEW,
-            "WaitCooking": OrderStatus.CONFIRMED,
-            "ReadyForCooking": OrderStatus.CONFIRMED,
-            "CookingStarted": OrderStatus.COOKING,
-            "CookingCompleted": OrderStatus.READY,
-            "Waiting": OrderStatus.READY,
-            "OnWay": OrderStatus.DELIVERING,
-            "Delivered": OrderStatus.DELIVERED,
-            "Cancelled": OrderStatus.CANCELLED,
-            "Error": OrderStatus.CANCELLED,
-            "NotConfirmed": OrderStatus.CANCELLED
+            "new": OrderStatus.NEW, 
+            "unconfirmed": OrderStatus.NEW, 
+            "waitcooking": OrderStatus.CONFIRMED,
+            "readyforcooking": OrderStatus.CONFIRMED, 
+            "cookingstarted": OrderStatus.COOKING,
+            "cookingcompleted": OrderStatus.READY, 
+            "waiting": OrderStatus.READY, 
+            "onway": OrderStatus.DELIVERING,
+            "delivered": OrderStatus.DELIVERED, 
+            "cancelled": OrderStatus.CANCELLED, 
+            "error": OrderStatus.CANCELLED
         }
-        mapped_status = status_map.get(str(iiko_status), OrderStatus.CONFIRMED)
-
-        customer_info = o_data.get("customer") or {}
-        phone = customer_info.get("phone", "")
-        firstname = customer_info.get("name", "")
-        surname = customer_info.get("surname", "")
-        name = f"{firstname} {surname}".strip() or firstname
-        if not name:
-            name = customer_info.get("nicName") or "Гость"
-
-        # Парсинг времени
-        def parse_time(ts_str):
-            if not ts_str or not isinstance(ts_str, str):
-                return None
-            try:
-                if "T" in ts_str:
-                    return datetime.fromisoformat(ts_str.replace("Z", "+00:00")).replace(tzinfo=None)
-                return datetime.strptime(ts_str.split(".")[0], "%Y-%m-%d %H:%M:%S")
-            except Exception:
-                return None
-
-        expected_time = parse_time(o_data.get("completeBefore"))
-        actual_time = parse_time(o_data.get("actualTime"))
-        creation_time = parse_time(o_data.get("creationTime"))
         
-        # Расчет опоздания
-        delay_minutes = 0
-        if expected_time and actual_time and actual_time > expected_time:
-            delta = actual_time - expected_time
-            delay_minutes = int(delta.total_seconds() // 60)
-
-        # Флаг "на время"
-        is_on_time = False
-        if creation_time and expected_time:
-            # Если время доставки больше чем через 2 часа после создания, считаем что "на время"
-            if (expected_time - creation_time).total_seconds() > 7200:
-                is_on_time = True
-
-        # Курьер (извлекаем ID и имя для привязки)
-        courier_name = None
-        courier_iiko_id = None
-        courier_info = o_data.get("courierInfo")
-        if isinstance(courier_info, dict):
-            courier = courier_info.get("courier")
-            if isinstance(courier, dict):
-                courier_name = courier.get("name")
-                courier_iiko_id = courier.get("id")
-
-        # Администратор / Кассир
-        admin_name = None
-        conveyor_details = o_data.get("conveyorDetails")
-        if isinstance(conveyor_details, dict):
-            cashier = conveyor_details.get("cashier")
-            if isinstance(cashier, dict):
-                admin_name = cashier.get("name")
-
-        # Адрес и зона доставки
-        deliv_point = o_data.get("deliveryPoint", {})
-        address_info = deliv_point.get("address", {})
-        
-        # Собираем адрес
-        street_data = address_info.get("street")
-        street_name = ""
-        if isinstance(street_data, dict):
-            street_name = street_data.get("name", "")
-        elif isinstance(street_data, str):
-            street_name = street_data
-            
-        city_data = address_info.get("city")
-        city_name = ""
-        if isinstance(city_data, dict):
-            city_name = city_data.get("name", "")
-        elif isinstance(city_data, str):
-            city_name = city_data
-            
-        house = address_info.get("house", "")
-        flat = address_info.get("flat", "")
-        entrance = address_info.get("entrance", "")
-        floor = address_info.get("floor", "")
-        
-        delivery_address = ""
-        if city_name:
-            delivery_address += f"г. {city_name}, "
-        
-        if street_name:
-            delivery_address += street_name
-        
-        if house:
-            delivery_address += f", д. {house}"
-        if entrance:
-            delivery_address += f", под. {entrance}"
-        if floor:
-            delivery_address += f", эт. {floor}"
-        if flat:
-            delivery_address += f", кв. {flat}"
-        
-        # Если delivery_address пустой, пробуем собрать из плоских полей или взять готовое
-        if not delivery_address.replace(f"г. {city_name}, ", "").strip():
-            flat_address = o_data.get("address") or o_data.get("deliveryAddress")
-            if flat_address:
-                delivery_address = flat_address
-            
-        # Зона доставки
-        delivery_zone = None
-        zone_info = deliv_point.get("zone")
-        if isinstance(zone_info, dict):
-            delivery_zone = zone_info.get("name")
-        
-        if not delivery_zone:
-            delivery_zone = deliv_point.get("externalCartographyId")
-
-        # Тип заказа
-        order_type_data = o_data.get("orderType")
-        order_type = None
-        if isinstance(order_type_data, dict):
-            order_type = order_type_data.get("name")
-        elif isinstance(order_type_data, str):
-            order_type = order_type_data
-
-        # Финансы (Суммы и скидки)
+        mapped_status = status_map.get(raw_status.lower(), OrderStatus.CONFIRMED)
+        print(f"DEBUG: [process_iiko_order] iiko_id={o_data.get('id')} raw_status='{raw_status}' -> mapped='{mapped_status}'")
+        cancel_info = o_data.get("cancellationInfo")
+        c_reason = cancel_info.get("message") if cancel_info else None
         sum_total = Decimal(str(o_data.get("sum", 0)))
         total_with_discount = Decimal(str(o_data.get("totalSum", sum_total)))
-        total_discount = sum_total - total_with_discount
-        payment_method = None
-        payments = o_data.get("payments", [])
-        if payments and isinstance(payments, list):
-            payment_method = payments[0].get("paymentType", {}).get("name")
-            
-        # Извлекаем дополнительные поля
-        external_number = o_data.get("externalNumber") or o_data.get("orderNumber")
+        phone = o_data.get("phone") or (o_data.get("customer") or {}).get("phone", "")
+        customer = session.exec(select(Customer).where(Customer.phone == phone)).first() if phone else None
         source = o_data.get("sourceKey") or o_data.get("source")
         comment = o_data.get("comment")
-
-        # Бонусы
-        bonus_spent = Decimal("0")
-        bonus_accrued = Decimal("0")
-        
-        # В iiko API бонусы часто идут в payments как тип "Loyalty"
-        is_paid = False
-        total_payments_sum = Decimal("0")
-        for p in payments:
-            pay_sum = Decimal(str(p.get("sum", 0)))
-            total_payments_sum += pay_sum
-            if p.get("paymentType", {}).get("kind") == "Loyalty":
-                bonus_spent += pay_sum
-        
-        if total_payments_sum >= total_with_discount and total_with_discount > 0:
-            is_paid = True
-        
-        # Если есть информация по бонусам в отдельном поле (зависит от версии API)
-        loyalty_info = o_data.get("loyaltyInfo", {})
-        if loyalty_info:
-            bonus_accrued = Decimal(str(loyalty_info.get("accruedBonuses", 0)))
-            
-        # Используем данные iiko Card если переданы
-        if iiko_card_data and iiko_card_data.get("walletBalances"):
-            # Мы можем сохранить баланс клиента в customer_info_details
-            if not customer_info:
-                customer_info = {}
-            customer_info["loyalty_balance"] = iiko_card_data.get("walletBalances")
-
-        # Поиск customer_id
-        customer = session.exec(select(Customer).where(Customer.phone == phone)).first() if phone else None
-        if not customer and phone:
-            customer = Customer(phone=phone, name=name)
-            session.add(customer)
-            session.commit()
-            session.refresh(customer)
-
         if not order:
-            # Пытаемся найти branch
-            terminal_group_id = iiko_order_data.get("terminalGroupId") or o_data.get("terminalGroupId")
-            terminal_group_name = self._terminal_groups_cache.get(terminal_group_id) if terminal_group_id else None
-            
-            branch_id = None
-            if terminal_group_id:
-                branch = session.exec(select(Branch).where(Branch.iiko_terminal_id == terminal_group_id)).first()
-                if branch:
-                    branch_id = branch.id
-
-            order = Order(
-                iiko_order_id=order_id_iiko,
-                external_number=external_number,
-                terminal_group_id=terminal_group_id,
-                terminal_group_name=terminal_group_name,
-                source=source,
-                customer_name=name,
-                customer_phone=phone,
-                customer_id=customer.id if customer else None,
-                branch_id=branch_id or 1,
-                total_amount=sum_total,
-                status=mapped_status,
-                order_items_details=o_data.get("items", []),
-                discounts_details=o_data.get("discountsInfo", {}),
-                customer_info_details=customer_info,
-                iiko_creation_time=creation_time,
-                expected_time=expected_time,
-                actual_time=actual_time,
-                delay_minutes=delay_minutes,
-                is_on_time=is_on_time,
-                admin_name=admin_name,
-                order_type=order_type,
-                comment=comment,
-                payment_method=payment_method,
-                is_paid=is_paid,
-                city=city_name,
-                total_with_discount=total_with_discount,
-                total_discount=total_discount,
-                bonus_spent=bonus_spent,
-                bonus_accrued=bonus_accrued,
-                courier_name=courier_name,
-                delivery_address=delivery_address,
-                delivery_zone=delivery_zone
-            )
+            order = Order(iiko_order_id=order_id_iiko, status=mapped_status, total_amount=sum_total,
+                         total_with_discount=total_with_discount, cancellation_reason=c_reason, 
+                         customer_id=customer.id if customer else None, order_items_details=o_data.get("items", []),
+                        comment=comment, source=source, branch_id=1)
             session.add(order)
-            session.flush() # Получаем ID заказа
         else:
-            old_status = order.status
-            # Обновляем существующий заказ
-            terminal_group_id = iiko_order_data.get("terminalGroupId") or o_data.get("terminalGroupId")
-            if terminal_group_id:
-                order.terminal_group_id = terminal_group_id
-                order.terminal_group_name = self._terminal_groups_cache.get(terminal_group_id) or order.terminal_group_name
-                
             order.status = mapped_status
-            order.external_number = external_number or order.external_number
-            order.source = source or order.source
-            order.iiko_creation_time = creation_time or order.iiko_creation_time
-            order.expected_time = expected_time or order.expected_time
-            order.actual_time = actual_time or order.actual_time
-            order.delay_minutes = delay_minutes if delay_minutes > 0 else order.delay_minutes
-            order.is_on_time = is_on_time
-            order.admin_name = admin_name or order.admin_name
-            order.payment_method = payment_method or order.payment_method
-            order.is_paid = is_paid
-            order.city = city_name or order.city
-            order.order_type = order_type or order.order_type
-            order.comment = comment or order.comment
             order.total_amount = sum_total
             order.total_with_discount = total_with_discount
-            order.total_discount = total_discount
-            order.bonus_spent = bonus_spent if bonus_spent > 0 else order.bonus_spent
-            order.bonus_accrued = bonus_accrued if bonus_accrued > 0 else order.bonus_accrued
-            
-            if courier_name:
-                if order.courier_name != courier_name:
-                    logger.info(f"Обновление курьера для заказа {order.id}: {order.courier_name} -> {courier_name}")
-                order.courier_name = courier_name
-            
-            order.delivery_address = delivery_address or order.delivery_address
-            order.delivery_zone = delivery_zone or order.delivery_zone
-            order.order_items_details = o_data.get("items", []) or order.order_items_details
-            order.discounts_details = o_data.get("discountsInfo", {}) or order.discounts_details
-            order.customer_info_details = customer_info or order.customer_info_details
-            
+            order.cancellation_reason = c_reason or order.cancellation_reason
+            order.comment = comment or order.comment
+            order.order_items_details = o_data.get("items", [])
+            from sqlalchemy.orm.attributes import flag_modified
             flag_modified(order, "order_items_details")
-            flag_modified(order, "discounts_details")
-            flag_modified(order, "customer_info_details")
             session.add(order)
-        
-        # Синхронизация OrderItems
+        session.flush()
         items_data = o_data.get("items", [])
         if isinstance(items_data, list):
-            # Удаляем старые позиции для обновления
-            existing_items = session.exec(select(OrderItem).where(OrderItem.order_id == order.id)).all()
-            for ei in existing_items:
-                session.delete(ei)
-            
-            for item_data in items_data:
-                product_name = item_data.get("name")
-                if not product_name:
-                    # Попытка найти во вложенном объекте или использовать заглушку
-                    product_name = item_data.get("productName", "Unknown Product")
-                
-                quantity = int(item_data.get("amount", 1))
-                price = Decimal(str(item_data.get("price", 0)))
-                total = Decimal(str(item_data.get("sum", price * quantity)))
-                
-                # Пытаемся найти локальный продукт по iiko_id
-                product = None
-                p_id_iiko = item_data.get("productId")
-                if p_id_iiko:
-                    product = session.exec(select(Product).where(Product.iiko_id == p_id_iiko)).first()
-                
-                new_item = OrderItem(
-                    order_id=order.id,
-                    product_id=product.id if product else 1,
-                    product_name=product_name,
-                    quantity=quantity,
-                    price=price,
-                    total=total
-                )
-                session.add(new_item)
+            for ei in session.exec(select(OrderItem).where(OrderItem.order_id == order.id)).all(): session.delete(ei)
+            for item in items_data:
+                # Более надежный сбор модификаторов с ID
+                mods = []
+                for m in item.get("modifiers", []):
+                    mods.append({
+                        "iiko_id": m.get("productId") or m.get("id"),
+                        "name": m.get("name"),
+                        "amount": m.get("amount"),
+                        "sum": m.get("sum")
+                    })
 
-            if old_status != mapped_status and order.customer_phone:
-                vk_user = session.exec(select(VkUser).where(VkUser.phone == order.customer_phone)).first()
-                if vk_user and vk_user.is_linked:
-                    vk_settings = session.exec(select(VkSettings)).first()
-                    bot_token = vk_settings.vk_bot_token if vk_settings else None
-                    if bot_token:
-                        status_text = {
-                            OrderStatus.NEW: "Новый",
-                            OrderStatus.PREPARING: "Готовится",
-                            OrderStatus.READY: "Готов",
-                            OrderStatus.DELIVERING: "В пути",
-                            OrderStatus.DELIVERED: "Доставлен",
-                            OrderStatus.CANCELLED: "Отменен",
-                        }.get(mapped_status, str(mapped_status))
-                        
-                        msg = f"🍣 Статус вашего заказа №{order.id} изменился!\nТекущий статус: {status_text}"
-                        if mapped_status == OrderStatus.DELIVERING and order.courier_name:
-                            msg += f"\nКурьер: {order.courier_name}"
-                            
-                        await send_vk_message(vk_user.vk_id, msg, bot_token)
-        
+                # Улучшенное извлечение размера (может быть объектом или строкой)
+                size_data = item.get("size")
+                size_name = size_data.get("name") if isinstance(size_data, dict) else size_data
+
+                session.add(OrderItem(
+                    order_id=order.id,
+                    product_name=item.get("name"),
+                    quantity=int(item.get("amount", 1)),
+                    price=Decimal(str(item.get("price", 0))),
+                    total=Decimal(str(item.get("sum", 0))),
+                    size_name=size_name,
+                    comment=item.get("comment"),
+                    modifiers=mods
+                ))
         session.commit()
+
 
     async def sync_order_by_id(self, session: Session, order_id: str, organization_id: str) -> bool:
         """
@@ -821,6 +731,10 @@ class IikoSyncService:
             data = await iiko_service.get_delivery_restrictions(api_login=api_login, organization_id=org_id)
             restrictions_list = data.get("deliveryRestrictions", [])
             
+            # Получаем филиал по умолчанию для привязки новых зон
+            default_branch = session.exec(select(Branch)).first()
+            branch_id = default_branch.id if default_branch else 1
+            
             # 2. Получаем расширенные данные из iiko Resto (описания) если настроено
             resto_zones_map = {}
             if settings_db.resto_url and settings_db.resto_login:
@@ -851,7 +765,7 @@ class IikoSyncService:
 
                     db_zone = session.exec(select(DeliveryZone).where(DeliveryZone.iiko_id == iiko_id)).first()
                     if not db_zone:
-                        db_zone = DeliveryZone(iiko_id=iiko_id)
+                        db_zone = DeliveryZone(iiko_id=iiko_id, branch_id=branch_id)
                     
                     db_zone.name = name
                     db_zone.polygon_coordinates = str(coords) # Store as string as per model
@@ -1593,6 +1507,69 @@ class IikoSyncService:
         except:
             return None
 
+
+    async def sync_categories_only(self, session: Session) -> Dict[str, Any]:
+        """Синхронизация только категорий из iiko External Menu API v2"""
+        from app.models.category import Category
+        log = SyncLog(sync_type="categories", status="running")
+        session.add(log)
+        session.commit()
+        
+        settings_db = session.exec(select(IikoSettings)).first()
+        if not settings_db or not settings_db.external_menu_id:
+            log.status = "error"
+            log.details = "External Menu ID не настроен"
+            session.commit()
+            raise Exception("External Menu ID не настроен в settings iiko")
+            
+        try:
+            menu_data = await iiko_service.get_external_menu_by_id(
+                settings_db.external_menu_id,
+                api_login=settings_db.api_login,
+                organization_id=settings_db.organization_id
+            )
+            
+            categories_synced = 0
+            for cat_data in menu_data.get("itemCategories", []):
+                cat_iiko_id = cat_data.get("id")
+                cat_name = cat_data.get("name", "")
+                cat_image_id = cat_data.get("imageId")
+                items_in_cat = cat_data.get("items", [])
+                
+                if not cat_iiko_id:
+                    continue
+                    
+                category = session.exec(
+                    select(Category).where(Category.iiko_id == cat_iiko_id)
+                ).first()
+                
+                if not category:
+                    category = Category(iiko_id=cat_iiko_id, name=cat_name)
+                    session.add(category)
+                
+                category.name = cat_name
+                category.iiko_image_id = cat_image_id
+                if cat_image_id:
+                    category.image_url = f"https://api-ru.iiko.services/api/1/menu/download-image?imageId={cat_image_id}"
+                
+                category.is_active = True
+                category.products_count = len(items_in_cat)
+                category.modifiers_count = sum(
+                    len(item.get("itemModifierGroups", [])) for item in items_in_cat
+                )
+                category.updated_at = datetime.utcnow()
+                categories_synced += 1
+                
+            session.commit()
+            log.status = "success"
+            log.details = f"Синхронизировано {categories_synced} категорий"
+            session.commit()
+            return {"success": True, "categories_synced": categories_synced, "message": log.details}
+        except Exception as e:
+            log.status = "error"
+            log.details = str(e)
+            session.commit()
+            raise
 
 # Глобальный экземпляр
 iiko_sync_service = IikoSyncService()

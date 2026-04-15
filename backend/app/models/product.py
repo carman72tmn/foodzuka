@@ -17,6 +17,7 @@ class ProductSize(SQLModel, table=True):
     name: str = Field(max_length=255)
     price: Decimal = Field(sa_type=Numeric(10, 2))
     is_default: bool = Field(default=False)
+    updated_at: Optional[datetime] = Field(default=None)
     
     product: "Product" = Relationship(back_populates="sizes")
 
@@ -66,6 +67,7 @@ class Product(SQLModel, table=True):
     image_url: Optional[str] = Field(default=None, max_length=500)
     category_id: Optional[int] = Field(default=None, foreign_key="categories.id")
     iiko_id: Optional[str] = Field(default=None, unique=True, index=True, max_length=255)
+    iiko_image_id: Optional[str] = Field(default=None, max_length=255)
     article: Optional[str] = Field(default=None, index=True, max_length=100)
     is_available: bool = Field(default=True)
     sort_order: int = Field(default=0)

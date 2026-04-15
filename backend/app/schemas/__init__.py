@@ -1,10 +1,10 @@
 """
 Pydantic схемы для валидации данных API
 """
-from typing import Optional, List
+from typing import Optional, List, Dict, Any
 from datetime import datetime
 from decimal import Decimal
-from pydantic import BaseModel, Field, ConfigDict
+from pydantic import BaseModel, Field, ConfigDict, model_validator
 from app.models.order import OrderStatus
 
 
@@ -131,6 +131,11 @@ class CategoryResponse(CategoryBase):
     """Ответ API с категорией"""
     id: int
     iiko_id: Optional[str] = None
+    parent_id: Optional[int] = None
+    image_url: Optional[str] = None
+    iiko_image_id: Optional[str] = None
+    products_count: int = 0
+    modifiers_count: int = 0
     created_at: datetime
     updated_at: datetime
 
@@ -225,17 +230,50 @@ class ProductUpdate(BaseModel):
     stop_list_branch_ids: Optional[List[int]] = None
 
 
-class ProductResponse(ProductBase):
+class ProductResponse(BaseModel):
     """Ответ API с товаром"""
     id: int
+    name: str
+    description: Optional[str] = None
+    price: Decimal
+    image_url: Optional[str] = None
+    iiko_image_id: Optional[str] = None
+    category_id: Optional[int] = None
     iiko_id: Optional[str] = None
     article: Optional[str] = None
-    created_at: datetime
-    updated_at: datetime
+    is_available: bool
+    is_popular: bool = False
+    sort_order: int = 0
+
+    # КБЖУ
+    weight_grams: Optional[int] = None
+    volume_ml: Optional[int] = None
+    calories: Optional[int] = None
+    proteins: Optional[float] = None
+    fats: Optional[float] = None
+    carbohydrates: Optional[float] = None
+
+    # Маркетинг
+    old_price: Optional[Decimal] = None
+    max_discount_percent: Optional[int] = None
+    bonus_accrual_percent: Optional[int] = None
+
+    # Стоп-листы (список ID филиалов где в стопе)
+    stop_list_branch_ids: List[int] = []
+    is_on_stop_list: bool = False
+
+    # Связанные данные
     sizes: List[ProductSizeResponse] = []
     modifier_groups: List[ProductModifierGroupResponse] = []
+    created_at: datetime
+    updated_at: datetime
 
     model_config = ConfigDict(from_attributes=True)
+
+    @model_validator(mode="after")
+    def compute_stop_list(self):
+        self.is_on_stop_list = bool(self.stop_list_branch_ids)
+        return self
 
 
 # ============= Схемы заказов =============
@@ -249,11 +287,15 @@ class OrderItemCreate(BaseModel):
 class OrderItemResponse(BaseModel):
     """Ответ API с позицией заказа"""
     id: int
-    product_id: int
+    product_id: Optional[int] = None
     product_name: str
     quantity: int
     price: Decimal
     total: Decimal
+    size_name: Optional[str] = None
+    size_iiko_id: Optional[str] = None
+    comment: Optional[str] = None
+    modifiers: Optional[List[Dict[str, Any]]] = []
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -293,15 +335,31 @@ class OrderResponse(BaseModel):
     total_amount: Decimal
     bonus_spent: Decimal
     total_discount: Decimal
+    total_with_discount: Decimal = Decimal("0.00")
     branch_id: Optional[int] = None
-    promo_code_id: Optional[int] = None
-    status: OrderStatus
+    customer_id: Optional[int] = None
     iiko_order_id: Optional[str] = None
+    external_number: Optional[str] = None
+    terminal_group_id: Optional[str] = None
+    terminal_group_name: Optional[str] = None
+    payment_method: Optional[str] = None
+    order_type: Optional[str] = None
+    courier_name: Optional[str] = None
+    delivery_zone: Optional[str] = None
+    is_paid: bool = False
+    city: Optional[str] = None
+    status: OrderStatus
+    spam_score: Optional[int] = None
+    spam_info: Optional[str] = None
     comment: Optional[str] = None
+    cancellation_reason: Optional[str] = None
+    cancelled_by: Optional[str] = None
+    promo_code_id: Optional[int] = None
     created_at: datetime
     updated_at: datetime
-    customer_id: Optional[int] = None
     items: List[OrderItemResponse] = []
+    order_items_details: Optional[List[Dict[str, Any]]] = None
+    customer_info_details: Optional[Dict[str, Any]] = None
 
     model_config = ConfigDict(from_attributes=True)
 

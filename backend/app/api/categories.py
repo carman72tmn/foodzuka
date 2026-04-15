@@ -34,6 +34,22 @@ async def get_categories(
     return categories
 
 
+@router.get("/tree", response_model=List[CategoryResponse])
+async def get_categories_tree(session: Session = Depends(get_session)):
+    """Получить все категории с данными для дерева"""
+    query = select(Category).order_by(Category.sort_order, Category.name)
+    categories = session.exec(query).all()
+    return categories
+
+
+@router.post("/sync-from-iiko")
+async def sync_categories_from_iiko(session: Session = Depends(get_session)):
+    """Синхронизировать только категории из iiko External Menu"""
+    from app.services.iiko_sync_service import iiko_sync_service
+    result = await iiko_sync_service.sync_categories_only(session)
+    return result
+
+
 @router.get("/{category_id}", response_model=CategoryResponse)
 async def get_category(category_id: int, session: Session = Depends(get_session)):
     """Получить категорию по ID"""
@@ -84,9 +100,30 @@ async def update_category(
     return category
 
 
+@router.delete("/all", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_all_categories(session: Session = Depends(get_session)):
+    """
+    Удалить абсолютно все категории.
+    Сначала обнуляет ссылки на категории в товарах, чтобы не нарушить целостность.
+    """
+    from sqlalchemy import text
+    
+    # 1. Обнуляем ссылки в товарах
+    session.exec(text("UPDATE products SET category_id = NULL"))
+    
+    # 2. Обнуляем parent_id в самих категориях (чтобы избежать проблем с иерархией при удалении)
+    session.exec(text("UPDATE categories SET parent_id = NULL"))
+    
+    # 3. Удаляем все записи категорий
+    session.exec(text("DELETE FROM categories"))
+    
+    session.commit()
+    return None
+
+
 @router.delete("/{category_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_category(category_id: int, session: Session = Depends(get_session)):
-    """Удалить категорию"""
+    """Удалить конкретную категорию"""
     category = session.get(Category, category_id)
     if not category:
         raise HTTPException(

@@ -1,0 +1,176 @@
+# New methods for IikoSyncService
+
+    async def _sync_from_external_menu(self, session: Session, menu_data: Dict[str, Any], log: SyncLog) -> Dict[str, Any]:
+        \"\"\"
+        Синхронизация через External Menu API v2 (веб-меню).
+        Поддерживает иерархию категорий, размеры и модификаторы.
+        \"\"\"
+        categories_synced = 0
+        products_synced = 0
+        
+        item_categories = menu_data.get("itemCategories", [])
+        
+        # 1. Синхронизация категорий
+        for iiko_cat in item_categories:
+            cat_iiko_id = iiko_cat.get("id")
+            if not cat_iiko_id: continue
+            
+            category = session.exec(select(Category).where(Category.iiko_id == cat_iiko_id)).first()
+            if category:
+                category.name = iiko_cat.get("name", category.name)
+                category.is_active = True
+                category.updated_at = datetime.utcnow()
+            else:
+                category = Category(
+                    name=iiko_cat.get("name", "Без названия"),
+                    iiko_id=cat_iiko_id,
+                    is_active=True
+                )
+                session.add(category)
+            session.flush()
+            categories_synced += 1
+            
+            # 2. Синхронизация товаров в категории
+            for iiko_item in iiko_cat.get("items", []):
+                item_iiko_id = iiko_item.get("itemId")
+                sku = iiko_item.get("sku")
+                if not item_iiko_id: continue
+                
+                # Базовая цена и размеры
+                size_prices = iiko_item.get("sizePrices", [])
+                base_price = 0
+                if size_prices:
+                    # Ищем цену по умолчанию или первую доступную
+                    default_size = next((sp for sp in size_prices if sp.get("isDefault")), size_prices[0])
+                    base_price = default_size.get("price", {}).get("currentPrice", 0)
+
+                product = session.exec(select(Product).where(Product.iiko_id == item_iiko_id)).first()
+                if product:
+                    product.name = iiko_item.get("name", product.name)
+                    product.description = iiko_item.get("description")
+                    product.price = base_price
+                    product.category_id = category.id
+                    product.article = sku
+                    # Картинки: берем buttonImageCroppedUrl или первую из imageLinks
+                    img = iiko_item.get("buttonImageCroppedUrl")
+                    if not img and iiko_item.get("imageLinks"):
+                        img = iiko_item["imageLinks"][0]
+                    if img: product.image_url = img
+                    
+                    product.is_available = True
+                    product.updated_at = datetime.utcnow()
+                else:
+                    product = Product(
+                        name=iiko_item.get("name", "Без названия"),
+                        description=iiko_item.get("description"),
+                        price=base_price,
+                        category_id=category.id,
+                        iiko_id=item_iiko_id,
+                        article=sku,
+                        is_available=True
+                    )
+                    img = iiko_item.get("buttonImageCroppedUrl")
+                    if not img and iiko_item.get("imageLinks"):
+                        img = iiko_item["imageLinks"][0]
+                    if img: product.image_url = img
+                    session.add(product)
+                
+                session.flush()
+                
+                # Синхронизация размеров (ProductSize)
+                # Удаляем старые
+                for sz in product.sizes: session.delete(sz)
+                product.sizes = []
+                
+                for sp in size_prices:
+                    s_id = sp.get("sizeId") or "default"
+                    s_name = sp.get("name") or ("Стандарт" if s_id == "default" else s_id)
+                    s_price = sp.get("price", {}).get("currentPrice", 0)
+                    
+                    new_size = ProductSize(
+                        product_id=product.id,
+                        iiko_id=s_id,
+                        name=s_name,
+                        price=s_price,
+                        is_default=sp.get("isDefault", False)
+                    )
+                    session.add(new_size)
+
+                # Синхронизация модификаторов
+                # Удаляем старые группы
+                for mg_old in product.modifier_groups: session.delete(mg_old)
+                product.modifier_groups = []
+                
+                for mg_data in iiko_item.get("modifierGroups", []):
+                    mg = ProductModifierGroup(
+                        product_id=product.id,
+                        iiko_id=mg_data.get("modifierGroupId", ""),
+                        name=mg_data.get("name", "Группа модификаторов"),
+                        min_amount=mg_data.get("minQuantity", 0),
+                        max_amount=mg_data.get("maxQuantity", 1),
+                        is_required=mg_data.get("required", False)
+                    )
+                    session.add(mg)
+                    session.flush()
+                    
+                    for m_data in mg_data.get("modifiers", []):
+                        mod = ProductModifier(
+                            group_id=mg.id,
+                            iiko_id=m_data.get("modifierId", ""),
+                            name=m_data.get("name", "Модификатор"),
+                            price=m_data.get("price", 0),
+                            default_amount=m_data.get("defaultAmount", 0),
+                            min_amount=m_data.get("minAmount", 0),
+                            max_amount=m_data.get("maxAmount", 1)
+                        )
+                        session.add(mod)
+                
+                products_synced += 1
+        
+        return {
+            "success": True,
+            "categories_synced": categories_synced,
+            "products_synced": products_synced
+        }
+
+    async def sync_menu(self, session: Session) -> Dict[str, Any]:
+        \"\"\"
+        Умная синхронизация меню. Использует External Menu API v2 если задан ID меню,
+        иначе откатывается на классическую nomenclature.
+        \"\"\"
+        log = SyncLog(sync_type="menu", status="running")
+        session.add(log)
+        session.commit()
+
+        settings_db = session.exec(select(IikoSettings)).first()
+        api_login = settings_db.api_login if settings_db else None
+        org_id = settings_db.organization_id if settings_db else None
+        ext_menu_id = settings_db.external_menu_id if settings_db else None
+
+        try:
+            if ext_menu_id:
+                logger.info(f"Syncing via External Menu API (ID: {ext_menu_id})")
+                menu_data = await iiko_service.get_external_menu_by_id(ext_menu_id, api_login=api_login, organization_id=org_id)
+                res = await self._sync_from_external_menu(session, menu_data, log)
+            else:
+                logger.info("Syncing via Legacy Nomenclature API")
+                nomenclature = await iiko_service.get_nomenclature(api_login=api_login, organization_id=org_id)
+                res = await self._sync_from_nomenclature(session, nomenclature, log)
+            
+            session.commit()
+            
+            log.status = "success"
+            log.categories_count = res["categories_synced"]
+            log.products_count = res["products_synced"]
+            log.details = f"Synced {log.categories_count} categories, {log.products_count} products"
+            session.commit()
+            
+            return res
+        except Exception as e:
+            logger.error(f"Menu sync failed: {e}")
+            log.status = "error"
+            log.details = str(e)
+            session.commit()
+            raise
+
+    # ... logic for _sync_from_nomenclature (original sync_menu content)

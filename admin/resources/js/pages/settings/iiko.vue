@@ -35,7 +35,9 @@ const settings = ref({
   resto_url: "",
   resto_login: "",
   resto_password: "",
+  price_category_id: "",
 })
+
 
 // Справочники (загружаются из iiko)
 const organizations = ref([])
@@ -477,7 +479,16 @@ onMounted(async () => {
                     v-model="settings.external_menu_id"
                     :items="externalMenus"
                     label="Внешнее меню"
+                    class="mb-4"
                   />
+                  <VTextField
+                    v-model="settings.price_category_id"
+                    label="UUID Категории цен (опционально)"
+                    hint="Если оставить пустым, iiko будет использовать категорию по умолчанию для меню"
+                    persistent-hint
+                  />
+
+
                 </VCardText>
               </VCard>
             </VCol>
@@ -578,6 +589,7 @@ onMounted(async () => {
                     <th>Мин. заказ</th>
                     <th>Стоимость</th>
                     <th>Время</th>
+                    <th>Границы</th>
                     <th>Статус</th>
                   </tr>
                 </thead>
@@ -587,9 +599,19 @@ onMounted(async () => {
                     <td class="text-caption" style="max-width: 200px; white-space: normal;">
                       {{ zone.description || '-' }}
                     </td>
-                    <td>{{ zone.min_sum }} р.</td>
+                    <td>{{ zone.min_order_amount }} р.</td>
                     <td>{{ zone.delivery_cost }} р.</td>
                     <td>{{ zone.min_delivery_time }}-{{ zone.max_delivery_time }} мин.</td>
+                    <td>
+                      <VBtn
+                        v-if="zone.polygon_coordinates"
+                        size="x-small"
+                        icon="mdi-map-marker-path"
+                        variant="text"
+                        @click="() => showMessage(zone.polygon_coordinates, 'info')"
+                      />
+                      <span v-else>-</span>
+                    </td>
                     <td>
                       <VChip :color="zone.is_active ? 'success' : 'grey'" size="x-small">
                         {{ zone.is_active ? 'Да' : 'Нет' }}
