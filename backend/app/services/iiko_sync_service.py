@@ -37,10 +37,16 @@ class IikoSyncService:
         api_login = settings_db.api_login if settings_db else None
         org_id = settings_db.organization_id if settings_db else None
         ext_menu_id = settings_db.external_menu_id if settings_db else None
+        price_cat_id = settings_db.price_category_id if settings_db else None
         try:
             if ext_menu_id:
-                logger.info(f"Syncing via External Menu API (ID: {ext_menu_id})")
-                menu_data = await iiko_service.get_external_menu_by_id(ext_menu_id, api_login=api_login, organization_id=org_id)
+                logger.info(f"Syncing via External Menu API (ID: {ext_menu_id}, Price Category: {price_cat_id})")
+                menu_data = await iiko_service.get_external_menu_by_id(
+                    ext_menu_id, 
+                    price_category_id=price_cat_id,
+                    api_login=api_login, 
+                    organization_id=org_id
+                )
                 res = await self._sync_from_external_menu(session, menu_data, log)
             else:
                 logger.info("Syncing via Legacy Nomenclature API")
