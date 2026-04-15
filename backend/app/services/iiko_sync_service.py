@@ -47,7 +47,12 @@ class IikoSyncService:
                     api_login=api_login, 
                     organization_id=org_id
                 )
-                res = await self._sync_from_external_menu(session, menu_data, log)
+                
+                # Fetch nomenclature as price fallback
+                logger.info("Fetching nomenclature as price fallback for v2 sync")
+                nomenclature = await iiko_service.get_nomenclature(api_login=api_login, organization_id=org_id)
+                
+                res = await self._sync_from_external_menu(session, menu_data, log, nomenclature=nomenclature)
             else:
                 logger.info("Syncing via Legacy Nomenclature API")
                 nomenclature = await iiko_service.get_nomenclature(api_login=api_login, organization_id=org_id)
@@ -66,9 +71,23 @@ class IikoSyncService:
             session.commit()
             raise
 
-    async def _sync_from_external_menu(self, session: Session, menu_data: Dict[str, Any], log: SyncLog) -> Dict[str, Any]:
+    async def _sync_from_external_menu(self, session: Session, menu_data: Dict[str, Any], log: SyncLog, nomenclature: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         categories_synced = 0
         products_synced = 0
+        
+        # Build nomenclature price map for fallback
+        nom_prices = {}
+        if nomenclature and "products" in nomenclature:
+            for p in nomenclature["products"]:
+                p_id = p.get("id")
+                major_price = 0
+                sz_prices = {}
+                if p.get("sizePrices"):
+                    major_price = p["sizePrices"][0].get("price", {}).get("currentPrice", 0)
+                    for sp in p["sizePrices"]:
+                        sz_prices[sp.get("sizeId") or "default"] = sp.get("price", {}).get("currentPrice", 0)
+                nom_prices[p_id] = {"base": major_price, "sizes": sz_prices}
+
         item_categories = menu_data.get("itemCategories", [])
         for iiko_cat in item_categories:
             cat_iiko_id = iiko_cat.get("id")
@@ -92,6 +111,11 @@ class IikoSyncService:
                 if size_prices:
                     default_size = next((sp for sp in size_prices if sp.get("isDefault")), size_prices[0])
                     base_price = default_size.get("price", {}).get("currentPrice", 0)
+
+                # Hybrid price fallback: if v2 price is 0, use v1 price
+                if base_price == 0 and item_iiko_id in nom_prices:
+                    base_price = nom_prices[item_iiko_id]["base"]
+                    logger.debug(f"Hybrid: using v1 base price {base_price} for {iiko_item.get('name')}")
 
                 # КБЖУ — из nutritionPerHundredGrams
                 nutrition = iiko_item.get("nutritionPerHundredGrams", {})
@@ -141,8 +165,16 @@ class IikoSyncService:
                 # Sizes
                 for sz in session.exec(select(ProductSize).where(ProductSize.product_id == product.id)).all(): session.delete(sz)
                 for sp in size_prices:
-                    session.add(ProductSize(product_id=product.id, iiko_id=sp.get("sizeId") or "default",
-                                          name=sp.get("name") or "Стандарт", price=sp.get("price", {}).get("currentPrice", 0),
+                    sp_price = sp.get("price", {}).get("currentPrice", 0)
+                    sz_id = sp.get("sizeId") or "default"
+                    
+                    if sp_price == 0 and item_iiko_id in nom_prices:
+                        # try to find exact size price, else use its base
+                        sp_price = nom_prices[item_iiko_id]["sizes"].get(sz_id, nom_prices[item_iiko_id]["base"])
+                        logger.debug(f"Hybrid: using v1 size price {sp_price} for {iiko_item.get('name')} size {sz_id}")
+                    
+                    session.add(ProductSize(product_id=product.id, iiko_id=sz_id,
+                                          name=sp.get("name") or "Стандарт", price=sp_price,
                                           is_default=sp.get("isDefault", False)))
                 # Modifiers
                 for mg_old in session.exec(select(ProductModifierGroup).where(ProductModifierGroup.product_id == product.id)).all(): session.delete(mg_old)
@@ -391,7 +423,12 @@ class IikoSyncService:
                         api_login=api_login, 
                         organization_id=org_id
                     )
-                    updated = await self._sync_prices_from_v2(session, menu_data)
+                    
+                    # Fetch nomenclature as hybrid fallback
+                    logger.info("Fetching nomenclature as hybrid price fallback for v2 price sync")
+                    nomenclature = await iiko_service.get_nomenclature(api_login=api_login, organization_id=org_id)
+                    
+                    updated = await self._sync_prices_from_v2(session, menu_data, nomenclature=nomenclature)
                     sync_source = "v2"
                 except Exception as e:
                     logger.warning(f"Failed to sync via API v2, falling back to v1: {e}")
@@ -455,9 +492,23 @@ class IikoSyncService:
                             size_db.updated_at = datetime.utcnow()
         return updated
 
-    async def _sync_prices_from_v2(self, session: Session, menu_data: Dict[str, Any]) -> int:
-        """Вспомогательный метод синхронизации цен из внешнего меню (v2)"""
+    async def _sync_prices_from_v2(self, session: Session, menu_data: Dict[str, Any], nomenclature: Optional[Dict[str, Any]] = None) -> int:
+        """Вспомогательный метод синхронизации цен из внешнего меню (v2) с гибридным фоллбеком на v1"""
         updated = 0
+        
+        # Build nomenclature price map for fallback
+        nom_prices = {}
+        if nomenclature and "products" in nomenclature:
+            for p in nomenclature["products"]:
+                p_id = p.get("id")
+                major_price = 0
+                sz_prices = {}
+                if p.get("sizePrices"):
+                    major_price = p["sizePrices"][0].get("price", {}).get("currentPrice", 0)
+                    for sp in p["sizePrices"]:
+                        sz_prices[sp.get("sizeId") or "default"] = sp.get("price", {}).get("currentPrice", 0)
+                nom_prices[p_id] = {"base": major_price, "sizes": sz_prices}
+
         for iiko_cat in menu_data.get("itemCategories", []):
             for iiko_item in iiko_cat.get("items", []):
                 item_iiko_id = iiko_item.get("itemId")
@@ -471,6 +522,11 @@ class IikoSyncService:
                         default_size = next((sp for sp in size_prices if sp.get("isDefault")), size_prices[0])
                         new_base_price = default_size.get("price", {}).get("currentPrice", 0)
                         
+                        # Hybrid fallback
+                        if new_base_price == 0 and item_iiko_id in nom_prices:
+                            new_base_price = nom_prices[item_iiko_id]["base"]
+                            logger.debug(f"Hybrid Price Sync: using v1 base price {new_base_price} for {product.name}")
+
                         if product.price != new_base_price:
                             product.price = new_base_price
                             product.updated_at = datetime.utcnow()
@@ -481,6 +537,11 @@ class IikoSyncService:
                             sz_iiko_id = sp.get("sizeId") or "default"
                             sz_price = sp.get("price", {}).get("currentPrice", 0)
                             
+                            # Hybrid fallback
+                            if sz_price == 0 and item_iiko_id in nom_prices:
+                                sz_price = nom_prices[item_iiko_id]["sizes"].get(sz_iiko_id, nom_prices[item_iiko_id]["base"])
+                                logger.debug(f"Hybrid Price Sync: using v1 size price {sz_price} for {product.name} size {sz_iiko_id}")
+
                             size_db = session.exec(select(ProductSize).where(
                                 ProductSize.product_id == product.id,
                                 ProductSize.iiko_id == sz_iiko_id
