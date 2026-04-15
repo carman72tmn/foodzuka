@@ -60,6 +60,35 @@ const formatPrice = (value) => {
   return new Intl.NumberFormat('ru-RU', { style: 'currency', currency: 'RUB', maximumFractionDigits: 0 }).format(value)
 }
 
+const deleteAllModifiers = async () => {
+  if (!confirm("Вы уверены, что хотите удалить все модификаторы и размеры?")) return
+  loading.value = true
+  try {
+    const res = await fetch(`${API_BASE}/products/modifiers/all`, { method: 'DELETE' })
+    if (res.ok) {
+        loadData()
+    }
+  } catch (e) {
+    console.error("Ошибка удаления", e)
+  } finally {
+    loading.value = false
+  }
+}
+
+const forceSyncMenu = async () => {
+  loading.value = true
+  try {
+    const res = await fetch(`${API_BASE}/iiko/sync-menu`, { method: 'POST' })
+    if (res.ok) {
+        setTimeout(loadData, 2000)
+    }
+  } catch (e) {
+    console.error("Ошибка синхронизации", e)
+  } finally {
+    loading.value = false
+  }
+}
+
 onMounted(loadData)
 </script>
 
@@ -81,6 +110,26 @@ onMounted(loadData)
             hide-details
             style="max-width: 300px"
           />
+          <VBtn
+            color="error"
+            prepend-icon="mdi-delete-sweep"
+            variant="tonal"
+            class="ms-3"
+            :loading="loading"
+            @click="deleteAllModifiers"
+          >
+            Удалить всё
+          </VBtn>
+          <VBtn
+            color="primary"
+            prepend-icon="mdi-sync"
+            variant="elevated"
+            class="ms-2"
+            :loading="loading"
+            @click="forceSyncMenu"
+          >
+            Выгрузить из iiko
+          </VBtn>
         </VCardTitle>
 
         <VTabs v-model="activeTab" color="primary" align-tabs="start" class="border-b">

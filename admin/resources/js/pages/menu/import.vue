@@ -127,7 +127,7 @@ onUnmounted(() => {
           <p class="text-caption text-medium-emphasis mb-6 px-4">
             Загрузить актуальные остатки и блокировки филиалов из iiko.
           </p>
-          <VBtn :loading="loading.stops" color="error" @click="startSync('stops', 'sync-stop-list', true)" class="rounded-pill px-6">
+          <VBtn :loading="loading.stops" color="error" @click="startSync('stops', 'sync-stop-list')" class="rounded-pill px-6">
             Загрузить
           </VBtn>
         </VCardText>

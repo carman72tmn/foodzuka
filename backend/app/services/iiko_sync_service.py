@@ -117,13 +117,13 @@ class IikoSyncService:
                     base_price = nom_prices[item_iiko_id]["base"]
                     logger.debug(f"Hybrid: using v1 base price {base_price} for {iiko_item.get('name')}")
 
-                # КБЖУ — из nutritionPerHundredGrams
+                # КБЖУ — из nutritionPerHundredGrams (поддержка разных ключей iiko)
                 nutrition = iiko_item.get("nutritionPerHundredGrams", {})
                 kbju = {
-                    "calories": nutrition.get("caloricity") or nutrition.get("calories"),
-                    "proteins": nutrition.get("proteins"),
-                    "fats": nutrition.get("fats"),
-                    "carbohydrates": nutrition.get("carbohydrates")
+                    "calories": nutrition.get("caloricity") or nutrition.get("calories") or nutrition.get("energyFullAmount"),
+                    "proteins": nutrition.get("proteins") or nutrition.get("proteinsAmount"),
+                    "fats": nutrition.get("fats") or nutrition.get("fatAmount"),
+                    "carbohydrates": nutrition.get("carbohydrates") or nutrition.get("carbohydrateAmount")
                 }
 
                 product = session.exec(select(Product).where(Product.iiko_id == item_iiko_id)).first()
@@ -135,7 +135,8 @@ class IikoSyncService:
                         category_id=category.id,
                         iiko_id=item_iiko_id,
                         article=iiko_item.get("sku") or iiko_item.get("code"),
-                        is_available=True
+                        is_available=True,
+                        is_stopped=False
                     )
                     session.add(product)
                 else:
@@ -151,10 +152,12 @@ class IikoSyncService:
                 product.iiko_image_id = iiko_item.get("imageId")
                 product.weight_grams = iiko_item.get("weight")
                 product.volume_ml = iiko_item.get("volume")
-                product.calories = kbju["calories"]
-                product.proteins = kbju["proteins"]
-                product.fats = kbju["fats"]
-                product.carbohydrates = kbju["carbohydrates"]
+                
+                # КБЖУ - явное присвоение
+                product.calories = kbju.get("calories")
+                product.proteins = kbju.get("proteins")
+                product.fats = kbju.get("fats")
+                product.carbohydrates = kbju.get("carbohydrates")
 
                 img = iiko_item.get("buttonImageCroppedUrl") or (iiko_item.get("imageLinks", [None])[0] if iiko_item.get("imageLinks") else None)
                 if not img and product.iiko_image_id:
@@ -267,7 +270,7 @@ class IikoSyncService:
                         if cat:
                             category_id = cat.id
 
-                    # РР·РІР»РµС‡РµРЅРёРµ С†РµРЅС‹
+                    # Извлечение цены
                     price = 0
                     if iiko_product.get("sizePrices"):
                         price = (
@@ -276,8 +279,16 @@ class IikoSyncService:
                             .get("currentPrice", 0)
                         )
 
-                    # РР·РІР»РµС‡РµРЅРёРµ Р°СЂС‚РёРєСѓР»Р°
+                    # Извлечение артикула
                     article = iiko_product.get("code", "")
+
+                    # Извлечение КБЖУ (iiko v1)
+                    kbju = {
+                        "calories": iiko_product.get("energyFullAmount"),
+                        "proteins": iiko_product.get("proteinsAmount"),
+                        "fats": iiko_product.get("fatAmount"),
+                        "carbohydrates": iiko_product.get("carbohydrateAmount")
+                    }
 
                     if product:
                         product.name = iiko_product["name"]
@@ -299,7 +310,8 @@ class IikoSyncService:
                             article=article,
                             is_available=not iiko_product.get(
                                 "isDeleted", False
-                            )
+                            ),
+                            is_stopped=False
                         )
                         session.add(product)
                         
@@ -335,18 +347,18 @@ class IikoSyncService:
 
                     if iiko_product.get("groupModifiers"):
                         for gm in iiko_product["groupModifiers"]:
+                            # Поиск имени группы и самого модификатора
+                            group_product = next((p for p in nomenclature["products"] if p["id"] == gm.get("modifierId")), None)
+                            group_name = group_product.get("name") if group_product else "Группа модификаторов"
+                            
                             mg = ProductModifierGroup(
                                 product_id=product.id,
                                 iiko_id=gm.get("modifierId", ""),
-                                name="Группа модификаторов", # To be replaced by cross-referencing products if needed, but often iiko sends it as ID pointing to another product. For now use placeholder or fetch name if available.
+                                name=group_name,
                                 min_amount=gm.get("minAmount", 0),
                                 max_amount=gm.get("maxAmount", 1),
                                 is_required=gm.get("required", False)
                             )
-                            # Try to find group name from nomenclature products if modifierId points to a group
-                            group_product = next((p for p in nomenclature["products"] if p["id"] == gm.get("modifierId")), None)
-                            if group_product:
-                                mg.name = group_product.get("name", "Группа модификаторов")
                                 
                             session.add(mg)
                             session.flush() # get mg.id
@@ -578,18 +590,29 @@ class IikoSyncService:
                 if item.get("balance", 0) <= 0
             }
 
-            # Сначала помечаем все как доступные
+            now = datetime.utcnow()
             all_products = session.exec(select(Product)).all()
             updated = 0
             for product in all_products:
                 if product.iiko_id in stopped_product_ids:
-                    if product.is_available:
-                        product.is_available = False
+                    # Товар в стоп-листе
+                    product.is_available = False
+                    if not product.is_stopped:
+                        product.is_stopped = True
+                        product.stopped_at = now
                         updated += 1
                 else:
-                    if not product.is_available:
+                    # Товара нет в стоп-листе
+                    if product.is_stopped:
+                        product.is_stopped = False
+                        # Мы НЕ меняем is_available на True автоматически, 
+                        # так как товар мог быть скрыт вручную, 
+                        # но в контексте iiko синхронизации обычно возвращаем доступность 
+                        # если только он не был скрыт по другим причинам.
+                        # Однако ТЗ говорит: "У всех товаров, которых нет в ответе iiko, выставь is_stopped = False"
                         product.is_available = True
                         updated += 1
+                session.add(product)
 
             session.commit()
 
@@ -669,23 +692,40 @@ class IikoSyncService:
         if isinstance(items_data, list):
             for ei in session.exec(select(OrderItem).where(OrderItem.order_id == order.id)).all(): session.delete(ei)
             for item in items_data:
-                # Более надежный сбор модификаторов с ID
-                mods = []
-                for m in item.get("modifiers", []):
-                    mods.append({
-                        "iiko_id": m.get("productId") or m.get("id"),
-                        "name": m.get("name"),
-                        "amount": m.get("amount"),
-                        "sum": m.get("sum")
-                    })
+                # 1. Fallback для товара
+                item_name = item.get("name")
+                if not item_name:
+                    db_p = session.exec(select(Product).where(Product.iiko_id == item.get("productId"))).first()
+                    item_name = db_p.name if db_p else "Товар не из каталога"
 
-                # Улучшенное извлечение размера (может быть объектом или строкой)
+                # 2. Улучшенное извлечение размера с fallback
                 size_data = item.get("size")
                 size_name = size_data.get("name") if isinstance(size_data, dict) else size_data
+                if not size_name:
+                    sz_id = size_data.get("id") if isinstance(size_data, dict) else None
+                    if sz_id:
+                        db_sz = session.exec(select(ProductSize).where(ProductSize.iiko_id == sz_id)).first()
+                        size_name = db_sz.name if db_sz else None
+                
+                # 3. Более надежный сбор модификаторов с ID и fallback имени
+                mods = []
+                for m in item.get("modifiers", []):
+                    m_name = m.get("name")
+                    m_id = m.get("productId") or m.get("id")
+                    if not m_name and m_id:
+                        db_m = session.exec(select(ProductModifier).where(ProductModifier.iiko_id == m_id)).first()
+                        m_name = db_m.name if db_m else "Неизвестная опция"
+                    
+                    mods.append({
+                        "iiko_id": m_id,
+                        "name": m_name,
+                        "amount": m.get("amount", 1),
+                        "sum": m.get("sum", 0)
+                    })
 
                 session.add(OrderItem(
                     order_id=order.id,
-                    product_name=item.get("name"),
+                    product_name=item_name,
                     quantity=int(item.get("amount", 1)),
                     price=Decimal(str(item.get("price", 0))),
                     total=Decimal(str(item.get("sum", 0))),

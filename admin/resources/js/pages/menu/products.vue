@@ -66,7 +66,7 @@ const filteredProducts = computed(() => {
     const matchesSearch = p.name.toLowerCase().includes(search.value.toLowerCase()) || 
                          (p.article && p.article.toLowerCase().includes(search.value.toLowerCase()))
     const matchesCategory = !selectedCategory.value || p.category_id === selectedCategory.value
-    const matchesStop = !filterStopList.value || p.is_on_stop_list
+    const matchesStop = !filterStopList.value || p.is_stopped
     return matchesSearch && matchesCategory && matchesStop
   }).map(p => ({
     ...p,
@@ -90,7 +90,7 @@ const syncMenu = async () => {
 const syncStopList = async () => {
   stopSyncLoading.value = true
   try {
-    const res = await fetch(`${API_BASE}/products/sync-stop-list`, { method: 'POST' })
+    const res = await fetch(`${API_BASE}/iiko/sync-stop-list`, { method: 'POST' })
     if (res.ok) {
       showMessage("Стоп-листы обновлены")
       loadData()
@@ -118,6 +118,23 @@ const viewDetails = async (product) => {
   }
 }
 
+const deleteAllProducts = async () => {
+  if (!confirm("Вы уверены, что хотите БЕЗВОЗВРАТНО удалить все товары? Это очистит каталог.")) return
+  
+  loading.value = true
+  try {
+    const res = await fetch(`${API_BASE}/products/all`, { method: 'DELETE' })
+    if (res.ok) {
+      showMessage("Все товары удалены", "success")
+      loadData()
+    }
+  } catch (e) {
+    showMessage("Ошибка при удалении", "error")
+  } finally {
+    loading.value = false
+  }
+}
+
 onMounted(loadData)
 </script>
 
@@ -138,7 +155,17 @@ onMounted(loadData)
             :loading="stopSyncLoading"
             @click="syncStopList"
           >
-            Стоп-лист iiko
+            Стоп-листы
+          </VBtn>
+
+          <VBtn
+            color="error"
+            prepend-icon="mdi-delete-sweep"
+            variant="tonal"
+            :loading="loading"
+            @click="deleteAllProducts"
+          >
+            Удалить всё
           </VBtn>
           
           <VBtn
@@ -216,7 +243,7 @@ onMounted(loadData)
           <template #item.status="{ item }">
             <div class="d-flex flex-column gap-1">
               <VChip
-                v-if="item.is_on_stop_list"
+                v-if="item.is_on_stop_list || item.is_stopped"
                 color="error"
                 size="x-small"
                 variant="flat"
@@ -383,18 +410,66 @@ onMounted(loadData)
                 </VExpansionPanel>
               </VExpansionPanels>
 
+              <!-- Группы модификаторов -->
+              <div class="text-subtitle-1 font-weight-bold mt-6 mb-2">Группы модификаторов</div>
+              <VExpansionPanels v-if="selectedProduct.modifier_groups && selectedProduct.modifier_groups.length > 0" class="mb-4">
+                <VExpansionPanel v-for="group in selectedProduct.modifier_groups" :key="group.id">
+                  <VExpansionPanelTitle>
+                    <div class="d-flex align-center">
+                      <VIcon icon="mdi-view-list-outline" class="me-2" color="secondary" />
+                      {{ group.name }}
+                      <VChip size="x-small" variant="tonal" class="ms-2">
+                        {{ group.iiko_id }}
+                      </VChip>
+                    </div>
+                  </VExpansionPanelTitle>
+                  <VExpansionPanelText>
+                    <VTable density="compact" class="border rounded">
+                      <thead>
+                        <tr>
+                          <th>Модификатор</th>
+                          <th class="text-right">Цена</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        <tr v-for="mod in group.modifiers" :key="mod.id">
+                          <td class="text-caption">
+                            {{ mod.name }} 
+                            <span class="text-grey ms-1" v-if="mod.article">({{ mod.article }})</span>
+                          </td>
+                          <td class="text-right text-caption font-weight-bold">
+                            {{ mod.price }} ₽
+                          </td>
+                        </tr>
+                      </tbody>
+                    </VTable>
+                  </VExpansionPanelText>
+                </VExpansionPanel>
+              </VExpansionPanels>
+              <VAlert v-else type="info" variant="tonal" density="compact" class="mb-4 text-caption">
+                У данного товара нет групп модификаторов.
+              </VAlert>
+
               <!-- Стоп-листы -->
-              <div v-if="selectedProduct.is_on_stop_list" class="pa-4 bg-red-lighten-5 rounded border border-error mb-4">
-                <div class="d-flex align-center mb-2">
-                  <VIcon icon="mdi-alert-octagon" color="error" class="me-2" />
-                  <span class="text-error font-weight-bold">ВНИМАНИЕ: ТОВАР В СТОП-ЛИСТЕ</span>
+              <div v-if="selectedProduct.is_on_stop_list || selectedProduct.is_stopped" class="pa-4 bg-red-lighten-5 rounded border border-error mb-4">
+                <div class="d-flex align-center justify-space-between mb-2">
+                  <div class="d-flex align-center">
+                    <VIcon icon="mdi-alert-octagon" color="error" class="me-2" />
+                    <span class="text-error font-weight-bold">ВНИМАНИЕ: ТОВАР В СТОП-ЛИСТЕ</span>
+                  </div>
+                  <div v-if="selectedProduct.stopped_at" class="text-caption text-error">
+                    Дата: {{ new Date(selectedProduct.stopped_at).toLocaleString() }}
+                  </div>
                 </div>
                 <div class="text-body-2">
-                  Согласно данным из iiko, данный товар недоступен для заказа в следующих филиалах (ID):
-                  <div class="d-flex flex-wrap gap-1 mt-2">
-                    <VChip v-for="bid in selectedProduct.stop_list_branch_ids" :key="bid" size="x-small" color="error">
-                      {{ bid }}
-                    </VChip>
+                  Согласно данным из iiko, данный товар недоступен для заказа.
+                  <div v-if="selectedProduct.stop_list_branch_ids && selectedProduct.stop_list_branch_ids.length" class="mt-2">
+                    В филиалах (ID):
+                    <div class="d-flex flex-wrap gap-1 mt-1">
+                      <VChip v-for="bid in selectedProduct.stop_list_branch_ids" :key="bid" size="x-small" color="error">
+                        {{ bid }}
+                      </VChip>
+                    </div>
                   </div>
                 </div>
               </div>

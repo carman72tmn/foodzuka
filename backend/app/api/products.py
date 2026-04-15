@@ -182,3 +182,22 @@ async def delete_product(product_id: int, session: Session = Depends(get_session
 
     session.delete(product)
     session.commit()
+
+
+@router.delete("/all", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_all_products(session: Session = Depends(get_session)):
+    """Безвозвратно удаляет все товары (Полезно для чистой синхронизации)"""
+    from sqlmodel import delete as sql_delete
+    session.exec(sql_delete(Product))
+    session.commit()
+
+
+@router.delete("/modifiers/all", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_all_modifiers(session: Session = Depends(get_session)):
+    """Удаляет все размеры и группы модификаторов"""
+    from sqlmodel import delete as sql_delete
+    from app.models.product import ProductSize, ProductModifierGroup, ProductModifier
+    session.exec(sql_delete(ProductSize))
+    session.exec(sql_delete(ProductModifierGroup))
+    session.exec(sql_delete(ProductModifier))
+    session.commit()

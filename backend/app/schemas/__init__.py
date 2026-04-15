@@ -1,7 +1,7 @@
 """
 Pydantic схемы для валидации данных API
 """
-from typing import Optional, List, Dict, Any
+from typing import Any, Dict, List, Optional, Sequence, Union
 from datetime import datetime
 from decimal import Decimal
 from pydantic import BaseModel, Field, ConfigDict, model_validator
@@ -201,6 +201,8 @@ class ProductBase(BaseModel):
     max_discount_percent: Optional[int] = Field(None, ge=0, le=100)
     bonus_accrual_percent: Optional[int] = Field(None, ge=0, le=100)
     stop_list_branch_ids: List[int] = []
+    is_stopped: bool = False
+    stopped_at: Optional[datetime] = None
 
 
 class ProductCreate(ProductBase):
@@ -228,6 +230,8 @@ class ProductUpdate(BaseModel):
     max_discount_percent: Optional[int] = Field(None, ge=0, le=100)
     bonus_accrual_percent: Optional[int] = Field(None, ge=0, le=100)
     stop_list_branch_ids: Optional[List[int]] = None
+    is_stopped: Optional[bool] = None
+    stopped_at: Optional[datetime] = None
 
 
 class ProductResponse(BaseModel):
@@ -261,6 +265,8 @@ class ProductResponse(BaseModel):
     # Стоп-листы (список ID филиалов где в стопе)
     stop_list_branch_ids: List[int] = []
     is_on_stop_list: bool = False
+    is_stopped: bool = False
+    stopped_at: Optional[datetime] = None
 
     # Связанные данные
     sizes: List[ProductSizeResponse] = []
@@ -373,7 +379,7 @@ class IikoSyncResponse(BaseModel):
     products_synced: int = 0
     products_updated: int = 0
     stopped_count: int = 0
-    message: str
+    message: Union[str, None] = None
 
 
 class SyncLogResponse(BaseModel):

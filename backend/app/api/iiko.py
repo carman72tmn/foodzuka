@@ -293,6 +293,7 @@ async def sync_prices(session: Session = Depends(get_session)):
         raise HTTPException(status_code=500, detail=f"Price sync error: {str(e)}")
 
 
+@router.post("/sync-stop-list", response_model=IikoSyncResponse)
 @router.post("/sync-stop-lists", response_model=IikoSyncResponse)
 async def sync_stop_lists(session: Session = Depends(get_session)):
     """Синхронизация стоп-листов (недоступные позиции)"""

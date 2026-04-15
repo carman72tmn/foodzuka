@@ -1,19 +1,8 @@
 
 import asyncio
 import logging
-import os
-import sys
-
-# Ensure current directory is in path
-sys.path.insert(0, os.getcwd())
-
-try:
-    from app.core.database import SessionLocal
-    from app.services.iiko_sync_service import IikoSyncService
-    print("Import successful")
-except ImportError as e:
-    print(f"Import failed: {e}")
-    sys.exit(1)
+from app.db.session import SessionLocal
+from app.services.iiko_sync_service import IikoSyncService
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -29,15 +18,13 @@ async def main():
         # Verify a few products in DB
         from app.models.product import Product
         from sqlalchemy import select
-        products = session.exec(select(Product).where(Product.price > 0).limit(5)).all()
-        print("\nProducts with non-zero prices (Success!):")
+        products = session.exec(select(Product).limit(10)).all()
+        print("\nPrdouct Price Verification:")
         for p in products:
-            print(f"- {p.name}: {p.price} rub")
+            print(f"- {p.name}: {p.price} rub (iiko_id: {p.iiko_id})")
             
     except Exception as e:
         logger.error(f"Sync failed: {e}")
-        import traceback
-        traceback.print_exc()
     finally:
         session.close()
 
