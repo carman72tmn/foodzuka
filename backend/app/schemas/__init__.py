@@ -101,6 +101,46 @@ class DeliveryZoneResponse(DeliveryZoneBase):
     id: int
     created_at: datetime
     updated_at: datetime
+    custom_polygons: List["CustomPolygonResponse"] = []
+    model_config = ConfigDict(from_attributes=True)
+
+
+class CustomPolygonBase(BaseModel):
+    name: str
+    description: Optional[str] = None
+    branch_id: int
+    delivery_zone_id: Optional[int] = None
+    min_delivery_time: Optional[int] = None
+    max_delivery_time: Optional[int] = None
+    min_order_amount: float = 0.0
+    delivery_cost: float = 0.0
+    free_delivery_threshold: float = 0.0
+    fill_color: str = "#4caf50"
+    priority: int = 0
+    coordinates: List[List[float]] = []
+    is_active: bool = True
+
+class CustomPolygonCreate(CustomPolygonBase):
+    pass
+
+class CustomPolygonUpdate(BaseModel):
+    name: Optional[str] = None
+    description: Optional[str] = None
+    delivery_zone_id: Optional[int] = None
+    min_delivery_time: Optional[int] = None
+    max_delivery_time: Optional[int] = None
+    min_order_amount: Optional[float] = None
+    delivery_cost: Optional[float] = None
+    free_delivery_threshold: Optional[float] = None
+    fill_color: Optional[str] = None
+    priority: Optional[int] = None
+    coordinates: Optional[List[List[float]]] = None
+    is_active: Optional[bool] = None
+
+class CustomPolygonResponse(CustomPolygonBase):
+    id: int
+    created_at: datetime
+    updated_at: datetime
     model_config = ConfigDict(from_attributes=True)
 
 
@@ -327,6 +367,7 @@ class OrderUpdate(BaseModel):
     customer_phone: Optional[str] = Field(None, max_length=20)
     delivery_address: Optional[str] = Field(None, max_length=500)
     branch_id: Optional[int] = None
+    is_paid: Optional[bool] = None
     comment: Optional[str] = None
 
 
@@ -352,20 +393,43 @@ class OrderResponse(BaseModel):
     order_type: Optional[str] = None
     courier_name: Optional[str] = None
     delivery_zone: Optional[str] = None
-    is_paid: bool = False
     city: Optional[str] = None
+    street: Optional[str] = None
+    house: Optional[str] = None
+    flat: Optional[str] = None
+    entrance: Optional[str] = None
+    floor: Optional[str] = None
+    doorphone: Optional[str] = None
     status: OrderStatus
+    is_paid: bool = False
     spam_score: Optional[int] = None
     spam_info: Optional[str] = None
     comment: Optional[str] = None
     cancellation_reason: Optional[str] = None
     cancelled_by: Optional[str] = None
     promo_code_id: Optional[int] = None
+    resolved_delivery_zone_id: Optional[int] = None
+    resolved_delivery_zone_name: Optional[str] = Field(None, alias="resolved_zone_name")
+
+    
+    # Расширенные данные
+    source: Optional[str] = None
+    bonus_accrued: Decimal = Decimal("0.00")
+    iiko_creation_time: Optional[datetime] = None
+    expected_time: Optional[datetime] = None
+    actual_time: Optional[datetime] = None
+    delay_minutes: Optional[int] = None
+    is_on_time: bool = True
+    is_asap: bool = True
+    admin_name: Optional[str] = None
+
     created_at: datetime
     updated_at: datetime
     items: List[OrderItemResponse] = []
     order_items_details: Optional[List[Dict[str, Any]]] = None
     customer_info_details: Optional[Dict[str, Any]] = None
+    status_history: Optional[List[Dict[str, Any]]] = None
+    discounts_details: Optional[Dict[str, Any]] = None
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -403,6 +467,7 @@ class IikoSettingsCreate(BaseModel):
     organization_id: Optional[str] = None
     external_menu_id: Optional[str] = None
     terminal_group_id: Optional[str] = None
+    price_category_id: Optional[str] = None  # ИСПРАВЛЕНИЕ: поле отсутствовало в схеме
     payment_type_cash: Optional[str] = None
     payment_type_card: Optional[str] = None
     payment_type_online: Optional[str] = None
@@ -419,25 +484,29 @@ class IikoSettingsCreate(BaseModel):
     resto_url: Optional[str] = None
     resto_login: Optional[str] = None
     resto_password: Optional[str] = None
+    pos_loyalty_name: Optional[str] = None
+    pos_loyalty_login: Optional[str] = None
+    pos_loyalty_password: Optional[str] = None
+    pos_loyalty_channel: Optional[str] = None
+    address_format: str = "components"
+    city_name: Optional[str] = None
+    manual_timezone: Optional[str] = None
+    timezone_name: Optional[str] = None
 
 
 class IikoSettingsResponse(IikoSettingsCreate):
-    """Ответ API с настройками iiko"""
+    """Ответ API с настройками iiko.
+
+    ВАЖНО: маскировка чувствительных полей УДАЛЕНА намеренно.
+    Фронтенд читает эти данные для редактирования формы и затем
+    отправляет их обратно при сохранении. Если маскировать здесь,
+    то при «Сохранить» в БД запишутся маски вместо реальных значений.
+    """
     id: int
     created_at: datetime
     updated_at: datetime
 
     model_config = ConfigDict(from_attributes=True)
-
-    @classmethod
-    def model_validate(cls, obj, **kwargs):
-        """Маскируем пароль и ключи при выводе"""
-        instance = super().model_validate(obj, **kwargs)
-        if instance.resto_password:
-            instance.resto_password = "********"
-        if instance.api_login and len(instance.api_login) > 8:
-            instance.api_login = f"{instance.api_login[:4]}...{instance.api_login[-4:]}"
-        return instance
 
 
 class IikoConnectionTestResponse(BaseModel):
@@ -455,6 +524,8 @@ class IikoWebhookEventResponse(BaseModel):
     event_id: str
     payload: dict
     processed: bool
+    status: str  # "Успешно" или "Ошибка"
+    order_id: Optional[str] = None
     error: Optional[str] = None
     created_at: datetime
 
