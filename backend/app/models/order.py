@@ -11,17 +11,17 @@ from sqlalchemy import Numeric, Column, JSON
 
 class OrderStatus(str, Enum):
     """Статусы заказа"""
-    new = "NEW"  # Новый заказ
-    unconfirmed = "UNCONFIRMED"  # Не подтвержден
-    confirmed = "CONFIRMED"  # Подтвержден
-    preparing = "PREPARING"  # В подготовке
-    cooking = "COOKING"  # Готовится
-    ready = "READY"  # Готов
-    ready_for_pickup = "READY_FOR_PICKUP"  # Готов к выдаче
-    delivering = "DELIVERING"  # Доставляется
-    delivered = "DELIVERED"  # Доставлен
-    closed = "CLOSED"  # Закрыт
-    cancelled = "CANCELLED"  # Отменен
+    new = "new"  # Новый заказ
+    unconfirmed = "unconfirmed"  # Не подтвержден
+    confirmed = "confirmed"  # Подтвержден
+    preparing = "preparing"  # В подготовке
+    cooking = "cooking"  # Готовится
+    ready = "ready"  # Готов
+    ready_for_pickup = "ready_for_pickup"  # Готов к выдаче
+    delivering = "delivering"  # Доставляется
+    delivered = "delivered"  # Доставлен
+    closed = "closed"  # Закрыт
+    cancelled = "cancelled"  # Отменен
 
 
 class Order(SQLModel, table=True):
