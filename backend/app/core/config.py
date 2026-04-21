@@ -30,6 +30,11 @@ class Settings(BaseSettings):
     IIKO_RESTO_URL: Optional[str] = None
     IIKO_RESTO_LOGIN: Optional[str] = None
     IIKO_RESTO_PASSWORD: Optional[str] = None
+    
+    # Настройки POS Loyalty Server
+    IIKO_POS_LOYALTY_NAME: Optional[str] = None
+    IIKO_POS_LOYALTY_LOGIN: Optional[str] = None
+    IIKO_POS_LOYALTY_PASSWORD: Optional[str] = None
 
     # Настройки VK Bot
     VK_BOT_TOKEN: Optional[str] = None
