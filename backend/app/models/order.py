@@ -2,7 +2,7 @@
 Модели заказа и позиций заказа
 """
 from typing import Optional, List, Dict, Any
-from datetime import datetime
+from datetime import datetime, timezone
 from decimal import Decimal
 from enum import Enum
 from sqlmodel import Field, SQLModel, Relationship
@@ -11,14 +11,17 @@ from sqlalchemy import Numeric, Column, JSON
 
 class OrderStatus(str, Enum):
     """Статусы заказа"""
-    NEW = "new"  # Новый заказ
-    CONFIRMED = "confirmed"  # Подтвержден
-    PREPARING = "preparing"  # В подготовке
-    COOKING = "cooking"  # Готовится
-    READY = "ready"  # Готов
-    DELIVERING = "delivering"  # Доставляется
-    DELIVERED = "delivered"  # Доставлен
-    CANCELLED = "cancelled"  # Отменен
+    new = "NEW"  # Новый заказ
+    unconfirmed = "UNCONFIRMED"  # Не подтвержден
+    confirmed = "CONFIRMED"  # Подтвержден
+    preparing = "PREPARING"  # В подготовке
+    cooking = "COOKING"  # Готовится
+    ready = "READY"  # Готов
+    ready_for_pickup = "READY_FOR_PICKUP"  # Готов к выдаче
+    delivering = "DELIVERING"  # Доставляется
+    delivered = "DELIVERED"  # Доставлен
+    closed = "CLOSED"  # Закрыт
+    cancelled = "CANCELLED"  # Отменен
 
 
 class Order(SQLModel, table=True):
@@ -32,7 +35,7 @@ class Order(SQLModel, table=True):
     customer_phone: Optional[str] = Field(default=None, max_length=20, nullable=True)
     delivery_address: Optional[str] = Field(default=None, max_length=500, nullable=True)
     total_amount: Decimal = Field(sa_type=Numeric(10, 2))
-    status: OrderStatus = Field(default=OrderStatus.NEW)
+    status: OrderStatus = Field(default=OrderStatus.new)
     branch_id: int = Field(foreign_key="branches.id", index=True)
     customer_id: Optional[int] = Field(default=None, foreign_key="customers.id", index=True)
     bonus_spent: Decimal = Field(sa_type=Numeric(10, 2), default=Decimal("0.00"), description="Списанные бонусы")
@@ -56,25 +59,63 @@ class Order(SQLModel, table=True):
     actual_time: Optional[datetime] = Field(default=None, description="Фактическое время выдачи/доставки")
     delay_minutes: Optional[int] = Field(default=None, description="Опоздание в минутах")
     is_on_time: bool = Field(default=True, description="Заказ на время / вовремя")
+    is_asap: bool = Field(default=True, description="Заказ на ближайшее время (ASAP)")
     admin_name: Optional[str] = Field(default=None, description="Администратор")
     city: Optional[str] = Field(default=None, description="Город")
-    delivery_zone: Optional[str] = Field(default=None, description="Зона доставки")
+    street: Optional[str] = Field(default=None, description="Улица")
+    house: Optional[str] = Field(default=None, description="Дом")
+    flat: Optional[str] = Field(default=None, description="Квартира")
+    entrance: Optional[str] = Field(default=None, description="Подъезд")
+    floor: Optional[str] = Field(default=None, description="Этаж")
+    doorphone: Optional[str] = Field(default=None, description="Домофон")
+    delivery_zone: Optional[str] = Field(default=None, description="Зона доставки (из iiko)")
+    
+    # Гео-данные (Яндекс)
+    latitude: Optional[float] = Field(default=None, description="Широта (координаты Яндекса)")
+    longitude: Optional[float] = Field(default=None, description="Долгота (координаты Яндекса)")
+    resolved_delivery_zone_id: Optional[int] = Field(default=None, foreign_key="delivery_zones.id", description="ID локально определенной зоны доставки")
+    
     is_paid: bool = Field(default=False, description="Заказ оплачен")
+
+    discounts_details: Optional[Dict[str, Any]] = Field(
+        default=None, sa_column=Column(JSON), 
+        description="Детали скидок (названия и суммы)"
+    )
+    
+    # История событий заказа
+    status_history: Optional[List[Dict[str, Any]]] = Field(
+        default=None, sa_column=Column(JSON), 
+        description="История изменения статусов (лента событий)"
+    )
     
     # Данные антиспам проверки
     spam_score: Optional[int] = Field(default=None, description="Оценка спама (0-100)")
     spam_info: Optional[str] = Field(default=None, description="Информация о спаме")
     
+    base_amount: Decimal = Field(sa_type=Numeric(10, 2), default=Decimal("0.00"), description="Сумма без скидок")
+    left_to_pay: Decimal = Field(sa_type=Numeric(10, 2), default=Decimal("0.00"), description="Осталось доплатить")
+    payments_details: Optional[Dict[str, Any]] = Field(
+        default=None, sa_column=Column(JSON), 
+        description="Детали оплат (наличные, безнал, частичные оплаты)"
+    )
+    
     # JSON-поля для хранения детализированных данных, если они нужны
-    order_items_details: Optional[Dict[str, Any]] = Field(default=None, sa_column=Column(JSON), description="Полный состав заказа из iiko")
-    discounts_details: Optional[Dict[str, Any]] = Field(default=None, sa_column=Column(JSON), description="Детали скидок")
+    order_items_details: Optional[List[Dict[str, Any]]] = Field(default=None, sa_column=Column(JSON), description="Полный состав заказа из iiko")
     customer_info_details: Optional[Dict[str, Any]] = Field(default=None, sa_column=Column(JSON), description="Полные данные заказчика")
     
-    created_at: datetime = Field(default_factory=datetime.utcnow)
-    updated_at: datetime = Field(default_factory=datetime.utcnow)
-
-    # Relationships
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    # Отношения
+    branch: Optional["Branch"] = Relationship()
     items: List["OrderItem"] = Relationship(back_populates="order", sa_relationship_kwargs={"cascade": "all, delete-orphan"})
+    customer: Optional["Customer"] = Relationship()
+    resolved_zone: Optional["DeliveryZone"] = Relationship()
+
+
+    @property
+    def resolved_zone_name(self) -> Optional[str]:
+        return self.resolved_zone.name if self.resolved_zone else None
+
 
     class Config:
         """Настройки модели"""
@@ -105,6 +146,9 @@ class OrderItem(SQLModel, table=True):
     quantity: int = Field(default=1, ge=1)
     price: Decimal = Field(sa_type=Numeric(10, 2))  # Цена на момент заказа
     total: Decimal = Field(sa_type=Numeric(10, 2))  # quantity * price
+    size_name: Optional[str] = Field(default=None, max_length=100)
+    comment: Optional[str] = Field(default=None)
+    modifiers: Optional[List[Dict[str, Any]]] = Field(default=None, sa_column=Column(JSON))
 
     class Config:
         """Настройки модели"""
