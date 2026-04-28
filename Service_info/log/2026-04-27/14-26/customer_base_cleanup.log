@@ -1,0 +1,3 @@
+[2026-04-27 14:28] Задача: Реализация очистки и объединения клиентской базы.
+[2026-04-27 14:28] План одобрен. Начинаю внедрение методов find_customers_missing_iiko_data, merge_customers_by_uid, merge_customers_by_phone в IikoSyncService.
+[2026-04-27 14:30] Задача завершена. Внедрены методы поиска и объединения в IikoSyncService. API эндпоинты добавлены в customers.py. Документация обновлена.

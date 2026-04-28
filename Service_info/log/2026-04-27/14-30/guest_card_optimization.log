@@ -1,0 +1,34 @@
+SESSION LOG: 2026-04-27 14:30
+TASK: Guest Card Optimization & Order Sync
+
+SUMMARY:
+Optimized the "Orders" tab in the Customer Detail Modal to show full iiko order history with 1, 3, and 6-month sync options. Implemented linking between iiko history and local orders, allowing users to view full details from the local database if available.
+
+CHANGES:
+1. Backend (PHP/Laravel):
+   - IikoService.php: Updated syncClientOrdersHistory to support month-based sync, additive merging (no deletion), status extraction, and existence checks.
+   - ClientController.php: Updated API to handle 'months' parameter.
+   - OrderController.php: Added getByIikoId to fetch local order details by iiko UUID.
+   - api.php: Added route for getByIikoId.
+
+2. Frontend (Vue.js):
+   - CustomerDetailModal.vue:
+     - Redesigned Orders tab with 3 sync buttons (1, 3, 6 months).
+     - Added live search/filter by order number, date, or ID.
+     - Implemented status-based border coloring for order items.
+     - Added detailed view modals for both iiko-only and local orders.
+     - Added 'exists_locally' logic to show a link to the local order if found.
+
+3. Documentation:
+   - system_faq.md: Updated with new features and sync logic.
+   - sql_faq.md: Updated orders_history field description.
+
+VERIFICATION:
+- Backend services updated to handle new parameters and logic.
+- Frontend components updated with premium UI and interaction logic.
+- Sync logic ensures no old data is deleted (additive merge).
+- Sorting by iiko order ID implemented in backend and frontend.
+
+NEXT STEPS:
+- Test the sync on the VPS production environment.
+- Verify the display of iiko-only orders in the simplified modal.

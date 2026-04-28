@@ -1,1682 +1,3063 @@
 """
-Сервис-оркестратор для синхронизации данных с iiko
+Синхронизация данных с iiko Cloud
 """
+# -*- coding: utf-8 -*-
+# Encoding: UTF-8 (Strictly required for FoodTech project)
 import logging
+import asyncio
+import json
+import httpx
 from typing import Optional, Dict, Any, List
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
+import zoneinfo
 from decimal import Decimal
-from sqlmodel import Session, select
-from sqlalchemy.orm.attributes import flag_modified
+from sqlmodel import Session, select, delete, update
+from sqlalchemy import func
+from sqlalchemy.orm.attributes import flag_modified as sql_flag_modified
+
 from app.models.category import Category
 from app.models.product import Product, ProductSize, ProductModifierGroup, ProductModifier
 from app.models.sync_log import SyncLog
-from app.models.order import Order, OrderItem, OrderStatus
+# Order, OrderItem, OrderStatus импортируются локально для предотвращения циклических зависимостей
 from app.models.employee import Employee, Shift, Schedule, CourierOrder
-from app.models.company import Branch, Company, DeliveryZone
+from app.models.company import Branch, Company, DeliveryZone, CustomPolygon
 from app.models.customer import Customer
-from app.models.vk_user import VkUser
-from app.models.vk_activity import VkActivity
-from app.models.vk_settings import VkSettings
 from app.models.iiko_settings import IikoSettings
-from app.services.vk_service import send_vk_message
+from app.models.olap_revenue import OlapRevenueRecord
+from app.models.role import Role, Permission
+from app.models.user import User
+from app.core.config import settings
 from app.services.iiko_service import iiko_service
-from app.services.spam_service import spam_service
-from app.models.payment_type import PaymentType
+from app.utils.phone_utils import normalize_phone
+from app.core.logging_utils import log_audit
+from app.services.vk_notification_router import vk_notification_router
 
 logger = logging.getLogger(__name__)
 
-
 class IikoSyncService:
+    def __init__(self):
+        self.iiko = iiko_service
+        self._terminal_groups_cache = {}
+        self._last_rev_sync = {} # {org_id: last_time}
+
+    async def _sync_addresses_from_local_orders(self, session: Session, customer_id: int, phone: str, days: int = 30):
+        """Извлечение адресов из локальной таблицы заказов за последние X дней"""
+        from app.models.order import Order
+        from app.models.customer import GuestAddress, ClientAddressHistory
+        
+        date_limit = datetime.now(timezone.utc) - timedelta(days=days)
+        
+        # Ищем заказы по номеру телефона
+        query = select(Order).where(
+            Order.customer_phone == phone,
+            Order.created_at >= date_limit
+        ).order_by(Order.created_at.desc())
+        
+        orders = session.exec(query).all()
+        added_count = 0
+        
+        for order in orders:
+            addr_str = order.delivery_address
+            if not addr_str or addr_str == "Самовывоз" or len(addr_str) < 5:
+                continue
+                
+            # Проверяем наличие в GuestAddress
+            existing = session.exec(
+                select(GuestAddress).where(
+                    GuestAddress.customer_id == customer_id,
+                    GuestAddress.address == addr_str
+                )
+            ).first()
+            
+            if not existing:
+                new_addr = GuestAddress(
+                    customer_id=customer_id,
+                    address=addr_str,
+                    is_main=False
+                )
+                session.add(new_addr)
+                added_count += 1
+                
+            # Также обновляем историю адресов (Laravel)
+            if order.street or addr_str:
+                city = order.city or "Тюмень"
+                street = order.street
+                house = order.house
+                
+                if street:
+                    existing_history = session.exec(
+                        select(ClientAddressHistory).where(
+                            ClientAddressHistory.client_id == customer_id,
+                            ClientAddressHistory.city == city,
+                            ClientAddressHistory.street == street,
+                            ClientAddressHistory.house == house
+                        )
+                    ).first()
+                    
+                    if not existing_history:
+                        new_history = ClientAddressHistory(
+                            client_id=customer_id,
+                            city=city,
+                            street=street,
+                            house=house,
+                            apartment=order.flat,
+                            address=addr_str,
+                            last_used_at=order.created_at.replace(tzinfo=None),
+                            orders_count=1
+                        )
+                        session.add(new_history)
+        
+        if added_count > 0:
+            logger.info(f"Extracted {added_count} new addresses from local orders for customer {customer_id}")
+
+    async def sync_single_customer(self, session: Session, phone: str, organization_id: Optional[str] = None) -> bool:
+        """
+        Полная синхронизация одного клиента.
+        1. Профиль, баланс, категории (Cloud API)
+        2. Аналитика и история (Server API OLAP)
+        3. Адреса из локальных заказов
+        """
+        from app.utils.phone_utils import normalize_phone
+        from app.models.customer import Customer, GuestPhone, BonusTransaction, BonusTransactionType
+        
+        clean_phone = normalize_phone(phone)
+        if not clean_phone:
+            return False
+
+        customer = session.exec(select(Customer).where(Customer.phone == clean_phone)).first()
+        if not customer:
+            customer = Customer(phone=clean_phone, is_new_guest=True)
+            session.add(customer)
+            session.flush()
+            
+        # 1. Данные из Cloud API
+        iiko_data = await self.iiko.get_customer_info(clean_phone, organization_id=organization_id)
+        
+        if iiko_data.get("id"):
+            customer.iiko_customer_id = iiko_data.get("id")
+            customer.uid = iiko_data.get("id")
+            customer.iiko_id = iiko_data.get("id")
+            
+            if iiko_data.get("name"):
+                customer.name = iiko_data["name"]
+                customer.first_name = iiko_data["name"]
+            if iiko_data.get("surname"):
+                customer.surname = iiko_data["surname"]
+                customer.last_name = iiko_data["surname"]
+            if iiko_data.get("email"):
+                customer.email = iiko_data["email"]
+            
+            # Баланс
+            if "walletBalances" in iiko_data:
+                total_bonuses = sum(float(b.get("balance", 0)) for b in iiko_data["walletBalances"])
+                customer.bonus_points = Decimal(str(total_bonuses))
+                customer.wallet_balances = json.dumps(iiko_data["walletBalances"], ensure_ascii=False)
+            
+            # Категории
+            if "categories" in iiko_data:
+                category_names = [c["name"] for c in iiko_data["categories"] if isinstance(c, dict) and c.get("name")]
+                customer.loyalty_categories = json.dumps(category_names, ensure_ascii=False)
+                customer.iiko_categories = category_names
+            
+            # Комментарий iiko (но не история заказов!)
+            customer.iiko_comment = iiko_data.get("comment")
+            
+        # 2. Аналитика из OLAP
+        try:
+            analytics = await self.iiko.get_customer_analytics_olap(clean_phone, session, organization_id=organization_id)
+            if analytics and not analytics.get("error"):
+                customer.total_orders_count = analytics.get("orders_count", analytics.get("total_count", 0))
+                customer.total_orders_amount = Decimal(str(analytics.get("total_revenue", analytics.get("total_sum", 0))))
+                customer.total_purchases_sum = customer.total_orders_amount
+                
+                if analytics.get("last_order_date"):
+                    try:
+                        customer.last_order_date = datetime.fromisoformat(analytics["last_order_date"].replace(" ", "T")).replace(tzinfo=None)
+                    except:
+                        pass
+        except Exception as e:
+            logger.warning(f"OLAP sync failed for {clean_phone}: {e}")
+
+        # 3. Адреса из локальных заказов
+        await self._sync_addresses_from_local_orders(session, customer.id, clean_phone)
+
+        customer.updated_at = datetime.now()
+        session.add(customer)
+        session.commit()
+        return True
+
+    @staticmethod
+    def clean_str(val):
+        if val is None:
+            return ""
+        
+        # Если это не строка, преобразуем в строку
+        s = str(val).strip()
+        
+        # Проверка на служебные значения, которые iiko может присылать как строки
+        if s.lower() in ("none", "null", "", "-", "--", ".", "undefined", "nan"):
+            return ""
+            
+        # Защита от mojibake: если строка случайно декодирована как ISO-8859-1 вместо UTF-8
+        # (Обычно это выглядит как РђРђРђРђРђ...)
+        try:
+            # Если в строке много символов из расширенной латиницы, но нет кириллицы
+            # это может быть неверно декодированный UTF-8
+            if any(ord(c) > 127 and ord(c) < 255 for c in s) and not any(1040 <= ord(c) <= 1103 for c in s):
+                test_s = s.encode('latin-1').decode('utf-8')
+                if any(1040 <= ord(c) <= 1103 for c in test_s):
+                    return test_s
+        except Exception:
+            pass
+            
+        return s
+
+    def format_address(self, address_data: Any, city: Optional[str] = None, fmt: str = "components") -> str:
+        """
+        Форматирует адрес iiko. 
+        Приоритет: line1 (если fmt='line1'), иначе сборка по компонентам.
+        """
+        if not address_data:
+            return ""
+
+        if not isinstance(address_data, dict):
+            return str(address_data)
+
+        # 1. Извлекаем компоненты с очисткой
+        line1 = self.clean_str(address_data.get('line1'))
+        city_val = self.clean_str(address_data.get('city') or city)
+        street_val = address_data.get('street')
+        street = street_val.get('name') if isinstance(street_val, dict) else self.clean_str(street_val)
+        
+        house = self.clean_str(address_data.get('house'))
+        flat = self.clean_str(address_data.get('flat'))
+        entrance = self.clean_str(address_data.get('entrance'))
+        floor = self.clean_str(address_data.get('floor'))
+        door_phone = self.clean_str(address_data.get('doorphone'))
+        building = self.clean_str(address_data.get('building'))
+
+        # 2. Логика для fmt="line1" (как в настройках iiko)
+        if fmt == "line1" and line1:
+            addr = self.clean_str(line1)
+            # Интеллектуальное добавление отсутствующих элементов
+            extras = []
+            if flat and str(flat) not in addr:
+                extras.append(f"кв. {flat}")
+            if entrance and str(entrance) not in addr:
+                extras.append(f"под. {entrance}")
+            if floor and str(floor) not in addr:
+                extras.append(f"эт. {floor}")
+            if door_phone and str(door_phone) not in addr:
+                extras.append(f"код {door_phone}")
+                
+            if extras:
+                addr = f"{addr}, {', '.join(extras)}"
+            return addr
+
+        # 3. Классическая сборка (город, улица, дом, квартира...)
+        if not street and not house and line1:
+            return line1
+
+        parts = []
+        if city_val: parts.append(self.clean_str(city_val))
+        if street:
+            s = self.clean_str(street)
+            if not any(p in s.lower() for p in ["улица", "ул.", "пр.", "пер.", "бул."]):
+                s = f"ул. {s}"
+            parts.append(s)
+            
+        if house: parts.append(f"д. {house}")
+        if building: parts.append(f"корп. {building}")
+        if flat: parts.append(f"кв. {flat}")
+        if entrance: parts.append(f"под. {entrance}")
+        if floor: parts.append(f"эт. {floor}")
+
+        return ", ".join(parts) if parts else "Адрес не указан"
+
+    def _get_tz(self, session: Session):
+        """Получение часового пояса из настроек"""
+        from app.core.datetime_utils import get_tz
+        return get_tz(session)
 
     async def sync_menu(self, session: Session) -> Dict[str, Any]:
-        """Умная синхронизация меню. Использует External Menu API v2 если задан ID меню"""
-        log = SyncLog(sync_type="menu", status="running")
+        """
+        Синхронизация меню (категории и товары) из iiko.
+        Автоматически выбирает API (v2 Cloud или v1 Classic) в зависимости от настроек.
+        Оптимизировано: тяжелые операции с БД вынесены в отдельный поток.
+        """
+        log = SyncLog(
+            sync_type="menu",
+            status="running",
+            details="Запуск синхронизации меню",
+            created_at=datetime.now(timezone.utc).replace(tzinfo=None)
+        )
         session.add(log)
         session.commit()
-        settings_db = session.exec(select(IikoSettings)).first()
-        api_login = settings_db.api_login if settings_db else None
-        org_id = settings_db.organization_id if settings_db else None
-        ext_menu_id = settings_db.external_menu_id if settings_db else None
-        price_cat_id = settings_db.price_category_id if settings_db else None
+        
         try:
-            if ext_menu_id:
-                logger.info(f"Syncing via External Menu API (ID: {ext_menu_id}, Price Category: {price_cat_id})")
-                menu_data = await iiko_service.get_external_menu_by_id(
-                    ext_menu_id, 
-                    price_category_id=price_cat_id,
+            from app.services.iiko_service import iiko_service
+            settings = session.exec(select(IikoSettings)).first()
+            api_login = settings.api_login if settings else None
+            org_id = settings.organization_id if settings else None
+            
+            # 1. Получаем данные из API (асинхронно)
+            if settings and settings.use_v2_menu:
+                logger.info("Syncing from Cloud Menu (API v2)")
+                menu_data = await iiko_service.get_menu_v2(
                     api_login=api_login, 
                     organization_id=org_id
                 )
-                
-                # Fetch nomenclature as price fallback
-                logger.info("Fetching nomenclature as price fallback for v2 sync")
-                nomenclature = await iiko_service.get_nomenclature(api_login=api_login, organization_id=org_id)
-                
-                res = await self._sync_from_external_menu(session, menu_data, log, nomenclature=nomenclature)
+                # 2. Обрабатываем в БД (выносим в поток)
+                res = await asyncio.to_thread(self._sync_from_external_menu_sync, session, menu_data, log.id)
             else:
-                logger.info("Syncing via Legacy Nomenclature API")
+                logger.info("Syncing from Nomenclature (Classic API)")
                 nomenclature = await iiko_service.get_nomenclature(api_login=api_login, organization_id=org_id)
-                res = await self._sync_from_nomenclature(session, nomenclature, log)
-            session.commit()
-            log.status = "success"
-            log.categories_count = res.get("categories_synced", 0)
-            log.products_count = res.get("products_synced", 0)
-            log.details = f"Synced {log.categories_count} categories, {log.products_count} products"
-            session.commit()
-            return res
-        except Exception as e:
-            logger.error(f"Menu sync failed: {e}")
-            log.status = "error"
-            log.details = str(e)
-            session.commit()
-            raise
-
-    async def _sync_from_external_menu(self, session: Session, menu_data: Dict[str, Any], log: SyncLog, nomenclature: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-        categories_synced = 0
-        products_synced = 0
-        
-        # Build nomenclature price map for fallback
-        nom_prices = {}
-        if nomenclature and "products" in nomenclature:
-            for p in nomenclature["products"]:
-                p_id = p.get("id")
-                major_price = 0
-                sz_prices = {}
-                if p.get("sizePrices"):
-                    major_price = p["sizePrices"][0].get("price", {}).get("currentPrice", 0)
-                    for sp in p["sizePrices"]:
-                        sz_prices[sp.get("sizeId") or "default"] = sp.get("price", {}).get("currentPrice", 0)
-                nom_prices[p_id] = {"base": major_price, "sizes": sz_prices}
-
-        item_categories = menu_data.get("itemCategories", [])
-        for iiko_cat in item_categories:
-            cat_iiko_id = iiko_cat.get("id")
-            if not cat_iiko_id: continue
-            category = session.exec(select(Category).where(Category.iiko_id == cat_iiko_id)).first()
-            if not category:
-                category = Category(name=iiko_cat.get("name", "Без названия"), iiko_id=cat_iiko_id, is_active=True)
-                session.add(category)
-            else:
-                category.name = iiko_cat.get("name", category.name)
-                category.is_active = True
-                category.updated_at = datetime.utcnow()
-            session.flush()
-            categories_synced += 1
-            for iiko_item in iiko_cat.get("items", []):
-                item_iiko_id = iiko_item.get("itemId")
-                if not item_iiko_id: continue
-
-                size_prices = iiko_item.get("sizePrices", [])
-                base_price = 0
-                if size_prices:
-                    default_size = next((sp for sp in size_prices if sp.get("isDefault")), size_prices[0])
-                    base_price = default_size.get("price", {}).get("currentPrice", 0)
-
-                # Hybrid price fallback: if v2 price is 0, use v1 price
-                if base_price == 0 and item_iiko_id in nom_prices:
-                    base_price = nom_prices[item_iiko_id]["base"]
-                    logger.debug(f"Hybrid: using v1 base price {base_price} for {iiko_item.get('name')}")
-
-                # КБЖУ — из nutritionPerHundredGrams (поддержка разных ключей iiko)
-                nutrition = iiko_item.get("nutritionPerHundredGrams", {})
-                kbju = {
-                    "calories": nutrition.get("caloricity") or nutrition.get("calories") or nutrition.get("energyFullAmount"),
-                    "proteins": nutrition.get("proteins") or nutrition.get("proteinsAmount"),
-                    "fats": nutrition.get("fats") or nutrition.get("fatAmount"),
-                    "carbohydrates": nutrition.get("carbohydrates") or nutrition.get("carbohydrateAmount")
-                }
-
-                product = session.exec(select(Product).where(Product.iiko_id == item_iiko_id)).first()
-                if not product:
-                    product = Product(
-                        name=iiko_item.get("name", "Без названия"),
-                        description=iiko_item.get("description"),
-                        price=base_price,
-                        category_id=category.id,
-                        iiko_id=item_iiko_id,
-                        article=iiko_item.get("sku") or iiko_item.get("code"),
-                        is_available=True,
-                        is_stopped=False
-                    )
-                    session.add(product)
-                else:
-                    product.name = iiko_item.get("name", product.name)
-                    product.description = iiko_item.get("description")
-                    product.price = base_price
-                    product.category_id = category.id
-                    product.article = iiko_item.get("sku") or iiko_item.get("code")
-                    product.is_available = True
-                    product.updated_at = datetime.utcnow()
-
-                # Заполняем новые поля
-                product.iiko_image_id = iiko_item.get("imageId")
-                product.weight_grams = iiko_item.get("weight")
-                product.volume_ml = iiko_item.get("volume")
-                
-                # КБЖУ - явное присвоение
-                product.calories = kbju.get("calories")
-                product.proteins = kbju.get("proteins")
-                product.fats = kbju.get("fats")
-                product.carbohydrates = kbju.get("carbohydrates")
-
-                img = iiko_item.get("buttonImageCroppedUrl") or (iiko_item.get("imageLinks", [None])[0] if iiko_item.get("imageLinks") else None)
-                if not img and product.iiko_image_id:
-                    img = f"https://api-ru.iiko.services/api/1/menu/download-image?imageId={product.iiko_image_id}"
-                if img:
-                    product.image_url = img
-                session.flush()
-                # Sizes
-                for sz in session.exec(select(ProductSize).where(ProductSize.product_id == product.id)).all(): session.delete(sz)
-                for sp in size_prices:
-                    sp_price = sp.get("price", {}).get("currentPrice", 0)
-                    sz_id = sp.get("sizeId") or "default"
-                    
-                    if sp_price == 0 and item_iiko_id in nom_prices:
-                        # try to find exact size price, else use its base
-                        sp_price = nom_prices[item_iiko_id]["sizes"].get(sz_id, nom_prices[item_iiko_id]["base"])
-                        logger.debug(f"Hybrid: using v1 size price {sp_price} for {iiko_item.get('name')} size {sz_id}")
-                    
-                    session.add(ProductSize(product_id=product.id, iiko_id=sz_id,
-                                          name=sp.get("name") or "Стандарт", price=sp_price,
-                                          is_default=sp.get("isDefault", False)))
-                # Modifiers
-                for mg_old in session.exec(select(ProductModifierGroup).where(ProductModifierGroup.product_id == product.id)).all(): session.delete(mg_old)
-                for mg_data in iiko_item.get("modifierGroups", []):
-                    mg = ProductModifierGroup(product_id=product.id, iiko_id=mg_data.get("modifierGroupId", ""),
-                                            name=mg_data.get("name", "Группа модификаторов"),
-                                            min_amount=mg_data.get("minQuantity", 0), max_amount=mg_data.get("maxQuantity", 1),
-                                            is_required=mg_data.get("required", False))
-                    session.add(mg)
-                    session.flush()
-                    for m_data in mg_data.get("modifiers", []):
-                        session.add(ProductModifier(group_id=mg.id, iiko_id=m_data.get("modifierId", ""),
-                                                  name=m_data.get("name", "Модификатор"), price=m_data.get("price", 0),
-                                                  default_amount=m_data.get("defaultAmount", 0),
-                                                  min_amount=m_data.get("minAmount", 0), max_amount=m_data.get("maxAmount", 1)))
-                products_synced += 1
-        return {"success": True, "categories_synced": categories_synced, "products_synced": products_synced}
-
-    """Оркестратор синхронизации данных между iiko и локальной БД"""
-
-    async def _sync_from_nomenclature(self, session: Session, nomenclature: Dict[str, Any], log: SyncLog) -> Dict[str, Any]:
-        """
-        Полная синхронизация меню из iiko
-
-        Загружает номенклатуру (категории + товары) и обновляет локальную БД.
-        Сопоставление по iiko_id.
-        """
-        log = SyncLog(sync_type="menu", status="running")
-        session.add(log)
-        session.commit()
-
-        # Получаем настройки iiko из БД
-        settings_db = session.exec(select(IikoSettings)).first()
-        api_login = settings_db.api_login if settings_db else None
-        organization_id = settings_db.organization_id if settings_db else None
-
-        try:
-            nomenclature = await iiko_service.get_nomenclature(
-                api_login=api_login,
-                organization_id=organization_id
-            )
-
-            categories_synced = 0
-            products_synced = 0
-
-            # Синхронизация категорий (groups)
-            if "groups" in nomenclature:
-                for iiko_group in nomenclature["groups"]:
-                    query = select(Category).where(
-                        Category.iiko_id == iiko_group["id"]
-                    )
-                    category = session.exec(query).first()
-
-                    if category:
-                        category.name = iiko_group["name"]
-                        category.updated_at = datetime.utcnow()
-                    else:
-                        category = Category(
-                            name=iiko_group["name"],
-                            iiko_id=iiko_group["id"],
-                            is_active=not iiko_group.get("isDeleted", False)
-                        )
-                        session.add(category)
-
-                    categories_synced += 1
-
-            session.commit()
-
-            # Parsing sizes from root to map size_id to size_name
-            size_map = {}
-            if "sizes" in nomenclature:
-                for size in nomenclature["sizes"]:
-                    size_map[size["id"]] = size
-
-            # Синхронизация товаров (products)
-            if "products" in nomenclature:
-                for iiko_product in nomenclature["products"]:
-                    query = select(Product).where(
-                        Product.iiko_id == iiko_product["id"]
-                    )
-                    product = session.exec(query).first()
-
-                    # Поиск категории
-                    category_id = None
-                    if iiko_product.get("parentGroup"):
-                        cat_query = select(Category).where(
-                            Category.iiko_id == iiko_product["parentGroup"]
-                        )
-                        cat = session.exec(cat_query).first()
-                        if cat:
-                            category_id = cat.id
-
-                    # Извлечение цены
-                    price = 0
-                    if iiko_product.get("sizePrices"):
-                        price = (
-                            iiko_product["sizePrices"][0]
-                            .get("price", {})
-                            .get("currentPrice", 0)
-                        )
-
-                    # Извлечение артикула
-                    article = iiko_product.get("code", "")
-
-                    # Извлечение КБЖУ (iiko v1)
-                    kbju = {
-                        "calories": iiko_product.get("energyFullAmount"),
-                        "proteins": iiko_product.get("proteinsAmount"),
-                        "fats": iiko_product.get("fatAmount"),
-                        "carbohydrates": iiko_product.get("carbohydrateAmount")
-                    }
-
-                    if product:
-                        product.name = iiko_product["name"]
-                        product.description = iiko_product.get("description")
-                        product.price = price
-                        product.category_id = category_id
-                        product.article = article
-                        product.is_available = not iiko_product.get(
-                            "isDeleted", False
-                        )
-                        product.updated_at = datetime.utcnow()
-                    else:
-                        product = Product(
-                            name=iiko_product["name"],
-                            description=iiko_product.get("description"),
-                            price=price,
-                            category_id=category_id,
-                            iiko_id=iiko_product["id"],
-                            article=article,
-                            is_available=not iiko_product.get(
-                                "isDeleted", False
-                            ),
-                            is_stopped=False
-                        )
-                        session.add(product)
-                        
-                    session.flush() # ensure product.id is available
-
-                    # Sync Sizes
-                    # Remove existing sizes
-                    for existing_size in product.sizes:
-                        session.delete(existing_size)
-                    product.sizes = []
-                    
-                    if iiko_product.get("sizePrices"):
-                        for sp in iiko_product["sizePrices"]:
-                            size_id = sp.get("sizeId")
-                            size_price = sp.get("price", {}).get("currentPrice", 0)
-                            size_info = size_map.get(size_id, {})
-                            size_name = size_info.get("name", "Стандарт")
-                            is_default = size_info.get("isDefault", False)
-                            
-                            new_size = ProductSize(
-                                product_id=product.id,
-                                iiko_id=size_id or "default",
-                                name=size_name,
-                                price=size_price,
-                                is_default=is_default
-                            )
-                            session.add(new_size)
-
-                    # Sync Modifier Groups
-                    for existing_mg in product.modifier_groups:
-                        session.delete(existing_mg)
-                    product.modifier_groups = []
-
-                    if iiko_product.get("groupModifiers"):
-                        for gm in iiko_product["groupModifiers"]:
-                            # Поиск имени группы и самого модификатора
-                            group_product = next((p for p in nomenclature["products"] if p["id"] == gm.get("modifierId")), None)
-                            group_name = group_product.get("name") if group_product else "Группа модификаторов"
-                            
-                            mg = ProductModifierGroup(
-                                product_id=product.id,
-                                iiko_id=gm.get("modifierId", ""),
-                                name=group_name,
-                                min_amount=gm.get("minAmount", 0),
-                                max_amount=gm.get("maxAmount", 1),
-                                is_required=gm.get("required", False)
-                            )
-                                
-                            session.add(mg)
-                            session.flush() # get mg.id
-                            
-                            for child in gm.get("childModifiers", []):
-                                child_product = next((p for p in nomenclature["products"] if p["id"] == child.get("modifierId")), None)
-                                child_name = child_product.get("name", "Модификатор") if child_product else "Модификатор"
-                                child_price = 0
-                                if child_product and child_product.get("sizePrices"):
-                                    child_price = child_product["sizePrices"][0].get("price", {}).get("currentPrice", 0)
-                                    
-                                mod = ProductModifier(
-                                    group_id=mg.id,
-                                    iiko_id=child.get("modifierId", ""),
-                                    name=child_name,
-                                    price=child_price,
-                                    default_amount=child.get("defaultAmount", 0),
-                                    min_amount=child.get("minAmount", 0),
-                                    max_amount=child.get("maxAmount", 1)
-                                )
-                                session.add(mod)
-
-                    products_synced += 1
-
-            session.commit()
-
-            # Обновляем лог
-            log.status = "success"
-            log.categories_count = categories_synced
-            log.products_count = products_synced
-            log.details = f"Synced {categories_synced} categories, {products_synced} products"
-            session.commit()
-
-            return {
+                # 2. Обрабатываем в БД (выносим в поток)
+                res = await asyncio.to_thread(self._sync_from_nomenclature_sync, session, nomenclature, log.id)
+            
+            # Обновляем лог после завершения
+            session.refresh(log)
+            
+            response = {
                 "success": True,
-                "categories_synced": categories_synced,
-                "products_synced": products_synced,
-                "message": log.details
+                "categories_synced": res.get("categories", 0),
+                "products_synced": res.get("products", 0),
+                "message": f"Синхронизация завершена успешно: {res.get('categories', 0)} категорий, {res.get('products', 0)} товаров"
             }
+            
+            log.status = "success"
+            log.details = response["message"]
+            session.add(log)
+            session.commit()
+            
+            log_audit(action="manual_sync", resource_type="menu", message=response["message"])
+            return response
 
         except Exception as e:
-            logger.error(f"Menu sync failed: {e}")
+            logger.error(f"Menu sync failed: {e}", exc_info=True)
             log.status = "error"
             log.details = str(e)
+            session.add(log)
             session.commit()
-            raise
-
-    async def sync_prices(self, session: Session) -> Dict[str, Any]:
-        """
-        Синхронизация только цен из iiko (с поддержкой v1, v2 и fallback)
-        """
-        log = SyncLog(sync_type="prices", status="running")
-        session.add(log)
-        session.commit()
-
-        # Получаем настройки iiko из БД
-        settings_db = session.exec(select(IikoSettings)).first()
-        api_login = settings_db.api_login if settings_db else None
-        org_id = settings_db.organization_id if settings_db else None
-        ext_menu_id = settings_db.external_menu_id if settings_db else None
-        price_cat_id = settings_db.price_category_id if settings_db else None
-
-        try:
-            updated = 0
-            sync_source = "none"
             
-            # Пробуем API v2 если задано меню
-            if ext_menu_id:
-                logger.info(f"Syncing prices via External Menu API v2 (ID: {ext_menu_id}, PriceCat: {price_cat_id})")
-                try:
-                    menu_data = await iiko_service.get_external_menu_by_id(
-                        ext_menu_id, 
-                        price_category_id=price_cat_id,
-                        api_login=api_login, 
-                        organization_id=org_id
-                    )
-                    
-                    # Fetch nomenclature as hybrid fallback
-                    logger.info("Fetching nomenclature as hybrid price fallback for v2 price sync")
-                    nomenclature = await iiko_service.get_nomenclature(api_login=api_login, organization_id=org_id)
-                    
-                    updated = await self._sync_prices_from_v2(session, menu_data, nomenclature=nomenclature)
-                    sync_source = "v2"
-                except Exception as e:
-                    logger.warning(f"Failed to sync via API v2, falling back to v1: {e}")
-                    sync_source = "v2_failed_fallback"
-
-            # Если v2 не использовался или не обновил ничего, или мы в режиме fallback
-            if sync_source in ["none", "v2_failed_fallback"] or (sync_source == "v2" and updated == 0):
-                logger.info("Syncing prices via Legacy Nomenclature API (v1)")
-                nomenclature = await iiko_service.get_nomenclature(api_login=api_login, organization_id=org_id)
-                updated = await self._sync_prices_from_v1(session, nomenclature or {})
-                sync_source = "v1" if sync_source == "none" else f"{sync_source}_v1"
-
-            session.commit()
-            log.status = "success"
-            log.products_count = updated
-            log.details = f"Updated prices for {updated} products using {sync_source}"
-            session.commit()
-
+            # Добавляем запись в аудит об ошибке
+            log_audit(action="manual_sync_failed", resource_type="menu", message=str(e))
+            
             return {
-                "success": True,
-                "products_updated": updated,
-                "source": sync_source,
-                "message": log.details
+                "success": False,
+                "error": str(e),
+                "message": f"Ошибка синхронизации: {str(e)}"
             }
-
-        except Exception as e:
-            logger.error(f"Price sync failed: {e}")
-            log.status = "error"
-            log.details = str(e)
-            session.commit()
-            raise
-
-    async def _sync_prices_from_v1(self, session: Session, nomenclature: Dict[str, Any]) -> int:
-        """Вспомогательный метод синхронизации цен из номенклатуры (v1)"""
-        updated = 0
-        if "products" in nomenclature:
-            for iiko_product in nomenclature["products"]:
-                product = session.exec(select(Product).where(Product.iiko_id == iiko_product["id"])).first()
-                if product:
-                    price = 0
-                    if iiko_product.get("sizePrices"):
-                        price = iiko_product["sizePrices"][0].get("price", {}).get("currentPrice", 0)
-                    
-                    if product.price != price:
-                        product.price = price
-                        product.updated_at = datetime.utcnow()
-                        updated += 1
-                    
-                    # Также обновляем цены размеров
-                    for iiko_sp in iiko_product.get("sizePrices", []):
-                        size_iiko_id = iiko_sp.get("sizeId") or "default"
-                        size_price = iiko_sp.get("price", {}).get("currentPrice", 0)
-                        
-                        size_db = session.exec(select(ProductSize).where(
-                            ProductSize.product_id == product.id,
-                            ProductSize.iiko_id == size_iiko_id
-                        )).first()
-                        
-                        if size_db and size_db.price != size_price:
-                            size_db.price = size_price
-                            size_db.updated_at = datetime.utcnow()
-        return updated
-
-    async def _sync_prices_from_v2(self, session: Session, menu_data: Dict[str, Any], nomenclature: Optional[Dict[str, Any]] = None) -> int:
-        """Вспомогательный метод синхронизации цен из внешнего меню (v2) с гибридным фоллбеком на v1"""
-        updated = 0
-        
-        # Build nomenclature price map for fallback
-        nom_prices = {}
-        if nomenclature and "products" in nomenclature:
-            for p in nomenclature["products"]:
-                p_id = p.get("id")
-                major_price = 0
-                sz_prices = {}
-                if p.get("sizePrices"):
-                    major_price = p["sizePrices"][0].get("price", {}).get("currentPrice", 0)
-                    for sp in p["sizePrices"]:
-                        sz_prices[sp.get("sizeId") or "default"] = sp.get("price", {}).get("currentPrice", 0)
-                nom_prices[p_id] = {"base": major_price, "sizes": sz_prices}
-
-        for iiko_cat in menu_data.get("itemCategories", []):
-            for iiko_item in iiko_cat.get("items", []):
-                item_iiko_id = iiko_item.get("itemId")
-                if not item_iiko_id: continue
-                
-                product = session.exec(select(Product).where(Product.iiko_id == item_iiko_id)).first()
-                if product:
-                    size_prices = iiko_item.get("sizePrices", [])
-                    if size_prices:
-                        # Основная цена товара — из дефолтного размера
-                        default_size = next((sp for sp in size_prices if sp.get("isDefault")), size_prices[0])
-                        new_base_price = default_size.get("price", {}).get("currentPrice", 0)
-                        
-                        # Hybrid fallback
-                        if new_base_price == 0 and item_iiko_id in nom_prices:
-                            new_base_price = nom_prices[item_iiko_id]["base"]
-                            logger.debug(f"Hybrid Price Sync: using v1 base price {new_base_price} for {product.name}")
-
-                        if product.price != new_base_price:
-                            product.price = new_base_price
-                            product.updated_at = datetime.utcnow()
-                            updated += 1
-                        
-                        # Детальное обновление каждого размера
-                        for sp in size_prices:
-                            sz_iiko_id = sp.get("sizeId") or "default"
-                            sz_price = sp.get("price", {}).get("currentPrice", 0)
-                            
-                            # Hybrid fallback
-                            if sz_price == 0 and item_iiko_id in nom_prices:
-                                sz_price = nom_prices[item_iiko_id]["sizes"].get(sz_iiko_id, nom_prices[item_iiko_id]["base"])
-                                logger.debug(f"Hybrid Price Sync: using v1 size price {sz_price} for {product.name} size {sz_iiko_id}")
-
-                            size_db = session.exec(select(ProductSize).where(
-                                ProductSize.product_id == product.id,
-                                ProductSize.iiko_id == sz_iiko_id
-                            )).first()
-                            
-                            if size_db and size_db.price != sz_price:
-                                size_db.price = sz_price
-                                size_db.updated_at = datetime.utcnow()
-        return updated
-
-
-    async def sync_stop_lists(self, session: Session) -> Dict[str, Any]:
-        """
-        Синхронизация стоп-листов
-
-        Помечает позиции как недоступные (is_available=False)
-        """
-        log = SyncLog(sync_type="stop_lists", status="running")
-        session.add(log)
-        session.commit()
-
-        # РџРѕР»СѓС‡Р°РµРј РЅР°СЃС‚СЂРѕР№РєРё iiko РёР· Р‘Р”
-        settings_db = session.exec(select(IikoSettings)).first()
-        api_login = settings_db.api_login if settings_db else None
-        organization_id = settings_db.organization_id if settings_db else None
-
-        try:
-            stop_items = await iiko_service.get_stop_lists(
-                api_login=api_login,
-                organization_id=organization_id
-            )
-            stopped_product_ids = {
-                item["productId"] for item in stop_items
-                if item.get("balance", 0) <= 0
-            }
-
-            now = datetime.utcnow()
-            all_products = session.exec(select(Product)).all()
-            updated = 0
-            for product in all_products:
-                if product.iiko_id in stopped_product_ids:
-                    # Товар в стоп-листе
-                    product.is_available = False
-                    if not product.is_stopped:
-                        product.is_stopped = True
-                        product.stopped_at = now
-                        updated += 1
-                else:
-                    # Товара нет в стоп-листе
-                    if product.is_stopped:
-                        product.is_stopped = False
-                        # Мы НЕ меняем is_available на True автоматически, 
-                        # так как товар мог быть скрыт вручную, 
-                        # но в контексте iiko синхронизации обычно возвращаем доступность 
-                        # если только он не был скрыт по другим причинам.
-                        # Однако ТЗ говорит: "У всех товаров, которых нет в ответе iiko, выставь is_stopped = False"
-                        product.is_available = True
-                        updated += 1
-                session.add(product)
-
-            session.commit()
-
-            log.status = "success"
-            log.products_count = updated
-            log.details = f"Updated availability for {updated} products, {len(stopped_product_ids)} on stop-list"
-            session.commit()
-
-            return {
-                "success": True,
-                "products_updated": updated,
-                "stopped_count": len(stopped_product_ids),
-                "message": log.details
-            }
-        except Exception as e:
-            logger.error(f"Stop-list sync failed: {e}")
-
-    async def process_iiko_order(self, session: Session, iiko_order_data: Dict[str, Any], organization_id: str, iiko_card_data: Optional[Dict[str, Any]] = None):
-        order_id_iiko = iiko_order_data.get("id")
-        if not order_id_iiko: return
-        if not hasattr(self, "_terminal_groups_cache"): self._terminal_groups_cache = {}
-        settings_db = session.exec(select(IikoSettings)).first()
-        api_login = settings_db.api_login if settings_db else None
-        if not self._terminal_groups_cache:
-            try:
-                tgs = await iiko_service.get_terminal_groups(api_login=api_login, organization_id=organization_id)
-                for tg_entry in tgs:
-                    for tg in tg_entry.get("items", []): self._terminal_groups_cache[tg["id"]] = tg["name"]
-            except: pass
-        order = session.exec(select(Order).where(Order.iiko_order_id == order_id_iiko)).first()
-        o_data = iiko_order_data.get("order", iiko_order_data)
-        raw_status = str(iiko_order_data.get("creationStatus") or o_data.get("status", "")).strip()
-        
-        # Маппинг статусов (регистронезависимый поиск ниже)
-        status_map = {
-            "new": OrderStatus.NEW, 
-            "unconfirmed": OrderStatus.NEW, 
-            "waitcooking": OrderStatus.CONFIRMED,
-            "readyforcooking": OrderStatus.CONFIRMED, 
-            "cookingstarted": OrderStatus.COOKING,
-            "cookingcompleted": OrderStatus.READY, 
-            "waiting": OrderStatus.READY, 
-            "onway": OrderStatus.DELIVERING,
-            "delivered": OrderStatus.DELIVERED, 
-            "cancelled": OrderStatus.CANCELLED, 
-            "error": OrderStatus.CANCELLED
-        }
-        
-        mapped_status = status_map.get(raw_status.lower(), OrderStatus.CONFIRMED)
-        print(f"DEBUG: [process_iiko_order] iiko_id={o_data.get('id')} raw_status='{raw_status}' -> mapped='{mapped_status}'")
-        cancel_info = o_data.get("cancellationInfo")
-        c_reason = cancel_info.get("message") if cancel_info else None
-        sum_total = Decimal(str(o_data.get("sum", 0)))
-        total_with_discount = Decimal(str(o_data.get("totalSum", sum_total)))
-        phone = o_data.get("phone") or (o_data.get("customer") or {}).get("phone", "")
-        customer = session.exec(select(Customer).where(Customer.phone == phone)).first() if phone else None
-        source = o_data.get("sourceKey") or o_data.get("source")
-        comment = o_data.get("comment")
-        if not order:
-            order = Order(iiko_order_id=order_id_iiko, status=mapped_status, total_amount=sum_total,
-                         total_with_discount=total_with_discount, cancellation_reason=c_reason, 
-                         customer_id=customer.id if customer else None, order_items_details=o_data.get("items", []),
-                        comment=comment, source=source, branch_id=1)
-            session.add(order)
-        else:
-            order.status = mapped_status
-            order.total_amount = sum_total
-            order.total_with_discount = total_with_discount
-            order.cancellation_reason = c_reason or order.cancellation_reason
-            order.comment = comment or order.comment
-            order.order_items_details = o_data.get("items", [])
-            from sqlalchemy.orm.attributes import flag_modified
-            flag_modified(order, "order_items_details")
-            session.add(order)
-        session.flush()
-        items_data = o_data.get("items", [])
-        if isinstance(items_data, list):
-            for ei in session.exec(select(OrderItem).where(OrderItem.order_id == order.id)).all(): session.delete(ei)
-            for item in items_data:
-                # 1. Fallback для товара
-                item_name = item.get("name")
-                if not item_name:
-                    db_p = session.exec(select(Product).where(Product.iiko_id == item.get("productId"))).first()
-                    item_name = db_p.name if db_p else "Товар не из каталога"
-
-                # 2. Улучшенное извлечение размера с fallback
-                size_data = item.get("size")
-                size_name = size_data.get("name") if isinstance(size_data, dict) else size_data
-                if not size_name:
-                    sz_id = size_data.get("id") if isinstance(size_data, dict) else None
-                    if sz_id:
-                        db_sz = session.exec(select(ProductSize).where(ProductSize.iiko_id == sz_id)).first()
-                        size_name = db_sz.name if db_sz else None
-                
-                # 3. Более надежный сбор модификаторов с ID и fallback имени
-                mods = []
-                for m in item.get("modifiers", []):
-                    m_name = m.get("name")
-                    m_id = m.get("productId") or m.get("id")
-                    if not m_name and m_id:
-                        db_m = session.exec(select(ProductModifier).where(ProductModifier.iiko_id == m_id)).first()
-                        m_name = db_m.name if db_m else "Неизвестная опция"
-                    
-                    mods.append({
-                        "iiko_id": m_id,
-                        "name": m_name,
-                        "amount": m.get("amount", 1),
-                        "sum": m.get("sum", 0)
-                    })
-
-                session.add(OrderItem(
-                    order_id=order.id,
-                    product_name=item_name,
-                    quantity=int(item.get("amount", 1)),
-                    price=Decimal(str(item.get("price", 0))),
-                    total=Decimal(str(item.get("sum", 0))),
-                    size_name=size_name,
-                    comment=item.get("comment"),
-                    modifiers=mods
-                ))
-        session.commit()
-
-
-    async def sync_order_by_id(self, session: Session, order_id: str, organization_id: str) -> bool:
-        """
-        Синхронизация конкретного заказа из iiko по его ID
-        Вызывается при получении вебхука DeliveryOrderUpdate
-        """
-        settings_db = session.exec(select(IikoSettings)).first()
-        api_login = settings_db.api_login if settings_db else None
-        
-        try:
-            # Получаем детальную информацию о заказе
-            order_data = await iiko_service.get_order_by_id(order_id, organization_id, api_login=api_login)
-            if order_data:
-                # Пытаемся получить данные iiko Card
-                iiko_card_data = None
-                customer_phone = order_data.get("order", {}).get("customer", {}).get("phone")
-                if customer_phone:
-                    try:
-                        iiko_card_data = await iiko_service.get_customer_info(customer_phone, api_login=api_login, organization_id=organization_id)
-                    except Exception as e:
-                        logger.warning(f"Failed to fetch iiko Card info for {customer_phone}: {e}")
-                
-                await self.process_iiko_order(session, order_data, organization_id, iiko_card_data=iiko_card_data)
-                return True
-        except Exception as e:
-            logger.error(f"Error syncing order {order_id}: {e}")
-        return False
-
-    async def sync_payment_types(self, session: Session) -> Dict[str, Any]:
-        """
-        Синхронизация типов оплаты из iiko
-        """
-        log = SyncLog(sync_type="payment_types", status="running")
-        session.add(log)
-        session.commit()
-
-        settings_db = session.exec(select(IikoSettings)).first()
-        api_login = settings_db.api_login if settings_db else None
-        org_id = settings_db.organization_id if settings_db else None
-
-        try:
-            logger.info(f"Starting payment types sync for org {org_id}")
-            payment_types = await iiko_service.get_payment_types(api_login=api_login, organization_id=org_id)
-            logger.info(f"Fetched {len(payment_types)} payment types from iiko Cloud")
-            
-            synced = 0
-            for pt in payment_types:
-                iiko_id = pt.get("id")
-                if not iiko_id: continue
-                
-                name = pt.get("name", "Unknown")
-                kind = pt.get("kind") or pt.get("paymentTypeKind")
-                is_active = not pt.get("isDeleted", False)
-                
-                # В iiko v1/v2 поле может называться иначе
-                if not kind and "kind" in pt: kind = pt["kind"]
-                
-                db_pt = session.exec(select(PaymentType).where(PaymentType.iiko_id == iiko_id)).first()
-                if db_pt:
-                    db_pt.name = name
-                    db_pt.kind = kind
-                    db_pt.is_active = is_active
-                    db_pt.updated_at = datetime.utcnow()
-                else:
-                    db_pt = PaymentType(
-                        iiko_id=iiko_id,
-                        name=name,
-                        kind=kind,
-                        is_active=is_active
-                    )
-                    session.add(db_pt)
-                synced += 1
-            
-            session.commit()
-            log.status = "success"
-            log.details = f"Synced {synced} payment types"
-            session.commit()
-            
-            return {"success": True, "count": synced}
-        except Exception as e:
-            logger.error(f"Payment types sync failed: {e}")
-            log.status = "error"
-            log.details = str(e)
-            session.commit()
-            return {"success": False, "error": str(e)}
-
-    async def sync_delivery_restrictions(self, session: Session) -> Dict[str, Any]:
-        """
-        Синхронизация зон доставки и условий (ограничений) из iiko
-        """
-        log = SyncLog(sync_type="delivery_zones", status="running")
-        session.add(log)
-        session.commit()
-
-        settings_db = session.exec(select(IikoSettings)).first()
-        api_login = settings_db.api_login if settings_db else None
-        org_id = settings_db.organization_id if settings_db else None
-
-        try:
-            # 1. Получаем базовые данные из iiko Cloud (геометрия и условия)
-            data = await iiko_service.get_delivery_restrictions(api_login=api_login, organization_id=org_id)
-            restrictions_list = data.get("deliveryRestrictions", [])
-            
-            # Получаем филиал по умолчанию для привязки новых зон
-            default_branch = session.exec(select(Branch)).first()
-            branch_id = default_branch.id if default_branch else 1
-            
-            # 2. Получаем расширенные данные из iiko Resto (описания) если настроено
-            resto_zones_map = {}
-            if settings_db.resto_url and settings_db.resto_login:
-                try:
-                    resto_zones = await iiko_service.get_resto_delivery_zones(
-                        settings_db.resto_url, settings_db.resto_login, settings_db.resto_password
-                    )
-                    for rz in resto_zones:
-                        resto_zones_map[rz["id"]] = rz
-                    logger.info(f"Fetched {len(resto_zones)} delivery zones from iiko Resto")
-                except Exception as e:
-                    logger.warning(f"Failed to fetch zones from iiko Resto: {e}")
-
-            synced_zones = 0
-            for rest_item in restrictions_list:
-                zones = rest_item.get("deliveryZones", [])
-                conditions = rest_item.get("restrictions", [])
-                conditions_map = {c.get("deliveryZoneId"): c for c in conditions if c.get("deliveryZoneId")}
-                
-                for zone_data in zones:
-                    iiko_id = zone_data.get("id")
-                    if not iiko_id: continue
-                    
-                    name = zone_data.get("name", "Unknown Zone")
-                    coords = zone_data.get("coordinates", [])
-                    cond = conditions_map.get(iiko_id, {})
-                    resto_data = resto_zones_map.get(iiko_id, {})
-
-                    db_zone = session.exec(select(DeliveryZone).where(DeliveryZone.iiko_id == iiko_id)).first()
-                    if not db_zone:
-                        db_zone = DeliveryZone(iiko_id=iiko_id, branch_id=branch_id)
-                    
-                    db_zone.name = name
-                    db_zone.polygon_coordinates = str(coords) # Store as string as per model
-                    db_zone.min_order_amount = float(cond.get("minSum", 0))
-                    db_zone.delivery_cost = float(cond.get("deliverySum", 0)) if "deliverySum" in cond else 0
-                    
-                    db_zone.min_delivery_time = cond.get("minDeliveryTime")
-                    db_zone.max_delivery_time = cond.get("maxDeliveryTime")
-                    
-                    # Добавляем данные из Resto
-                    if resto_data:
-                        db_zone.description = resto_data.get("description")
-                        # Сохраняем как список или словарь (SQLModel List/JSON)
-                        db_zone.additional_info = resto_data.get("addresses", [])
-                    
-                    db_zone.updated_at = datetime.utcnow()
-                    session.add(db_zone)
-                    synced_zones += 1
-            
-            session.commit()
-            log.status = "success"
-            log.details = f"Synced {synced_zones} delivery zones (Cloud + Resto)"
-            session.commit()
-            return {"success": True, "count": synced_zones}
-        except Exception as e:
-            logger.error(f"Delivery zones sync failed: {e}")
-            log.status = "error"
-            log.details = str(e)
-            session.commit()
-            return {"success": False, "error": str(e)}
-
-    async def sync_orders(self, session: Session, hours: int = 24) -> Dict[str, Any]:
-        """
-        Синхронизация заказов из iiko за последние N часов
-        """
-        companies = session.exec(select(Company).where(Company.iiko_organization_id != None)).all()
-        
-        # РџРѕР»СѓС‡Р°РµРј РіР»РѕР±Р°Р»СЊРЅС‹Рµ РЅР°СЃС‚СЂРѕР№РєРё РґР»СЏ Р»РѕРіРёРЅР°
-        settings_db = session.exec(select(IikoSettings)).first()
-        global_api_login = settings_db.api_login if settings_db else None
-        global_org_id = settings_db.organization_id if settings_db else None
-
-        if not companies:
-            if not global_org_id:
-                return {"success": False, "message": "No iiko organizations configured"}
-            # Создаем "виртуальную" компанию для синхронизации
-            companies = [Company(name="Initial Sync", iiko_organization_id=global_org_id)]
-
-        log = SyncLog(sync_type="orders_manual", status="running")
-        session.add(log)
-        session.commit()
-
-        synced_count = 0
-        try:
-            for company in companies:
-                try:
-                    # Определяем логин: из компании или глобальный
-                    api_login = company.iiko_api_login or global_api_login
-                    org_id = company.iiko_organization_id
-    
-                    # 1. Синхронизируем исторические заказы (разбиваем на окна по 24 часа, чтобы избежать 422 Too many data)
-                    date_to = datetime.utcnow()
-                    date_from = date_to - timedelta(hours=hours)
-                    
-                    current_from = date_from
-                    while current_from < date_to:
-                        current_to = min(current_from + timedelta(hours=24), date_to)
-                        orders_by_date = await iiko_service.get_orders_by_date(
-                            current_from, current_to, org_id,
-                            api_login=api_login,
-                            statuses=['Unconfirmed', 'WaitCooking', 'ReadyForCooking', 'CookingStarted', 'CookingCompleted', 'Waiting', 'OnWay', 'Delivered', 'Closed', 'Cancelled']
-                        )
-                        logger.info(f"Fetched {len(orders_by_date)} orders for range {current_from} to {current_to}")
-                        
-                        for o in orders_by_date:
-                            await self.process_iiko_order(session, o, org_id)
-                            synced_count += 1
-                        current_from = current_to
-                    
-                    # 2. Синхронизируем активные заказы
-                    active_orders = await iiko_service.get_active_orders(
-                        org_id,
-                        api_login=api_login
-                    )
-                    for o in active_orders:
-                        await self.process_iiko_order(session, o, org_id)
-                        synced_count += 1
-                except Exception as e:
-                    logger.error(f"Error syncing orders for company {company.name}: {e}")
-        except Exception as e:
-            logger.error(f"Critical error in sync_orders: {e}")
-            log.status = "error"
-            log.details = str(e)
-            session.commit()
-            return {"success": False, "message": str(e)}
-                
-        log.status = "success"
-        log.details = f"Synced {synced_count} orders for last {hours} hours"
-        session.commit()
-        
-        return {"success": True, "synced_count": synced_count}
-
-    async def sync_employees_full(self, session: Session, days: int = 7) -> Dict[str, Any]:
-        """
-        Полная синхронизация сотрудников и смен (Resto + Transport)
-        """
-        companies = session.exec(select(Company).where(Company.iiko_organization_id != None)).all()
-        settings_db = session.exec(select(IikoSettings)).first()
-        
-        if not settings_db:
-            return {"success": False, "message": "Iiko settings not found"}
-
-        global_api_login = settings_db.api_login
-        resto_url = settings_db.resto_url
-        resto_login = settings_db.resto_login
-        resto_password = settings_db.resto_password
-
-        synced_emp = 0
-        synced_shifts = 0
-        
-        date_to = datetime.utcnow()
-        date_from = date_to - timedelta(days=days)
-        
-        # Вспомогательный парсер дат
-        def parse_dt(dt_str):
-            if not dt_str: return None
-            try:
-                # Поддержка форматов ISO с Z или смещением
-                return datetime.fromisoformat(dt_str.replace('Z', '+00:00')).replace(tzinfo=None)
-            except: 
-                try:
-                    # Поддержка формата iiko "yyyy-MM-dd HH:mm:ss"
-                    return datetime.strptime(dt_str.split(".")[0], "%Y-%m-%d %H:%M:%S")
-                except:
-                    return None
-
-        # 1. Получаем детальные данные из Resto API один раз (если настроено)
-        resto_emp_map = {}
-        resto_roles_map = {}
-        if resto_url and resto_login and resto_password:
-            try:
-                # Получаем сотрудников
-                resto_employees = await iiko_service.get_resto_employees(resto_url, resto_login, resto_password)
-                for re in resto_employees:
-                    if re.get("id"):
-                        resto_emp_map[re["id"]] = re
-                
-                # Получаем справочник ролей (должностей)
-                resto_roles = await iiko_service.get_resto_roles(resto_url, resto_login, resto_password)
-                for role in resto_roles:
-                    resto_roles_map[role["code"]] = role["name"]
-                logger.info(f"Fetched {len(resto_emp_map)} employees and {len(resto_roles_map)} roles from iiko Resto")
-            except Exception as e:
-                logger.error(f"Error fetching Resto data: {e}")
-
-        # 2. Основной цикл по компаниям
-        for company in companies:
-            try:
-                api_login = company.iiko_api_login or global_api_login
-                org_id = company.iiko_organization_id
-                
-                # 2.1. Данные из Cloud API (Transport)
-                cloud_employees = []
-                try:
-                    cloud_employees = await iiko_service.get_employees(org_id, api_login=api_login)
-                except Exception as e:
-                    logger.warning(f"Cloud API employees failed for {company.name} (likely 401), using Resto only: {e}")
-
-                # 2.2. Синхронизация курьеров (статистика доставок)
-                courier_stats = {}
-                try:
-                    courier_stats = await iiko_service.get_courier_statistics(date_from, date_to, org_id, api_login=api_login)
-                    logger.info(f"Fetched delivery stats for {len(courier_stats)} couriers")
-                except Exception as e:
-                    logger.warning(f"Courier stats failed for {company.name}: {e}")
-
-                # 2.2.1. Выручка курьеров из OLAP (Office)
-                # Инициализируем пустым словарем, чтобы избежать NameError ниже
-                courier_revenues = {}
-                if resto_url and resto_login and resto_password:
-                    try:
-                        courier_revenues = await iiko_service.get_courier_revenue_olap(
-                            date_from, date_to, resto_url, resto_login, resto_password
-                        )
-                        logger.info(f"Fetched OLAP revenue for {len(courier_revenues)} couriers")
-                    except Exception as e:
-                        logger.warning(f"Courier OLAP revenue failed: {e}")
-
-                # 2.3. Объединяем и синхронизируем сотрудников
-                cloud_ids = {e["id"] for e in cloud_employees if e.get("id")}
-                # Используем всех сотрудников из Resto (с фильтрацией по организации если возможно, но для 72roll пока берем всех)
-                all_ids = set(resto_emp_map.keys()).union(cloud_ids)
-                
-                for iiko_id in all_ids:
-                    r_data = resto_emp_map.get(iiko_id, {})
-                    c_data = next((e for e in cloud_employees if e.get("id") == iiko_id), {})
-                    
-                    if not r_data and not c_data: continue
-
-                    # Формируем имя
-                    name = r_data.get("name") or c_data.get("name")
-                    if not name:
-                        f_name = r_data.get("firstName") or ""
-                        l_name = r_data.get("lastName") or ""
-                        name = f"{f_name} {l_name}".strip() or "Неизвестный сотрудник"
-
-                    # Определяем роль (должность) - приоритет названиям из справочника Resto
-                    role_code = r_data.get("main_role_code") or r_data.get("role") or c_data.get("roleId")
-                    role = resto_roles_map.get(role_code, role_code) or "Staff"
-                    
-                    phone = r_data.get("phone") or c_data.get("phone")
-                    status = "Active" if not r_data.get("deleted") and not c_data.get("deleted") else "Deleted"
-
-                    emp = session.exec(select(Employee).where(Employee.iiko_id == iiko_id)).first()
-                    if emp:
-                        emp.name = name
-                        emp.phone = phone or emp.phone
-                        # Обновляем роль только если она изменилась и не пустая
-                        if role and role != "Staff": emp.role = role
-                        emp.status = status
-                        emp.updated_at = datetime.utcnow()
-                        # Дополнительно сохраняем адрес если есть в Resto
-                        if r_data.get("address"): emp.address = r_data["address"]
-                    else:
-                        emp = Employee(
-                            iiko_id=iiko_id,
-                            name=name,
-                            phone=phone,
-                            role=role,
-                            status=status,
-                            address=r_data.get("address")
-                        )
-                        session.add(emp)
-                
-                session.flush() # Сохраняем чтобы ID появились
-                synced_emp += len(all_ids)
-
-                # 3. СИНХРОНИЗАЦИЯ СМЕН (Явок)
-                all_shifts = []
-                
-                # 3.1. Берем из Resto (самый детальный источник или резервный канал при 401 в Cloud)
-                if resto_url and resto_login and resto_password:
-                    try:
-                        r_attendance = await iiko_service.get_resto_personal_sessions(
-                            date_from, date_to,
-                            resto_url=resto_url, 
-                            resto_login=resto_login, 
-                            resto_password=resto_password
-                        )
-                        for ra in r_attendance:
-                            all_shifts.append({
-                                "id": ra["id"],
-                                "employee_iiko_id": ra["employeeId"],
-                                "date_open": ra["openTime"],
-                                "date_close": ra.get("closeTime"),
-                                "source": "resto"
-                            })
-                    except Exception as e:
-                        logger.error(f"Resto attendance (sessions) failed: {e}")
-
-                # 3.2. Дополняем из Cloud (если есть)
-                try:
-                    c_shifts = await iiko_service.get_shifts(date_from, date_to, org_id, api_login=api_login)
-                    for cs in c_shifts:
-                        if not any(s["id"] == cs["id"] for s in all_shifts):
-                            all_shifts.append({
-                                "id": cs["id"],
-                                "employee_iiko_id": cs["employeeId"],
-                                "date_open": cs["dateOpen"],
-                                "date_close": cs["dateClose"],
-                                "source": "cloud"
-                            })
-                except Exception as e:
-                    logger.warning(f"Cloud shifts failed: {e}")
-
-                # 3.3. Сохраняем смены по одной
-                for s_info in all_shifts:
-                    try:
-                        s_id = s_info["id"]
-                        e_id = s_info["employee_iiko_id"]
-                        
-                        # Ищем сотрудника в нашей БД
-                        db_emp = session.exec(select(Employee).where(Employee.iiko_id == e_id)).first()
-                        if not db_emp: continue
-
-                        d_open = parse_dt(s_info["date_open"])
-                        d_close = parse_dt(s_info["date_close"])
-                        if not d_open: continue
-
-                        # Расчет часов
-                        hours = round((d_close - d_open).total_seconds() / 3600, 2) if d_close else 0.0
-                        status = "CLOSED" if d_close else "OPEN"
-
-                        shift = session.exec(select(Shift).where(Shift.iiko_id == s_id)).first()
-                        if shift:
-                            shift.date_open = d_open
-                            shift.date_close = d_close
-                            shift.status = status
-                            shift.work_hours = hours
-                            
-                            d_str = d_open.strftime("%Y-%m-%d")
-                            # Обновляем количество доставок
-                            shift.deliveries_count = courier_stats.get(e_id, {}).get(d_str, 0)
-                            # Обновляем выручку курьера
-                            shift.deliveries_revenue = courier_revenues.get(e_id, {}).get(d_str, 0.0)
-                            
-                            shift.updated_at = datetime.utcnow()
-                        else:
-                            shift = Shift(
-                                iiko_id=s_id,
-                                employee_id=db_emp.id,
-                                date_open=d_open,
-                                date_close=d_close,
-                                status=status,
-                                work_hours=hours,
-                                deliveries_count=courier_stats.get(e_id, {}).get(d_open.strftime("%Y-%m-%d"), 0),
-                                deliveries_revenue=courier_revenues.get(e_id, {}).get(d_open.strftime("%Y-%m-%d"), 0.0)
-                            )
-                            session.add(shift)
-                        
-                        session.flush()
-                        synced_shifts += 1
-                    except Exception as shift_e:
-                        logger.error(f"Error syncing shift {s_info.get('id')}: {shift_e}")
-                        session.rollback() # Откатываем только эту смену
-                        continue
-
-                # 4. СИНХРОНИЗАЦИЯ ДЕТАЛЬНЫХ ЗАКАЗОВ КУРЬЕРОВ
-                try:
-                    detailed_orders = []
-                    try:
-                        detailed_orders = await iiko_service.get_detailed_deliveries(date_from, date_to, org_id, api_login=api_login)
-                    except Exception as cloud_e:
-                        if resto_url and ("401" in str(cloud_e) or "Unauthorized" in str(cloud_e)):
-                            logger.info("Cloud API 401, trying Resto for detailed deliveries...")
-                            detailed_orders = await iiko_service.get_resto_detailed_deliveries(
-                                date_from, date_to, org_id,
-                                resto_url=resto_url, resto_login=resto_login, resto_password=resto_password
-                            )
-                        else:
-                            raise cloud_e
-
-                    restrictions = await iiko_service.get_delivery_restrictions(org_id, api_login=api_login)
-                    
-                    # Маппинг терминал -> зона
-                    terminal_zones = {}
-                    for restr in restrictions:
-                        t_id = restr.get("deliveryTerminalId")
-                        zones = restr.get("deliveryZones", [])
-                        if t_id and zones:
-                            terminal_zones[t_id] = zones[0].get("name")
-                    
-                    for order_data in detailed_orders:
-                        o_id = order_data.get("id")
-                        courier = order_data.get("courierInfo", {}).get("courier", {})
-                        courier_iiko_id = courier.get("id")
-                        
-                        if not o_id or not courier_iiko_id: continue
-                        
-                        # Находим сотрудника
-                        db_emp = session.exec(select(Employee).where(Employee.iiko_id == courier_iiko_id)).first()
-                        if not db_emp: continue
-                        
-                        # Временные метки
-                        when_created = self._parse_iiko_time(order_data.get("whenCreated"))
-                        when_delivered = self._parse_iiko_time(order_data.get("whenDelivered") or order_data.get("completeTime"))
-                        expected_time = self._parse_iiko_time(order_data.get("deliveryDate"))
-                        when_cooking_completed = self._parse_iiko_time(order_data.get("whenCookingCompleted"))
-                        
-                        if not when_created: continue
-                        
-                        # Состав заказа
-                        items = order_data.get("order", {}).get("items", [])
-                        items_text = ", ".join([f"{i.get('name')} x{i.get('amount')}" for i in items])
-                        
-                        # Адрес
-                        addr_data = order_data.get("order", {}).get("address", {})
-                        address = f"{addr_data.get('street', '')} {addr_data.get('house', '')}, кв. {addr_data.get('flat', '')}".strip(", ")
-                        
-                        # Зона
-                        zone = terminal_zones.get(order_data.get("deliveryTerminalId"))
-                        
-                        # Расчет опозданий
-                        is_late = False
-                        if when_delivered and expected_time:
-                            is_late = when_delivered > expected_time
-                            
-                        cooking_late = False
-                        if when_cooking_completed and expected_time:
-                            # Опоздание кухни - если готовность позже ожидаемого времени доставки (или по своей логике)
-                            cooking_late = when_cooking_completed > expected_time
-                            
-                        # Находим смену
-                        shift_obj = session.exec(
-                            select(Shift)
-                            .where(Shift.employee_id == db_emp.id)
-                            .where(Shift.date_open <= (when_delivered or when_created))
-                            .order_by(Shift.date_open.desc())
-                        ).first()
-                        
-                        db_order = session.exec(select(CourierOrder).where(CourierOrder.iiko_id == o_id)).first()
-                        if db_order:
-                            db_order.actual_delivery_time = when_delivered
-                            db_order.is_late = is_late
-                            db_order.cooking_late = cooking_late
-                            db_order.updated_at = datetime.utcnow()
-                        else:
-                            db_order = CourierOrder(
-                                iiko_id=o_id,
-                                employee_id=db_emp.id,
-                                shift_id=shift_obj.id if shift_obj else None,
-                                address=address,
-                                items_summary=items_text[:500],
-                                delivery_zone=zone,
-                                created_at_iiko=when_created,
-                                cooking_completed_at=when_cooking_completed,
-                                expected_delivery_time=expected_time,
-                                actual_delivery_time=when_delivered,
-                                is_late=is_late,
-                                cooking_late=cooking_late
-                            )
-                            session.add(db_order)
-                    
-                    logger.info(f"Synced {len(detailed_orders)} detailed courier orders for {company.name}")
-                except Exception as e:
-                    logger.error(f"Error syncing detailed courier orders for {company.name}: {e}")
-
-                # 5. СИНХРОНИЗАЦИЯ ГРАФИКОВ
-                try:
-                    await self.sync_schedules(
-                        session, date_from, date_to, org_id, 
-                        api_login=api_login,
-                        resto_url=resto_url,
-                        resto_login=resto_login,
-                        resto_password=resto_password
-                    )
-                except Exception as e:
-                    logger.warning(f"Schedules failed: {e}")
-
-                session.commit() # Фиксируем всё по компании
-                
-            except Exception as company_e:
-                logger.error(f"Error in sync_employees_full for company {company.name}: {company_e}")
-                session.rollback()
-                
-        return {"success": True, "employees": synced_emp, "shifts": synced_shifts}
-
-    async def get_employee_stats(self, session: Session, employee_id: int, mode: str = "calendar") -> Dict[str, Any]:
-        """
-        Расчет статистики сотрудника: группировка по дням, чистая выручка и детализация доставок.
-        """
-        from app.models.order import Order # Импорт внутри для избежания циклической зависимости
-        
-        now = datetime.utcnow()
-        if mode == "calendar":
-            start_date = now - timedelta(days=now.weekday())
-            start_date = start_date.replace(hour=0, minute=0, second=0, microsecond=0)
-        else:
-            start_date = now - timedelta(days=7)
-
-        # 1. Получаем смены
-        shifts = session.exec(
-            select(Shift).where(Shift.employee_id == employee_id, Shift.date_open >= start_date).order_by(Shift.date_open.desc())
-        ).all()
-        
-        db_emp = session.get(Employee, employee_id)
-        # Уточненное условие для курьера: роль курьера ИЛИ наличие доставок в истории
-        has_delivery_history = session.exec(
-            select(Order).where(Order.courier_name == db_emp.name).limit(1)
-        ).first() is not None if db_emp else False
-        
-        is_courier_role = db_emp.role in ["Courier", "CUR", "курьер", "Delivery"] if db_emp else False
-        show_deliveries = is_courier_role or has_delivery_history
-
-        # 2. Получаем выручку из iiko OLAP (чистая выручка = Сумма - Скидки)
-        revenue_data = {}
-        try:
-            revenue_data = await iiko_service.get_daily_revenue_olap(start_date, now)
-        except Exception as e:
-            logger.error(f"Error fetching revenue OLAP: {e}")
-
-        total_hours = sum(s.work_hours or 0 for s in shifts)
-        total_deliveries_count = sum(s.deliveries_count or 0 for s in shifts)
-        
-        # 3. Группировка по дням
-        daily_stats = {}
-        for s in shifts:
-            day_key = s.date_open.strftime("%Y-%m-%d")
-            if day_key not in daily_stats:
-                day_fin = revenue_data.get(day_key, {"revenue": 0.0, "discounts": 0.0})
-                daily_stats[day_key] = {
-                    "date": day_key,
-                    "shifts": [],
-                    "total_hours": 0.0,
-                    "total_deliveries": 0,
-                    "financials": {
-                        "revenue": day_fin["revenue"],
-                        "discounts": day_fin["discounts"],
-                        "net_revenue": round(day_fin["revenue"] - day_fin["discounts"], 2)
-                    },
-                    "deliveries": [] # Сюда добавим детали
-                }
-            
-            daily_stats[day_key]["shifts"].append({
-                "id": s.id,
-                "open": s.date_open.isoformat(),
-                "close": s.date_close.isoformat() if s.date_close else None,
-                "status": s.status,
-                "hours": round(s.work_hours or 0, 2),
-                "deliveries": s.deliveries_count or 0
-            })
-            daily_stats[day_key]["total_hours"] += (s.work_hours or 0)
-            daily_stats[day_key]["total_deliveries"] += (s.deliveries_count or 0)
-
-        # 4. Если нужно показывать доставки
-        if show_deliveries and db_emp:
-            # Ищем заказы за период по имени курьера
-            orders = session.exec(
-                select(Order).where(
-                    Order.courier_name == db_emp.name, 
-                    Order.created_at >= start_date
-                ).order_by(Order.created_at.desc())
-            ).all()
-            
-            for o in orders:
-                day_key = o.created_at.strftime("%Y-%m-%d")
-                if day_key in daily_stats:
-                    daily_stats[day_key]["deliveries"].append({
-                        "id": o.iiko_order_id,
-                        "amount": float(o.total_with_discount),
-                        "address": o.delivery_address,
-                        "zone": o.delivery_zone,
-                        "departure": o.iiko_creation_time.isoformat() if o.iiko_creation_time else None,
-                        "arrival": o.actual_time.isoformat() if o.actual_time else None,
-                        "target_time": o.expected_time.isoformat() if o.expected_time else None,
-                        "delay": o.delay_minutes or 0
-                    })
-
-        sorted_days = sorted(daily_stats.values(), key=lambda x: x["date"], reverse=True)
-        for day in sorted_days:
-            day["total_hours"] = round(day["total_hours"], 2)
-
-        return {
-            "period_start": start_date.isoformat(),
-            "total_shifts": len(shifts),
-            "total_hours_period": round(total_hours, 2),
-            "total_deliveries_period": total_deliveries_count,
-            "daily_stats": sorted_days,
-            "is_courier": show_deliveries,
-            "mode": mode
-        }
-
-    async def sync_schedules(
-        self, session: Session, date_from: datetime, date_to: datetime, organization_id: str,
-        api_login: Optional[str] = None,
-        resto_url: Optional[str] = None,
-        resto_login: Optional[str] = None,
-        resto_password: Optional[str] = None
-    ):
-        """
-        Синхронизация запланированного графика смен
-        """
-        try:
-            iiko_schedules = []
-            try:
-                iiko_schedules = await iiko_service.get_schedules(
-                    date_from, date_to, organization_id,
-                    api_login=api_login
-                )
-            except Exception as cloud_e:
-                if resto_url and ("401" in str(cloud_e) or "Unauthorized" in str(cloud_e)):
-                    logger.info("Cloud API 401, trying Resto for schedules...")
-                    iiko_schedules = await iiko_service.get_resto_schedules(
-                        date_from, date_to,
-                        resto_url=resto_url, resto_login=resto_login, resto_password=resto_password
-                    )
-                else:
-                    logger.error(f"Cloud schedules failed: {cloud_e}")
-                    raise cloud_e
-            for item in iiko_schedules:
-                iiko_id = item.get("id")
-                if not iiko_id:
-                    continue
-                
-                emp_iiko_id = item.get("employeeId")
-                emp = session.exec(select(Employee).where(Employee.iiko_id == emp_iiko_id)).first()
-                if not emp:
-                    continue
-                
-                def parse_time(ts_str):
-                    if not ts_str: return None
-                    try:
-                        return datetime.fromisoformat(ts_str.replace("Z", "+00:00")).replace(tzinfo=None)
-                    except:
-                        return None
-                
-                start_time = parse_time(item.get("dateFrom"))
-                end_time = parse_time(item.get("dateTo"))
-                
-                if not start_time or not end_time:
-                    continue
-                    
-                schedule = session.exec(select(Schedule).where(Schedule.iiko_id == iiko_id)).first()
-                if schedule:
-                    schedule.date_from = start_time
-                    schedule.date_to = end_time
-                    schedule.updated_at = datetime.utcnow()
-                else:
-                    schedule = Schedule(
-                        iiko_id=iiko_id,
-                        employee_id=emp.id,
-                        date_from=start_time,
-                        date_to=end_time
-                    )
-                    session.add(schedule)
-            
-            session.flush()
-        except Exception as e:
-            logger.error(f"Error in sync_schedules: {e}")
-            raise
-
-    async def sync_vk_loyalty(self, session: Session) -> Dict[str, Any]:
-        """
-        Синхронизация баллов из VK в iikoCard.
-        Находит все несинхронизированные активности, группирует по пользователям
-        и отправляет начисление в iiko.
-        """
-        # Find all unsynced activities
-        unsynced = session.exec(select(VkActivity).where(VkActivity.is_synced == False)).all()
-        if not unsynced:
-            return {"success": True, "synced_activities": 0, "message": "No new activities to sync"}
-            
-        # Group points by vk_id
-        points_by_user = {}
-        activities_by_user = {}
-        for activity in unsynced:
-            points_by_user[activity.vk_id] = points_by_user.get(activity.vk_id, 0) + activity.points
-            if activity.vk_id not in activities_by_user:
-                activities_by_user[activity.vk_id] = []
-            activities_by_user[activity.vk_id].append(activity)
-            
-        synced_count = 0
-        error_count = 0
-        
-        # Получаем глобальные настройки для логина
-        settings_db = session.exec(select(IikoSettings)).first()
-        api_login = settings_db.api_login if settings_db else None
-        org_id = settings_db.organization_id if settings_db else None
-
-        for vk_id, total_points in points_by_user.items():
-            if total_points <= 0:
-                continue
-                
-            # Get VkUser
-            vk_user = session.exec(select(VkUser).where(VkUser.vk_id == vk_id)).first()
-            if not vk_user or not vk_user.is_linked or not vk_user.phone:
-                continue
-                
-            try:
-                # Find customer in iikoCard to get customerId and walletId
-                customer_info = await iiko_service.get_customer_info(
-                    vk_user.phone,
-                    api_login=api_login,
-                    organization_id=org_id
-                )
-                if str(customer_info.get("found", "")).lower() == "false":
-                    logger.warning(f"Could not find iikoCard for phone {vk_user.phone}")
-                    continue
-                    
-                customer_id = customer_info.get("id")
-                wallets = customer_info.get("walletBalances", [])
-                if not wallets:
-                    # Sometimes the response format is different or they don't have a wallet yet.
-                    # We might need to just use the default wallet logic or create one, but usually get_customer_info returns it if they exist.
-                    logger.warning(f"No wallets found for customer {vk_user.phone}")
-                    continue
-                    
-                # Get the first active wallet
-                wallet_id = wallets[0].get("wallet", {}).get("id")
-                if not wallet_id or not customer_id:
-                    continue
-                    
-                # Accrue points
-                await iiko_service.add_customer_balance(
-                    customer_id=customer_id,
-                    wallet_id=wallet_id,
-                    amount=float(total_points),
-                    api_login=api_login,
-                    organization_id=org_id
-                )
-                
-                # Mark as synced
-                for act in activities_by_user[vk_id]:
-                    act.is_synced = True
-                    act.synced_at = datetime.utcnow()
-                    session.add(act)
-                    synced_count += 1
-                    
-                # Deduct from local balance as they are now in iiko
-                vk_user.vk_bonus_balance -= total_points
-                if vk_user.vk_bonus_balance < 0:
-                    vk_user.vk_bonus_balance = 0
-                session.add(vk_user)
-                
-                # Send success message to VK
-                vk_settings = session.exec(select(VkSettings)).first()
-                bot_token = vk_settings.vk_bot_token if vk_settings else None
-                if bot_token:
-                    await send_vk_message(
-                        vk_id,
-                        f"🎉 Ваши баллы за активность ({total_points}) успешно переведены на iikoCard!",
-                        bot_token
-                    )
-                
-            except Exception as e:
-                logger.error(f"Error syncing loyalty for VK user {vk_id}: {e}")
-                error_count += 1
-                
-        session.commit()
-        
-        return {
-            "success": True, 
-            "synced_activities": synced_count,
-            "errors": error_count
-        }
-
-
-    def _parse_iiko_time(self, timestr: Optional[str]) -> Optional[datetime]:
-        """Парсинг времени из iiko (формат '2024-03-27 15:30:00.000' или ISO)"""
-        if not timestr:
-            return None
-        try:
-            # iiko Cloud часто присылает '2024-03-27 15:30:00.000'
-            if " " in timestr and "." in timestr:
-                return datetime.strptime(timestr, "%Y-%m-%d %H:%M:%S.%f")
-            if " " in timestr:
-                return datetime.strptime(timestr, "%Y-%m-%d %H:%M:%S")
-            return datetime.fromisoformat(timestr.replace("Z", "+00:00"))
-        except:
-            return None
-
 
     async def sync_categories_only(self, session: Session) -> Dict[str, Any]:
-        """Синхронизация только категорий из iiko External Menu API v2"""
-        from app.models.category import Category
-        log = SyncLog(sync_type="categories", status="running")
+        """Синхронизация только категорий из iiko (вызывает полную синхронизацию меню)"""
+        res = await self.sync_menu(session)
+        return {
+            "success": res.get("success", False),
+            "categories_synced": res.get("categories_synced", 0),
+            "message": f"Синхронизировано категорий: {res.get('categories_synced', 0)}"
+        }
+
+    def _sync_from_external_menu_sync(self, session: Session, menu_data: Dict[str, Any], log_id: int) -> Dict[str, Any]:
+        """Логика обработки внешнего меню iiko (Синхронная версия для потока)"""
+        if not menu_data:
+            return {"categories": 0, "products": 0}
+        
+        categories_synced = 0
+        products_synced = 0
+
+        # 1. Синхронизация категорий
+        cats_list = menu_data.get("itemCategories") or menu_data.get("groups") or []
+        for cat_data in cats_list:
+            cat_id = cat_data.get("id")
+            if not cat_id: continue
+            
+            cat = session.exec(select(Category).where(Category.iiko_id == cat_id)).first()
+            if cat:
+                cat.name = cat_data["name"]
+                cat.updated_at = datetime.now(timezone.utc).replace(tzinfo=None)
+            else:
+                cat = Category(
+                    iiko_id=cat_id,
+                    name=cat_data["name"],
+                    is_active=True
+                )
+                session.add(cat)
+            categories_synced += 1
+        session.commit()
+
+        # 2. Синхронизация товаров
+        for cat_data in cats_list:
+            iiko_cat_id = cat_data.get("id")
+            local_cat = session.exec(select(Category).where(Category.iiko_id == iiko_cat_id)).first()
+            category_id = local_cat.id if local_cat else None
+            
+            items_list = cat_data.get("items") or cat_data.get("products") or []
+            for item_data in items_list:
+                item_id = item_data.get("itemId") or item_data.get("id")
+                if not item_id: continue
+                
+                prod = session.exec(select(Product).where(Product.iiko_id == item_id)).first()
+                
+                sizes = item_data.get("itemSizes", [])
+                price = 0
+                nutritions = {}
+                weight = None
+                
+                if sizes:
+                    s0 = sizes[0]
+                    prices = s0.get("prices", [])
+                    if prices: price = prices[0].get("price", 0)
+                    nutritions = s0.get("nutritionPerHundredGrams") or s0.get("nutritions") or {}
+                    weight = s0.get("portionWeightGrams")
+                elif "price" in item_data: 
+                    price = item_data["price"]
+
+                updated_data = {
+                    "name": item_data["name"],
+                    "description": item_data.get("description") or "",
+                    "price": float(price or 0),
+                    "article": item_data.get("sku") or "", 
+                    "category_id": category_id,
+                    "is_available": not item_data.get("isHidden", False),
+                    "weight_grams": int(weight) if weight else None,
+                    "calories": int(nutritions.get("energy") or 0) or None,
+                    "proteins": float(nutritions.get("proteins") or 0) or None,
+                    "fats": float(nutritions.get("fats") or 0) or None,
+                    "carbohydrates": float(nutritions.get("carbs") or 0) or None,
+                    "updated_at": datetime.now(timezone.utc).replace(tzinfo=None)
+                }
+
+                if prod:
+                    for key, val in updated_data.items(): setattr(prod, key, val)
+                else:
+                    prod = Product(iiko_id=item_id, **updated_data)
+                    session.add(prod)
+                
+                session.flush()
+
+                # Размеры
+                session.exec(delete(ProductSize).where(ProductSize.product_id == prod.id))
+                
+                if sizes:
+                    for s_data in sizes:
+                        s_price = 0
+                        if s_data.get("prices"): s_price = s_data["prices"][0].get("price", 0)
+                        session.add(ProductSize(
+                            product_id=prod.id,
+                            iiko_id=s_data.get("sizeId") or item_id,
+                            name=s_data.get("sizeName") or "Стандарт",
+                            price=float(s_price or 0),
+                            is_default=s_data.get("isDefault", False)
+                        ))
+                else:
+                    session.add(ProductSize(
+                        product_id=prod.id,
+                        iiko_id=item_id,
+                        name="Стандарт",
+                        price=float(price or 0),
+                        is_default=True
+                    ))
+
+                # Модификаторы
+                target_size = next((s for s in sizes if s.get("isDefault")), sizes[0] if sizes else None)
+                if target_size:
+                    session.exec(delete(ProductModifierGroup).where(ProductModifierGroup.product_id == prod.id))
+                    
+                    mod_groups = target_size.get("itemModifierGroups", [])
+                    for mg_data in mod_groups:
+                        mg_id = mg_data.get("itemGroupId") or mg_data.get("modifierGroupId") or f"mg_{mg_data['name']}"
+                        new_group = ProductModifierGroup(
+                            product_id=prod.id,
+                            iiko_id=mg_id,
+                            name=mg_data["name"],
+                            min_amount=mg_data.get("minAmount", 0),
+                            max_amount=mg_data.get("maxAmount", 1),
+                            is_required=mg_data.get("minAmount", 0) > 0
+                        )
+                        session.add(new_group)
+                        session.flush()
+                        
+                        for m_item in mg_data.get("items", []):
+                            m_price = 0
+                            if m_item.get("prices"): m_price = m_item["prices"][0].get("price", 0)
+                            session.add(ProductModifier(
+                                group_id=new_group.id,
+                                iiko_id=m_item["itemId"],
+                                name=m_item["name"],
+                                price=float(m_price),
+                                min_amount=m_item.get("minAmount", 0),
+                                max_amount=m_item.get("maxAmount", 1),
+                                default_amount=m_item.get("defaultAmount", 0)
+                            ))
+                products_synced += 1
+        
+        session.commit()
+        return {"categories": categories_synced, "products": products_synced}
+
+    def _sync_from_nomenclature_sync(self, session: Session, nomenclature: Dict[str, Any], log_id: int) -> Dict[str, Any]:
+        """Обработка классической номенклатуры iiko (Синхронная версия для потока)"""
+        if not nomenclature:
+            return {"categories": 0, "products": 0}
+
+        categories_synced = 0
+        products_synced = 0
+
+        # 1. Категории
+        if "groups" in nomenclature:
+            for g in nomenclature["groups"]:
+                if g.get("isDeleted"): continue
+                cat = session.exec(select(Category).where(Category.iiko_id == g["id"])).first()
+                if cat:
+                    cat.name = g["name"]
+                    cat.updated_at = datetime.now(timezone.utc).replace(tzinfo=None)
+                else:
+                    session.add(Category(iiko_id=g["id"], name=g["name"], is_active=True))
+                categories_synced += 1
+            session.commit()
+
+        # 2. Товары
+        size_map = {s["id"]: s["name"] for s in nomenclature.get("sizes", [])}
+        if "products" in nomenclature:
+            for p in nomenclature["products"]:
+                if p.get("type") == "Service": continue
+                prod = session.exec(select(Product).where(Product.iiko_id == p["id"])).first()
+                
+                category_id = None
+                if p.get("parentGroup"):
+                    local_cat = session.exec(select(Category).where(Category.iiko_id == p["parentGroup"])).first()
+                    if local_cat: category_id = local_cat.id
+                
+                price = 0
+                if p.get("sizePrices"):
+                    price = p["sizePrices"][0].get("price", {}).get("currentPrice", 0)
+
+                updated_data = {
+                    "name": p["name"],
+                    "description": p.get("description") or "",
+                    "price": float(price),
+                    "article": p.get("code") or "",
+                    "category_id": category_id,
+                    "is_available": not p.get("isDeleted", False),
+                    "updated_at": datetime.now(timezone.utc).replace(tzinfo=None)
+                }
+
+                if prod:
+                    for key, val in updated_data.items(): setattr(prod, key, val)
+                else:
+                    prod = Product(iiko_id=p["id"], **updated_data)
+                    session.add(prod)
+                
+                session.flush()
+                
+                # Размеры
+                session.exec(delete(ProductSize).where(ProductSize.product_id == prod.id))
+                if p.get("sizePrices"):
+                    for sp in p["sizePrices"]:
+                        s_id = sp.get("sizeId")
+                        session.add(ProductSize(
+                            product_id=prod.id,
+                            iiko_id=s_id or "default",
+                            name=size_map.get(s_id, "Стандарт"),
+                            price=float(sp.get("price", {}).get("currentPrice", 0)),
+                            is_default=(len(p["sizePrices"]) == 1 or sp.get("isDefault", False))
+                        ))
+                products_synced += 1
+            session.commit()
+        return {"categories": categories_synced, "products": products_synced}
+
+    async def ensure_customer_from_order(
+        self, 
+        session: Session, 
+        phone: str, 
+        name: Optional[str] = None, 
+        surname: Optional[str] = None, 
+        order_info: Optional[str] = None, 
+        order_date: Optional[datetime] = None, 
+        telegram_id: Optional[int] = None,
+        order_status: Optional[str] = None,
+        address: Optional[str] = None,
+        email: Optional[str] = None,
+        loyalty_data: Optional[Dict[str, Any]] = None,
+        order_id_iiko: Optional[str] = None,
+        city: Optional[str] = None,
+        street: Optional[str] = None,
+        house: Optional[str] = None,
+        flat: Optional[str] = None,
+        total_sum: float = 0
+    ):
+        """
+        Проверка существования гостя по номеру телефона и создание/обновление карточки.
+        Используется при поступлении заказа (webhook или API).
+        """
+        from app.models.order import OrderStatus
+        
+        # Очистка и нормализация номера телефона (РФ формат +7XXXXXXXXXX)
+        clean_phone = normalize_phone(phone)
+        
+        if not clean_phone:
+            logger.warning(f"Attempted to ensure customer with empty phone: {phone}")
+            return None
+
+        logger.info(f"==> Customer Sync Trigger: Phone={clean_phone}, Order={order_info}")
+
+        customer = session.exec(select(Customer).where(Customer.phone == clean_phone)).first()
+        
+        # Поиск по дополнительным телефонам если не найден по основному
+        if not customer:
+            from app.models.customer import GuestPhone
+            gp = session.exec(select(GuestPhone).where(GuestPhone.phone == clean_phone)).first()
+            if gp:
+                customer = session.get(Customer, gp.customer_id)
+                logger.info(f"Found customer {customer.id} by additional phone {clean_phone}")
+
+        # Работа с датами (приведение к UTC без TZ для БД)
+        current_order_time = order_date or datetime.now(timezone.utc).replace(tzinfo=None)
+        if current_order_time.tzinfo:
+            current_order_time = current_order_time.astimezone(timezone.utc).replace(tzinfo=None)
+        
+        # Формирование детальной информации о заказе для заметок
+        if not order_info:
+            order_info = f"Заказ от {current_order_time.strftime('%d.%m.%Y %H:%M')}"
+            if total_sum > 0:
+                order_info += f" на сумму {total_sum:.0f} руб."
+            if address:
+                order_info += f" (Адрес: {address})"
+        
+        # Добавление данных программы лояльности
+        if loyalty_data:
+            extra_info = []
+            if loyalty_data.get("discount_total"):
+                extra_info.append(f"Скидка: {loyalty_data['discount_total']}р")
+            if loyalty_data.get("free_products"):
+                extra_info.append(f"Подарки: {', '.join(loyalty_data['free_products'])}")
+            if loyalty_data.get("errors"):
+                extra_info.append(f"Ошибки лоял.: {', '.join(loyalty_data['errors'])}")
+            
+            if extra_info:
+                if "(" in order_info:
+                    order_info = order_info.rstrip(")") + "; " + "; ".join(extra_info) + ")"
+                else:
+                    order_info += " (" + "; ".join(extra_info) + ")"
+
+        if not customer:
+            # Регистрация НОВОГО гостя
+            logger.info(f"==> REGISTRATION: New guest phone {clean_phone}. Name: {name} {surname or ''}")
+            customer = Customer(
+                phone=clean_phone,
+                name=name or "Гость",
+                surname=surname,
+                first_name=name,
+                last_name=surname,
+                email=email,
+                telegram_id=telegram_id,
+                last_order_date=current_order_time,
+                last_iiko_order_id=order_id_iiko,
+                is_new_guest=True,
+                # Считаем выполненным заказом только если статус подходящий
+                total_orders_count=1 if order_status in (OrderStatus.closed, OrderStatus.delivered) else 0,
+                total_orders_amount=Decimal(str(total_sum)) if order_status in (OrderStatus.closed, OrderStatus.delivered) else Decimal("0"),
+                total_purchases_sum=Decimal(str(total_sum)) if order_status in (OrderStatus.closed, OrderStatus.delivered) else Decimal("0"),
+                updated_at=datetime.now(timezone.utc).replace(tzinfo=None)
+            )
+            session.add(customer)
+            session.flush()
+            logger.info(f"Created new customer card: ID={customer.id}, Phone={clean_phone}")
+        else:
+            # ОБНОВЛЕНИЕ существующей карточки
+            logger.info(f"==> UPDATE: Customer ID={customer.id} found. Processing order info.")
+            
+            # Заполняем имя/фамилию если они пустые
+            if name and (not customer.name or customer.name == "Гость"):
+                customer.name = name
+                customer.first_name = name
+            if surname and (not customer.surname or customer.surname == ""):
+                customer.surname = surname
+                customer.last_name = surname
+            
+            # Обновляем статистику если это новый заказ
+            is_new_order_data = (customer.last_iiko_order_id != order_id_iiko)
+            
+            if not customer.last_order_date or current_order_time >= customer.last_order_date:
+                if is_new_order_data and order_status in (OrderStatus.closed, OrderStatus.delivered):
+                    customer.total_orders_count = (customer.total_orders_count or 0) + 1
+                    customer.total_orders_amount = (customer.total_orders_amount or Decimal("0")) + Decimal(str(total_sum))
+                    customer.total_purchases_sum = (customer.total_purchases_sum or Decimal("0")) + Decimal(str(total_sum))
+                
+                customer.last_order_date = current_order_time
+                customer.last_iiko_order_id = order_id_iiko
+            
+            # Снимаем флаг нового гостя
+            if order_status in (OrderStatus.closed, OrderStatus.delivered):
+                customer.is_new_guest = False
+            
+            # Заметки больше не обновляем автоматически информацией о заказах
+            pass
+
+        # Сохранение адресов (поддержка старой схемы и Laravel)
+        if address and address != "Самовывоз":
+            from app.models.customer import GuestAddress, ClientAddressHistory
+            
+            # Legacy GuestAddress
+            existing_addr = session.exec(
+                select(GuestAddress).where(
+                    GuestAddress.customer_id == customer.id,
+                    GuestAddress.address == address
+                )
+            ).first()
+            if not existing_addr:
+                session.add(GuestAddress(customer_id=customer.id, address=address, is_main=False))
+            
+            # Laravel ClientAddressHistory
+            if city or street or house:
+                existing_history = session.exec(
+                    select(ClientAddressHistory).where(
+                        ClientAddressHistory.client_id == customer.id,
+                        ClientAddressHistory.city == city,
+                        ClientAddressHistory.street == street,
+                        ClientAddressHistory.house == house
+                    )
+                ).first()
+                
+                if not existing_history:
+                    session.add(ClientAddressHistory(
+                        client_id=customer.id,
+                        city=city,
+                        street=street,
+                        house=house,
+                        apartment=flat,
+                        last_used_at=datetime.now(timezone.utc).replace(tzinfo=None)
+                    ))
+                else:
+                    existing_history.last_used_at = datetime.now(timezone.utc).replace(tzinfo=None)
+                    if flat and not existing_history.apartment:
+                        existing_history.apartment = flat
+                    session.add(existing_history)
+
+        customer.updated_at = datetime.now(timezone.utc).replace(tzinfo=None)
+        session.add(customer)
+        session.flush()
+        
+        # Запуск фоновой синхронизации из iiko Cloud
+        from app.tasks.customer_tasks import sync_single_customer_task
+        try:
+            sync_single_customer_task.delay(clean_phone)
+            logger.info(f"Triggered background sync for phone {clean_phone}")
+        except Exception as celery_err:
+            logger.warning(f"Failed to start Celery sync task for {clean_phone}: {celery_err}")
+            
+        return customer
+
+    async def process_iiko_order(self, session: Session, iiko_order_data: Dict[str, Any], organization_id: str, iiko_card_data: Optional[Dict[str, Any]] = None):
+        from app.models.order import Order, OrderStatus # Локальный импорт для предотвращения UnboundLocalError и циклических зависимостей
+        """Интегрированный метод обработки заказа: консолидированная и очищенная версия"""
+        if not iiko_order_data:
+            logger.warning("Received empty order data from iiko")
+            return
+            
+        try:
+            is_new = False
+            is_status_changed = False
+            
+            # 1. Базовые данные заказа
+            order_id_iiko = iiko_order_data.get("id")
+            o_data = iiko_order_data.get("order")
+            if not o_data:
+                o_data = iiko_order_data
+            
+            if not order_id_iiko:
+                order_id_iiko = o_data.get("id")
+
+            if not order_id_iiko:
+                logger.warning(f"Order data missing ID. Keys available: {list(o_data.keys())}. Full data sample: {str(o_data)[:500]}")
+                return
+            
+            # Логируем начало обработки для диагностики
+            ext_num = o_data.get("number") or o_data.get("externalNumber")
+            logger.info(f"==> Processing Iiko Order: ID={order_id_iiko}, Num={ext_num}, Status={o_data.get('status')}")
+            
+            settings_db = session.exec(select(IikoSettings)).first()
+            city_from_settings = settings_db.city_name if settings_db else "Тюмень"
+
+            # Очистка строк от плейсхолдеров
+            def clean(v):
+                if v is None: return None
+                s = str(v).strip()
+                # Удаляем артефакты "None", "null" и прочие плейсхолдеры
+                if s.lower() in ["none", "null", "", "-", "--", "---", "----", "----------", ".", "undefined"]: 
+                    return None
+                return s
+
+            # 2. Статус и внешние номера
+            raw_status = clean(o_data.get("status") or iiko_order_data.get("creationStatus"))
+            raw_status_lower = raw_status.lower() if raw_status else ""
+            external_number = clean(o_data.get("number") or o_data.get("externalNumber")) or None
+
+            # 3. Таймзона и время
+            from app.core.datetime_utils import get_tz_name
+            tz_name = get_tz_name(session)
+            try:
+                import zoneinfo
+                tz = zoneinfo.ZoneInfo(tz_name)
+            except Exception:
+                import zoneinfo
+                tz = zoneinfo.ZoneInfo("Asia/Yekaterinburg")
+            
+            current_time_tz = datetime.now(tz)
+            
+            # Поиск даты создания в разных местах (iiko API может менять структуру)
+            iiko_creation_time_raw = (
+                (o_data.get("creationInfo") or {}).get("creationDate") or 
+                o_data.get("creationDate") or
+                o_data.get("whenCreated")
+            )
+            iiko_creation_time = None
+            if iiko_creation_time_raw:
+                try:
+                    # Принимаем время как UTC 0, если есть пометка Z или смещение.
+                    # Это исправит проблему 5-часового смещения в админке.
+                    if 'Z' in iiko_creation_time_raw or '+' in iiko_creation_time_raw or '-' in iiko_creation_time_raw[10:]:
+                        # ISO формат с Z или смещением парсится как aware datetime
+                        dt = datetime.fromisoformat(iiko_creation_time_raw.replace('Z', '+00:00'))
+                        iiko_creation_time = dt.astimezone(timezone.utc).replace(tzinfo=None)
+                    else:
+                        # Если время без пояса (naive), считаем его локальным для заведения
+                        dt = datetime.fromisoformat(iiko_creation_time_raw)
+                        iiko_creation_time = dt.replace(tzinfo=tz).astimezone(timezone.utc).replace(tzinfo=None)
+                    
+                    logger.info(f"Parsed iiko time (naive UTC): raw={iiko_creation_time_raw}, result={iiko_creation_time}")
+                except Exception as e:
+                    logger.error(f"Error parsing iiko creation time {iiko_creation_time_raw}: {e}")
+
+            # 4. Клиент
+            c_data = o_data.get("customer") or {}
+            c_first = clean(c_data.get("name"))
+            c_last = clean(c_data.get("surname"))
+            full_customer_name = f"{c_first or ''} {c_last or ''}".strip() or "Гость"
+            phone = clean(o_data.get("phone") or c_data.get("phone"))
+
+
+            # 5. Адрес
+            has_new_address = False
+            raw_addr = o_data.get("address") or {}
+            dp = o_data.get("deliveryPoint") or {}
+            raw_addr_dp = dp.get("address") or {}
+
+            city = clean(raw_addr.get("city"))
+            if not city and isinstance(raw_addr.get("city"), dict):
+                city = clean(raw_addr.get("city").get("name"))
+            if not city:
+                city = clean(raw_addr_dp.get("city"))
+                if not city and isinstance(raw_addr_dp.get("city"), dict):
+                    city = clean(raw_addr_dp.get("city").get("name"))
+            
+            city = city or city_from_settings or "Тюмень"
+
+            # Экстракция компонентов для БД (сливаем данные из address и deliveryPoint)
+            house = clean(raw_addr.get("house")) or clean(raw_addr_dp.get("house"))
+            if house and all(char in "-. " for char in house): house = None
+            
+            flat = clean(raw_addr.get("flat")) or clean(raw_addr_dp.get("flat"))
+            if flat and all(char in "-. " for char in flat): flat = None
+            
+            entrance = clean(raw_addr.get("entrance")) or clean(raw_addr_dp.get("entrance"))
+            floor = clean(raw_addr.get("floor")) or clean(raw_addr_dp.get("floor"))
+            doorphone = clean(raw_addr.get("doorphone")) or clean(raw_addr_dp.get("doorphone"))
+            
+            s_obj = raw_addr.get("street")
+            street_name = s_obj.get("name") if isinstance(s_obj, dict) else (clean(s_obj) or None)
+            if not street_name:
+                s_obj_dp = raw_addr_dp.get("street")
+                street_name = s_obj_dp.get("name") if isinstance(s_obj_dp, dict) else (clean(s_obj_dp) or None)
+            
+            if street_name and all(char in "-. " for char in street_name): street_name = None
+
+            # 6. РАСЧЕТ ОПЛАТЫ И ЛОЯЛЬНОСТИ (для передачи в карточку клиента)
+            sum_total = Decimal(str(o_data.get("sum") or 0))
+            total_with_discount = Decimal(str(o_data.get("totalSum") or o_data.get("total") or sum_total))
+            disc_list = o_data.get("discounts") or o_data.get("concessions") or []
+            total_discount = sum([Decimal(str((d or {}).get("sum") or 0)) for d in disc_list if isinstance(d, dict)])
+            
+            loyalty_payload = {
+                "discount_total": o_data.get("discountTotal") or float(total_discount),
+                "discounts": disc_list,
+                "errors": o_data.get("loyaltyProgramErrors") or [],
+                "free_products": o_data.get("freeProducts") or [],
+                "lost_gift": o_data.get("lostGift") or []
+            }
+
+            # 7. ФОРМИРОВАНИЕ АДРЕСА
+            addr_fmt = (settings_db.address_format or "components") if settings_db else "components"
+            merged_addr_obj = {
+                "city": city,
+                "street": {"name": street_name} if street_name else None,
+                "house": house,
+                "flat": flat,
+                "entrance": entrance,
+                "floor": floor,
+                "doorphone": doorphone,
+                "line1": clean(raw_addr.get("line1")) or clean(raw_addr_dp.get("line1"))
+            }
+            
+            try:
+                delivery_address = self.format_address(merged_addr_obj, city=city, fmt=addr_fmt)
+            except TypeError as e:
+                logger.error(f"Address formatting failed: {e}. Falling back to default.")
+                delivery_address = self.format_address(merged_addr_obj, fmt=addr_fmt)
+            
+            # Если в итоге адрес пустой или "Самовывоз", проверяем другие поля
+            is_only_city = not delivery_address or delivery_address.strip() in [city, f"г. {city}", "г.Тюмень", "Тюмень"]
+            
+            if is_only_city:
+                # Если все еще пусто, пробуем deliveryAddress на внешнем уровне
+                addr_str = self.clean_str(o_data.get("deliveryAddress"))
+                if addr_str and len(addr_str) > len(city or "") + 2:
+                    delivery_address = addr_str
+                    has_new_address = True
+                else:
+                    delivery_address = "Самовывоз"
+            else:
+                has_new_address = True
+            
+            # Если в итоге все равно только город, но есть addressString на внешнем уровне - пробуем его
+            if not has_new_address:
+                addr_str = self.clean_str(o_data.get("deliveryAddress"))
+                if addr_str and len(addr_str) > len(city or "") + 2:
+                    delivery_address = addr_str
+                    has_new_address = True
+
+            # 8. Резервируем базовые данные (клиент будет создан/обновлен ниже в п.10 с полным составом заказа)
+            order_info_short = f"Заказ #{external_number or order_id_iiko[:8]}"
+
+            # 9. ОБРАБОТКА ПЛАТЕЖЕЙ
+            payments = o_data.get("payments") or []
+            total_paid = 0
+            pm_list_detailed = []
+            pm_list = []
+            
+            for p in payments:
+                if not isinstance(p, dict): continue
+                pt = p.get("paymentType") or {}
+                pn = pt.get("name") if isinstance(pt, dict) else clean(pt)
+                pk = (clean(p.get("paymentTypeKind") or p.get("kind") or "") or "").lower()
+                if not pn: pn = pk or "Тип оплаты"
+                
+                psum = float(p.get("sum") or 0)
+                
+                is_processed_externally = p.get("isProcessedExternally", False) or p.get("processedExternally", False)
+                is_prepay = p.get("isPrepay", False) or p.get("prepay", False)
+                status_payment = p.get("status", "").lower()
+                
+                # Считаем платеж проведенным
+                is_processed = bool(is_processed_externally or is_prepay or status_payment in ["processed", "closed", "success"] or pk in ["card", "online", "external"])
+                
+                if is_processed:
+                    total_paid += psum
+                
+                pm_list_detailed.append({
+                    "name": pn,
+                    "kind": pk,
+                    "sum": psum,
+                    "is_processed": is_processed
+                })
+                if pn: pm_list.append(pn)
+            
+            # Учитываем iiko Cloud processedPaymentsSum (если он больше того что мы спарсили)
+            processed_params = float(o_data.get("processedPaymentsSum") or 0)
+            if processed_params > total_paid:
+                total_paid = processed_params
+
+            # Считаем остаток
+            left_to_pay = max(Decimal('0.00'), total_with_discount - Decimal(str(total_paid)))
+            is_paid = (left_to_pay <= 0)
+            
+            payment_method = ", ".join(list(set(pm_list))) or "Не указан"
+            
+            # Фолбэк статуса закрытого заказа
+            if not is_paid and raw_status_lower in ("closed", "delivered"):
+                is_paid = True
+                left_to_pay = Decimal('0.00')
+
+            status_map = {
+                "unconfirmed": OrderStatus.unconfirmed, 
+                "waitapproval": OrderStatus.unconfirmed, 
+                "waitingforselection": OrderStatus.unconfirmed,
+                "awaitingconfirmation": OrderStatus.unconfirmed,
+                "accepted": OrderStatus.confirmed,
+                "waitcooking": OrderStatus.confirmed,
+                "readyforcooking": OrderStatus.confirmed,
+                "cooking": OrderStatus.cooking, 
+                "cookingstarted": OrderStatus.cooking,
+                "cookingfinished": OrderStatus.ready, 
+                "cookingcompleted": OrderStatus.ready,
+                "waiting": OrderStatus.ready, 
+                "ready": OrderStatus.ready,
+                "readyforpickup": OrderStatus.ready_for_pickup,
+                "onway": OrderStatus.delivering, 
+                "delivered": OrderStatus.delivered, 
+                "closed": OrderStatus.closed,
+                "cancelled": OrderStatus.cancelled
+            }
+            mapped_status = status_map.get(raw_status_lower, OrderStatus.new)
+
+            # Если заказ закрыт в iiko - он точно оплачен (для нашей CRM)
+            if not is_paid and mapped_status in (OrderStatus.closed, OrderStatus.delivered):
+                is_paid = True
+                left_to_pay = Decimal('0.00')
+                logger.info(f"Order {order_id_iiko}: Paid via status enforcement ('{mapped_status}')")
+
+            # 7. Курьер, тип и дополнительные данные
+            courier_name = "Не назначен"
+            ci = o_data.get("courierInfo") or {}
+            if isinstance(ci, dict):
+                c_obj = ci.get("courier") or {}
+                if isinstance(c_obj, dict):
+                    fn = clean(c_obj.get("firstName") or c_obj.get("name")) or ""
+                    ln = clean(c_obj.get("lastName")) or ""
+                    courier_name = " ".join(filter(None, [fn, ln])).strip() or clean(ci.get("courierName")) or "Не назначен"
+                    # Дополнительная защита от "None" в конце имени
+                    if " None" in courier_name:
+                        courier_name = courier_name.replace(" None", "").strip()
+
+            stype = (clean(o_data.get("orderServiceType")) or "").lower()
+            if not stype and isinstance(o_data.get("orderType"), dict):
+                stype = (clean((o_data.get("orderType") or {}).get("orderServiceType")) or "").lower()
+            
+            order_type = "Доставка"
+            if any(x in stype for x in ["pickup", "client", "самовывоз"]): 
+                order_type = "Самовывоз"
+            elif any(x in stype for x in ["common", "table", "зале", "ресторане"]): 
+                order_type = "В ресторане"
+
+            # Новые поля для полной информативности
+            source = clean(o_data.get("source")) or "iiko"
+            def parse_dt(dt_str):
+                if not dt_str:
+                    return None
+                try:
+                    # ISO 8601 с Z или смещением
+                    if 'Z' in dt_str or '+' in dt_str or '-' in dt_str[10:]:
+                        dt = datetime.fromisoformat(dt_str.replace('Z', '+00:00'))
+                        return dt.astimezone(timezone.utc).replace(tzinfo=None)
+                    # Наивное время - считаем локальным для заведения
+                    dt = datetime.fromisoformat(dt_str)
+                    return dt.replace(tzinfo=tz).astimezone(timezone.utc).replace(tzinfo=None)
+                except Exception as e:
+                    logger.error(f"Error parsing date {dt_str}: {e}")
+                    return None
+
+            di = o_data.get("deliveryInfo") or {}
+            expected_time = None
+            actual_time = None
+            if di:
+                expected_time = parse_dt(di.get("expectedDate") or di.get("completeBefore"))
+                actual_time = parse_dt(di.get("actualDate") or di.get("actualTime"))
+            
+            # Фолбэк на верхний уровень объекта заказа (iiko Cloud API v2)
+            if not expected_time:
+                expected_time = parse_dt(o_data.get("completeBefore"))
+            if not actual_time:
+                actual_time = parse_dt(o_data.get("actualDate"))
+            
+            # 8. Финальные флаги и сохранение
+            delay = di.get("delayMinutes")
+            admin_name = self.clean_str((o_data.get("conformationInfo") or {}).get("confirmedBy"))
+            if not admin_name:
+                admin_name = self.clean_str((o_data.get("confirmationInfo") or {}).get("confirmedBy"))
+
+            # 8. Сохранение
+            order = session.exec(select(Order).where(Order.iiko_order_id == order_id_iiko)).first()
+            
+            # Сохраняем старые значения для уведомлений об изменениях
+            old_amount = float(getattr(order, 'total_with_discount', 0)) if order else 0
+            old_items_count = len(getattr(order, 'order_items_details', []) or []) if order else 0
+            old_time = getattr(order, 'expected_time', None) if order else None
+            old_address = getattr(order, 'delivery_address', None) if order else None
+
+            # Определяем филиал (branch) по terminalGroupId
+            terminal_group_id = o_data.get("terminalGroupId")
+            branch_id = 1 # Fallback
+            terminal_group_name = None
+            
+            if terminal_group_id:
+                branch = session.exec(select(Branch).where(Branch.iiko_terminal_id == terminal_group_id)).first()
+                if branch:
+                    branch_id = branch.id
+                    terminal_group_name = branch.name
+            
+            if not order:
+                is_new = True
+                order = Order(iiko_order_id=order_id_iiko, branch_id=branch_id)
+                order.iiko_creation_time = iiko_creation_time
+                order.status_history = [{"status": mapped_status, "time": current_time_tz.isoformat(), "comment": "Синхронизирован"}]
+            else:
+                # Если заказ уже есть, обновляем branch_id если он изменился
+                order.branch_id = branch_id
+                if order.status != mapped_status:
+                    is_status_changed = True
+            
+            # --- ЛОГИКА ОПРЕДЕЛЕНИЯ ASAP / ПРЕДЗАКАЗ ---
+            raw_comment = self.clean_str(o_data.get("comment"))
+            comment_lower = (raw_comment or "").lower()
+            
+            # Базовые значения из iiko (приоритет - флагу isAsap)
+            final_is_asap = bool(o_data.get("isAsap", True))
+            
+            # 1. Если флаг isAsap явно False - это предзаказ
+            if o_data.get("isAsap") is False:
+                final_is_asap = False
+            
+            # 2. Если есть время готовности и оно значительно отличается от времени создания
+            if expected_time and iiko_creation_time:
+                diff_mins = (expected_time - iiko_creation_time).total_seconds() / 60
+                # Если разница более 90 минут - скорее всего это предзаказ (на время)
+                if diff_mins > 90:
+                    final_is_asap = False
+            
+            # 3. Дополнительные проверки по комментарию (если флаг все еще True)
+            if final_is_asap:
+                if "на время" in comment_lower or "предзаказ" in comment_lower:
+                    final_is_asap = False
+            
+            # 4. Если в комментарии НЕТ ключевых слов предзаказа, но есть другой текст, 
+            # и при этом время доставки близко к времени создания - оставляем ASAP
+            elif raw_comment and "на время" not in comment_lower and "предзаказ" not in comment_lower:
+                if expected_time and iiko_creation_time:
+                    diff_mins = (expected_time - iiko_creation_time).total_seconds() / 60
+                    if diff_mins < 90:
+                        final_is_asap = True
+
+            # 3. Если время готовности изменилось в процессе (сравниваем с уже существующим заказом в БД)
+            if order and order.expected_time and expected_time:
+                # Безопасное вычитание naive/aware
+                oe = order.expected_time.replace(tzinfo=None) if order.expected_time.tzinfo else order.expected_time
+                ne = expected_time.replace(tzinfo=None) if expected_time.tzinfo else expected_time
+                if abs((oe - ne).total_seconds()) > 60:
+                    final_is_asap = False
+
+            # Финальные флаги
+            is_asap = final_is_asap
+            is_on_time = not final_is_asap
+
+            # Восстанавливаем логику истории статусов
+            if order.id and order.status != mapped_status:
+                h = list(order.status_history or [])
+                h.append({"status": mapped_status, "time": current_time_tz.isoformat(), "comment": f"iiko: {raw_status}"})
+                order.status_history = h
+                sql_flag_modified(order, "status_history")
+
+            # Маппинг всех полей
+            order.status = mapped_status
+            order.external_number = external_number or order.external_number
+            order.customer_name = full_customer_name
+            order.customer_phone = phone
+            order.courier_name = courier_name
+            
+            # Обновляем адресные поля только если в новом пакете есть реальный адрес
+            # ИЛИ если в БД адрес еще не заполнен (город не считается заполненным адресом)
+            db_addr_empty = not order.delivery_address or order.delivery_address == city
+            if has_new_address or db_addr_empty:
+                order.delivery_address = delivery_address or order.delivery_address or city
+                order.city = city or order.city
+                order.street = street_name or order.street
+                order.house = house or order.house
+                order.flat = flat or order.flat
+                order.entrance = entrance or order.entrance
+                order.floor = floor or order.floor
+                order.doorphone = doorphone or order.doorphone
+            
+            order.comment = clean(o_data.get("comment")) or None
+            order.total_amount, order.total_with_discount, order.total_discount = sum_total, total_with_discount, total_discount
+            order.is_paid, order.payment_method, order.order_type = is_paid, payment_method, order_type
+            
+            # Терминальная группа
+            order.terminal_group_id = terminal_group_id or order.terminal_group_id
+            order.terminal_group_name = terminal_group_name or order.terminal_group_name
+            
+            # Доп. поля
+            order.source = source
+            order.iiko_creation_time = iiko_creation_time or order.iiko_creation_time
+            order.expected_time = expected_time or order.expected_time
+            order.actual_time = actual_time or order.actual_time
+            order.is_on_time = is_on_time
+            order.is_asap = is_asap
+            order.delay_minutes = delay
+            order.admin_name = admin_name or order.admin_name
+
+            # --- ОПРЕДЕЛЕНИЕ ЗОНЫ ДОСТАВКИ ПО АДРЕСУ ---
+            # 1. Проверяем координаты напрямую из iiko (deliveryPoint)
+            coords_iiko = dp.get("coordinates", {})
+            lat_iiko = coords_iiko.get("latitude")
+            lng_iiko = coords_iiko.get("longitude")
+            
+            # Если это доставка, пытаемся определить зону
+            if order_type == "Доставка":
+                logger.info(f"Auto-detecting zone for order {order_id_iiko}")
+                
+                # Приоритет 1: Координаты из iiko
+                if lat_iiko and lng_iiko and abs(float(lat_iiko)) > 1.0:
+                    try:
+                        from app.services.yandex_service import yandex_service
+                        order.latitude = float(lat_iiko)
+                        order.longitude = float(lng_iiko)
+                        zone = await yandex_service.resolve_zone_for_point(order.latitude, order.longitude, session)
+                        if zone:
+                            order.resolved_delivery_zone_id = zone.id
+                            order.delivery_zone = zone.name
+                            logger.info(f"Order {order_id_iiko}: Resolved zone {zone.name} via iiko coordinates")
+                    except Exception as ze:
+                        logger.error(f"Error resolving zone from iiko coordinates: {ze}")
+
+                # Приоритет 2: Геокодер (если зона еще не определена)
+                if not order.resolved_delivery_zone_id:
+                    # Пытаемся определить зону только если есть адресные данные
+                    # Теперь мы более лояльны к компонентам: если есть хотя бы строка адреса
+                    full_addr_str = delivery_address if (delivery_address and delivery_address != "Самовывоз") else None
+                    
+                    if full_addr_str or (city and street_name):
+                        try:
+                            # Если компонентов нет, но есть строка - iiko_service.check_address_zone 
+                            # все равно попробует геокодировать (мы передадим ей компоненты, даже если они пустые)
+                            zone_data = await iiko_service.check_address_zone(
+                                city=city or city_from_settings or "Тюмень",
+                                street=street_name or "",
+                                house=house or "",
+                                api_login=settings_db.api_login if settings_db else None
+                            )
+                            
+                            if zone_data:
+                                if zone_data.get("zone"):
+                                    order.delivery_zone = zone_data.get("zone")
+                                if zone_data.get("zone_id"):
+                                    order.resolved_delivery_zone_id = zone_data.get("zone_id")
+                                if zone_data.get("coordinates"):
+                                    order.latitude = zone_data["coordinates"].get("lat")
+                                    order.longitude = zone_data["coordinates"].get("lng")
+                                
+                                if zone_data.get("zone"):
+                                    logger.info(f"Order {order_id_iiko}: Resolved zone {order.delivery_zone} via geocoder")
+                        except Exception as e:
+                            logger.warning(f"Could not auto-detect zone via geocoder: {e}")
+            
+            elif order_type == "Самовывоз":
+                order.delivery_zone = "самовывоз"
+                order.resolved_delivery_zone_id = None
+                logger.info(f"Order {order_id_iiko}: Type is Pickup, skipping zone detection")
+            # ---------------------------------------------
+
+            # --- НОВАЯ ЛОГИКА СОСТАВА ЗАКАЗА (с именами и защитой от затирания) ---
+            
+            if "items" in o_data and isinstance(o_data["items"], list) and len(o_data["items"]) > 0:
+                raw_items = o_data.get("items", [])
+                enriched_items = []
+                
+                product_ids = []
+                for item in raw_items:
+                    if not item: continue
+                    pid = (
+                        item.get("productId") or 
+                        item.get("product", {}).get("id") or 
+                        item.get("primaryComponent", {}).get("product", {}).get("id")
+                    )
+                    if pid: 
+                        product_ids.append(pid)
+                        if not item.get("productId"): item["productId"] = pid
+                        
+                    for mod in (item.get("modifiers") or []):
+                        if not mod: continue
+                        mpid = (
+                            mod.get("productId") or 
+                            mod.get("product", {}).get("id") or 
+                            mod.get("primaryComponent", {}).get("product", {}).get("id")
+                        )
+                        if mpid: 
+                            product_ids.append(mpid)
+                            if not mod.get("productId"): mod["productId"] = mpid
+                        
+                # Достаем названия из локальной базы
+                db_products = session.exec(select(Product).where(Product.iiko_id.in_(product_ids))).all()
+                prod_map = {p.iiko_id: p.name for p in db_products}
+
+                # Достаем старые названия из текущего состояния заказа
+                old_names_map = {}
+                if order.order_items_details:
+                    for old_item in order.order_items_details:
+                        old_pid = (
+                            old_item.get("productId") or 
+                            old_item.get("id") or 
+                            old_item.get("product", {}).get("id") or 
+                            old_item.get("primaryComponent", {}).get("product", {}).get("id")
+                        )
+                        old_name = old_item.get("name")
+                        if old_pid and old_name and old_name != "Неизвестный товар":
+                            old_names_map[old_pid] = old_name
+                        
+                        modifiers_list = old_item.get("modifiers") or []
+                        for old_mod in modifiers_list:
+                            old_mpid = (
+                                old_mod.get("productId") or 
+                                old_mod.get("id") or 
+                                old_mod.get("product", {}).get("id") or 
+                                old_mod.get("primaryComponent", {}).get("product", {}).get("id")
+                            )
+                            old_mname = old_mod.get("name")
+                            if old_mpid and old_mname and old_mname != "Модификатор":
+                                old_names_map[old_mpid] = old_mname
+                
+                for item in raw_items:
+                    enriched_item = item.copy()
+                    pid = item.get("productId")
+                    
+                    # Приоритет имени: product.name -> primaryComponent.product.name -> productName -> БД -> История -> Fallback
+                    if not enriched_item.get("name") or enriched_item.get("name") == "Неизвестный товар":
+                        enriched_item["name"] = (
+                            enriched_item.get("product", {}).get("name") or 
+                            enriched_item.get("primaryComponent", {}).get("product", {}).get("name") or 
+                            enriched_item.get("productName") or 
+                            prod_map.get(pid) or 
+                            old_names_map.get(pid) or 
+                            "Неизвестный товар"
+                        )
+                    if not enriched_item.get("sum"):
+                        enriched_item["sum"] = float(enriched_item.get("amount", 0)) * float(enriched_item.get("price", 0))
+                        
+                    enriched_mods = []
+                    for mod in (item.get("modifiers") or []):
+                        if not mod: continue
+                        emod = mod.copy()
+                        mpid = mod.get("productId")
+                        
+                        if not emod.get("name") or emod.get("name") == "Неизвестный товар":
+                            emod["name"] = (
+                                emod.get("product", {}).get("name") or 
+                                emod.get("primaryComponent", {}).get("product", {}).get("name") or 
+                                prod_map.get(mpid) or 
+                                old_names_map.get(mpid) or 
+                                "Неизвестный товар"
+                            )
+                        
+                        if not emod.get("sum"):
+                            emod["sum"] = float(emod.get("amount", 0)) * float(emod.get("price", 0))
+                            
+                        enriched_mods.append(emod)
+                    
+                    enriched_item["modifiers"] = enriched_mods
+                    enriched_items.append(enriched_item)
+
+                order.order_items_details = enriched_items
+                sql_flag_modified(order, "order_items_details")
+            else:
+                logger.info(f"Order {order_id_iiko}: No valid items in webhook payload, skipping items update to prevent data loss")
+
+            order.base_amount = sum_total
+            order.left_to_pay = left_to_pay
+            order.payments_details = {"items": pm_list_detailed, "total_paid": total_paid}
+            order.discounts_details = {"items": disc_list}
+            order.updated_at = datetime.now(timezone.utc)
+            
+            sql_flag_modified(order, "order_items_details")
+            sql_flag_modified(order, "discounts_details")
+            sql_flag_modified(order, "payments_details")
+            session.add(order)
+
+            # --- АВТО-СОЗДАНИЕ КАРТОЧКИ КЛИЕНТА ---
+            if phone:
+                try:
+                    # Генерируем состав заказа для заметок
+                    items_list = []
+                    for item in (order.order_items_details or []):
+                        name = item.get("name", "Товар")
+                        amount = item.get("amount", 1)
+                        items_list.append(f"{name} x{amount}")
+                    order_items_text = ", ".join(items_list)
+                    
+                    # Формируем расширенную информацию для заметок
+                    display_time = iiko_creation_time or datetime.now(timezone.utc).replace(tzinfo=None)
+                    full_order_info = f"Заказ #{ext_num or 'б/н'} от {display_time.strftime('%d.%m.%Y %H:%M')}"
+                    full_order_info += f" на сумму {total_with_discount:.0f} руб."
+                    
+                    # Добавляем адрес в описание
+                    if delivery_address:
+                        full_order_info += f"\nАдрес: {delivery_address}"
+                    
+                    if order_items_text:
+                        # Ограничиваем длину
+                        if len(order_items_text) > 300:
+                            order_items_text = order_items_text[:297] + "..."
+                        full_order_info += f"\nСостав: {order_items_text}"
+                    
+                    # Добавляем инфо о подарках в расширенное описание состава
+                    if loyalty_payload.get("free_products"):
+                        full_order_info += f"\nПодарки: {', '.join(loyalty_payload['free_products'])}"
+                    if loyalty_payload.get("errors"):
+                        full_order_info += f"\nОшибки лояльности: {', '.join(loyalty_payload['errors'])}"
+
+                    await self.ensure_customer_from_order(
+                        session=session,
+                        phone=phone,
+                        name=c_first,
+                        surname=c_last,
+                        order_info=full_order_info,
+                        order_date=iiko_creation_time,
+                        order_status=mapped_status,
+                        loyalty_data=loyalty_payload,
+                        order_id_iiko=order_id_iiko,
+                        city=city,
+                        street=street_name,
+                        house=house,
+                        flat=flat,
+                        total_sum=float(total_with_discount)
+                    )
+                except Exception as cust_err:
+                    logger.error(f"Error in auto-creating customer for order {order_id_iiko}: {cust_err}")
+
+            session.commit()
+            logger.info(f"Order {order_id_iiko} ({external_number}) synced. Status={mapped_status}, Paid={is_paid}")
+
+            # Проверка изменений для уведомлений (только для существующих заказов)
+            is_amount_changed = not is_new and abs(old_amount - float(total_with_discount)) > 0.01
+            is_address_changed = not is_new and old_address != order.delivery_address and has_new_address
+            is_items_changed = not is_new and old_items_count != len(order.order_items_details or [])
+            
+            is_time_changed = False
+            if not is_new and old_time and order.expected_time:
+                try:
+                    ot = old_time.replace(tzinfo=None)
+                    nt = order.expected_time.replace(tzinfo=None)
+                    if abs((ot - nt).total_seconds()) > 60:
+                        is_time_changed = True
+                except: pass
+
+            # Повторная синхронизация гостя при завершении или отмене заказа для обновления статистики
+            if phone and mapped_status in (OrderStatus.closed, OrderStatus.cancelled, OrderStatus.delivered):
+                try:
+                    from app.tasks.customer_tasks import sync_single_customer_task
+                    sync_single_customer_task.delay(phone)
+                    logger.info(f"Triggered re-sync for customer {phone} due to order status {mapped_status}")
+                except Exception as e:
+                    logger.warning(f"Failed to trigger re-sync for customer {phone}: {e}")
+
+            # Отправка уведомлений в VK
+            if is_new:
+                await self._send_order_vk_notification(order, "order_new")
+            elif is_status_changed:
+                from app.models.order import OrderStatus
+                event = "order_cancelled" if mapped_status == OrderStatus.cancelled else "order_status_update"
+                await self._send_order_vk_notification(order, event)
+            
+            # Уведомления об изменениях
+            if not is_new:
+                if is_amount_changed:
+                    await self._send_order_vk_notification(order, "order_amount_changed")
+                if is_items_changed:
+                    await self._send_order_vk_notification(order, "order_items_changed")
+                if is_time_changed:
+                    await self._send_order_vk_notification(order, "order_time_changed")
+                if is_address_changed:
+                    await self._send_order_vk_notification(order, "order_address_changed")
+            
+        except Exception as e:
+            import traceback
+            logger.error(f"CRITICAL Error processing order {iiko_order_data.get('id', 'unknown')}: {e}")
+            logger.error(f"Traceback: {traceback.format_exc()}")
+            # Мы не делаем rollback полностью, чтобы один кривой заказ не останавливал весь цикл, 
+            # но и не коммитим частично сломанные данные.
+            try:
+                session.rollback()
+            except:
+                pass
+
+    async def send_order_notification(self, order, event_type: str):
+        """Публичный метод для отправки уведомлений о заказах"""
+        await self._send_order_vk_notification(order, event_type)
+
+    async def _send_order_vk_notification(self, order, event_type: str):
+        """Вспомогательный метод для отправки уведомлений о заказах в ВК"""
+        try:
+            from app.models.order import OrderStatus
+            status_text = {
+                OrderStatus.new: "Новый заказ",
+                OrderStatus.unconfirmed: "Не подтвержден",
+                OrderStatus.confirmed: "Подтвержден",
+                OrderStatus.cooking: "Готовится",
+                OrderStatus.ready: "Готов",
+                OrderStatus.ready_for_pickup: "Готов к выдаче",
+                OrderStatus.delivering: "В пути",
+                OrderStatus.delivered: "Доставлен",
+                OrderStatus.closed: "Закрыт",
+                OrderStatus.cancelled: "ОТМЕНЕН ❌"
+            }.get(order.status, str(order.status))
+
+            # Формируем контекст данных для шаблона
+            order_items_text = ""
+            # Сначала пробуем из order_items_details (JSON), так как там самые свежие данные из вебхука
+            if order and hasattr(order, 'order_items_details') and order.order_items_details:
+                items_list = []
+                for item in order.order_items_details:
+                    name = item.get('name', 'Товар')
+                    amount = item.get('amount', 1)
+                    price = item.get('price', 0)
+                    items_list.append(f"• {name} x{amount} ({float(price)*float(amount):.0f} ₽)")
+                order_items_text = "\n".join(items_list)
+            # Фолбэк на связанные объекты
+            elif order and hasattr(order, 'items') and order.items:
+                items_list = []
+                for item in order.items:
+                    items_list.append(f"• {item.product_name} x{item.quantity} ({float(item.total):.0f} ₽)")
+                order_items_text = "\n".join(items_list)
+
+            # Создаем расширенный объект контекста с отформатированными полями
+            # Чтобы в шаблоне можно было писать {{ order.total_amount }} и получать красивую строку
+            formatted_order = {
+                "external_number": getattr(order, 'external_number', '---'),
+                "total_amount": f"{float(getattr(order, 'total_amount', 0)):.0f}",
+                "total_with_discount": f"{float(getattr(order, 'total_with_discount', 0)):.0f}",
+                "total_discount": f"{float(getattr(order, 'total_discount', 0)):.0f}",
+                "discount_sum": f"{float(getattr(order, 'total_discount', 0)):.0f}",
+                "final_price": f"{float(getattr(order, 'total_with_discount', 0)):.0f}",
+                "bonus_spent": f"{float(getattr(order, 'bonus_spent', 0)):.0f}",
+                "bonus_accrued": f"{float(getattr(order, 'bonus_accrued', 0)):.0f}",
+                "delivery_address": getattr(order, 'delivery_address', '---'),
+                "city": getattr(order, 'city', ''),
+                "street": getattr(order, 'street', ''),
+                "house": getattr(order, 'house', ''),
+                "flat": getattr(order, 'flat', ''),
+                "customer_name": getattr(order, 'customer_name', 'Гость'),
+                "customer_phone": getattr(order, 'customer_phone', '---'),
+                "comment": getattr(order, 'comment', ''),
+                "status": getattr(order, 'status', ''),
+                "order_type": getattr(order, 'order_type', '---'),
+                "payment_method": getattr(order, 'payment_method', '---'),
+                "courier_name": getattr(order, 'courier_name', '---'),
+                "delivery_zone": getattr(order, 'delivery_zone', '---'),
+                "expected_time": getattr(order, 'expected_time', '').strftime('%d.%m %H:%M') if getattr(order, 'expected_time', None) else '---',
+                "items_text": order_items_text,
+                "items_summary": order_items_text, # Синоним для удобства
+                "map_yandex": f"https://yandex.ru/maps/?text={getattr(order, 'delivery_address', '')}".replace(' ', '+'),
+                "map_2gis": f"https://2gis.ru/search/{getattr(order, 'delivery_address', '')}".replace(' ', '+')
+            }
+
+            if order.latitude and order.longitude:
+                formatted_order["map_yandex"] = f"https://yandex.ru/maps/?pt={order.longitude},{order.latitude}&z=18&l=map"
+                formatted_order["map_2gis"] = f"https://2gis.ru/geo/{order.longitude},{order.latitude}"
+
+            context = {
+                "order": formatted_order,
+                "customer": order.customer if hasattr(order, 'customer') else None
+            }
+
+            # Стандартное сообщение (fallback), если шаблон не будет найден
+            fallback_msg = [
+                f"🔔 {status_text} #{formatted_order['external_number']}",
+                f"Сумма: {formatted_order['total_with_discount']} руб.",
+                f"Клиент: {formatted_order['customer_name']}",
+                f"Тип: {formatted_order['order_type']}",
+                f"Адрес: {formatted_order['delivery_address']}"
+            ]
+            
+            if formatted_order['comment']:
+                fallback_msg.append(f"Коммент: {formatted_order['comment']}")
+                
+            if formatted_order['courier_name'] and formatted_order['courier_name'] != "Не назначен":
+                fallback_msg.append(f"Курьер: {formatted_order['courier_name']}")
+
+            if order_items_text:
+                fallback_msg.append("\nСостав заказа:")
+                fallback_msg.append(order_items_text)
+
+
+            await vk_notification_router.dispatch_event(
+                event_type=event_type, 
+                message_text="\n".join(fallback_msg),
+                context_data=context
+            )
+        except Exception as e:
+            logger.error(f"Error sending VK notification: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
+
+    async def _send_shift_vk_notification(self, shift, employee, event_type: str):
+        """Вспомогательный метод для уведомлений о сменах"""
+        try:
+            status_text = "ОТКРЫТА" if event_type == "shift_open" else "ЗАКРЫТА"
+            
+            # Формируем контекст данных для шаблона
+            context = {
+                "shift": shift,
+                "employee": employee
+            }
+
+            # Fallback сообщение
+            msg = [
+                f"👤 Смена {status_text}",
+                f"Сотрудник: {employee.name}",
+                f"Роль: {employee.role or '---'}",
+                f"Начало: {shift.date_open.strftime('%d.%m %H:%M')}"
+            ]
+            if shift.date_close:
+                msg.append(f"Конец: {shift.date_close.strftime('%d.%m %H:%M')}")
+                msg.append(f"Отработано: {shift.work_hours} ч.")
+            
+            await vk_notification_router.dispatch_event(
+                event_type=event_type, 
+                message_text="\n".join(msg),
+                context_data=context
+            )
+        except Exception as e:
+            logger.error(f"Error sending VK shift notification: {e}")
+
+    async def sync_orders(self, session: Session, hours: int = 24):
+        from app.models.order import Order, OrderStatus
+        """
+        Массовая загрузка и синхронизация заказов.
+        Используется для первоначальной загрузки (на случай пропуска вебхуков).
+        """
+        log = SyncLog(sync_type="orders", status="running")
         session.add(log)
         session.commit()
         
-        settings_db = session.exec(select(IikoSettings)).first()
-        if not settings_db or not settings_db.external_menu_id:
-            log.status = "error"
-            log.details = "External Menu ID не настроен"
+        try:
+            settings_db = session.exec(select(IikoSettings)).first()
+            if not settings_db or not settings_db.organization_id:
+                logger.warning("Iiko settings not found, sync aborted")
+                log.status = "error"
+                log.details = "Настройки Iiko не найдены"
+                session.add(log)
+                session.commit()
+                return
+                
+            org_id = settings_db.organization_id
+        
+            # Определяем интервал на основе часового пояса из настроек
+            from app.core.datetime_utils import get_tz_name, get_local_now
+            tz_name = get_tz_name(session)
+            now = get_local_now(tz_name)
+            
+            # Охватываем диапазон: 24 часа назад и 24 часа вперед (итого 48 часов возможного разброса)
+            date_from = now - timedelta(hours=24)
+            date_to = now + timedelta(hours=24)
+            
+            logger.info(f"Mass sync starting: orders from {date_from} to {date_to} for org {org_id}")
+            
+            all_ids = set()
+
+            # 0. Инкрементальная синхронизация по ревизиям (быстрый catch-up пропущенных вебхуков)
+            # Мы вызываем ее, так как она наиболее надежна для получения изменений без перебора всех дат.
+            try:
+                await self.sync_orders_by_revision(session, org_id)
+            except Exception as rev_err:
+                logger.error(f"Revision sync failed, falling back to date polling: {rev_err}")
+
+            # 1. Из iiko Cloud (по датам доставки) - как запасной механизм
+            # Мы разбиваем использование интервалов на чанки, так как это снижает вероятность ошибки TOO_MANY_DATA_REQUESTED
+            logger.info(f"Starting robust polling in 2-hour chunks for period {date_from} - {date_to}")
+            
+            cloud_orders = []
+            chunk_start = date_from
+            while chunk_start < date_to:
+                chunk_end = chunk_start + timedelta(hours=2)
+                if chunk_end > date_to:
+                    chunk_end = date_to
+                    
+                try:
+                    logger.debug(f"Polling chunk: {chunk_start} - {chunk_end}")
+                    batch = await self.iiko.get_orders_by_date(
+                        date_from=chunk_start,
+                        date_to=chunk_end,
+                        organization_id=org_id,
+                        api_login=settings_db.api_login,
+                        log_error=True # Включаем логирование, чтобы видеть подробности ошибок
+                    )
+                    if batch:
+                        logger.info(f"Fetched {len(batch)} orders for period {chunk_start} - {chunk_end}")
+                        cloud_orders.extend(batch)
+                    
+                    # Небольшая пауза между чанками для безопасности
+                    await asyncio.sleep(0.5)
+                except Exception as chunk_err:
+                    logger.error(f"Failed to fetch orders chunk ({chunk_start} - {chunk_end}): {chunk_err}")
+                    if "429" in str(chunk_err):
+                        await asyncio.sleep(5.0)
+                
+                chunk_start = chunk_end
+
+            for o in cloud_orders:
+                if o.get("id"): all_ids.add(o["id"])
+            logger.info(f"Found {len(cloud_orders)} orders in Cloud (via date polling)")
+                
+            # 2. Из iiko Resto (если настроен)
+            if settings_db.resto_url and settings_db.resto_login:
+                try:
+                    resto_ids = await self.iiko.get_resto_delivery_history(
+                        date_from=date_from,
+                        date_to=date_to,
+                        resto_url=settings_db.resto_url,
+                        resto_login=settings_db.resto_login,
+                        resto_password=settings_db.resto_password,
+                        log_error=False
+                    )
+                    for rid in resto_ids: all_ids.add(rid)
+                    logger.info(f"Found {len(resto_ids)} orders in Resto")
+                except Exception as e:
+                    logger.error(f"Failed to fetch Resto orders: {e}")
+                    
+            # 3. Дополнительно: Проверяем все активные заказы из нашей БД
+            # Это крайне важно, если iiko Cloud API по датам возвращает некорректные данные или вебхуки пропущены
+            try:
+                # Включаем все статусы, которые не являются финальными (закрыт/отменен)
+                active_statuses = [
+                    OrderStatus.new, 
+                    OrderStatus.unconfirmed, 
+                    OrderStatus.confirmed, 
+                    OrderStatus.preparing, 
+                    OrderStatus.cooking, 
+                    OrderStatus.ready, 
+                    OrderStatus.ready_for_pickup, 
+                    OrderStatus.delivering, 
+                    OrderStatus.delivered
+                ]
+                
+                # Все статусы переводим в верхний регистр на всякий случай, если в БД записаны значения
+                active_strings = [s.value for s in active_statuses] + [s.value.upper() for s in active_statuses]
+                
+                query = select(Order).where(Order.status.in_(active_strings))
+                db_active_orders = session.exec(query).all()
+                
+                if db_active_orders:
+                    logger.info(f"Checking {len(db_active_orders)} active orders from local database: {[o.id for o in db_active_orders]}")
+                    for db_order in db_active_orders:
+                        if db_order.iiko_order_id:
+                            all_ids.add(str(db_order.iiko_order_id))
+                else:
+                    logger.info("No active orders found in local database for extra sync check.")
+                
+            except Exception as e:
+                logger.error(f"Failed to fetch active orders from DB for sync: {e}")
+                import traceback
+                logger.error(traceback.format_exc())
+
+            logger.info(f"Syncing {len(all_ids)} unique orders...")
+            
+            success_count = 0
+            for order_id in all_ids:
+                try:
+                    # Добавляем небольшую задержку, чтобы не превышать лимиты API (429) 
+                    if success_count > 0 and success_count % 15 == 0:
+                        await asyncio.sleep(0.5)
+
+                    # Используем sync_order_by_id для каждого заказа
+                    # Мы не хотим, чтобы ошибка в одном заказе прервала весь цикл
+                    res = await self.sync_order_by_id(session, order_id, org_id)
+                    if res: success_count += 1
+                except Exception as e:
+                    logger.error(f"Failed to sync order {order_id}: {e}")
+                    
+            logger.info(f"Mass sync finished. Total: {len(all_ids)}, Success: {success_count}")
+            log.status = "success"
+            log.processed_count = success_count
+            log.details = f"Успешно синхронизировано {success_count} заказов из {len(all_ids)}"
+            session.add(log)
             session.commit()
-            raise Exception("External Menu ID не настроен в settings iiko")
+        
+        except Exception as e:
+            logger.error(f"Error in mass order sync: {e}", exc_info=True)
+            log.status = "error"
+            log.details = str(e)
+            session.add(log)
+            session.commit()
+
+    async def sync_orders_by_revision(self, session: Session, organization_id: str):
+        """
+        Синхронизация заказов по ревизиям (catch-up).
+        Позволяет получить все измененные заказы, которые были пропущены вебхуками, независимо от даты.
+        """
+        # 0. Защита от слишком частых вызовов (не чаще чем раз в 20 секунд)
+        now = datetime.now()
+        last_sync = self._last_rev_sync.get(organization_id)
+        if last_sync and (now - last_sync).total_seconds() < 20:
+            logger.debug(f"Revision sync for {organization_id} skipped (too soon)")
+            return
+        self._last_rev_sync[organization_id] = now
+
+        settings_db = session.exec(select(IikoSettings)).first()
+        if not settings_db: return
+        
+        current_revision = settings_db.last_order_revision or 0
+        logger.info(f"Starting revision sync from revision {current_revision} for org {organization_id}")
+        
+        try:
+            # 1. Если ревизия 0 или пустая - запускаем 'Cold Start' восстановление
+            if current_revision == 0:
+                logger.warning(f"Revision 0 detected. Starting 'Cold Start' recovery for org {organization_id}...")
+                
+                # а) Принудительная синхронизация за последние 48 часов, чтобы не потерять данные
+                await self.sync_orders(session, hours=48)
+                
+                # б) Получаем актуальную ревизию из Iiko для дальнейших инкрементальных обновлений
+                new_max = await self.iiko.get_max_revision(
+                    organization_id=organization_id,
+                    api_login=settings_db.api_login
+                )
+                if new_max:
+                    settings_db.last_order_revision = new_max
+                    session.add(settings_db)
+                    session.commit()
+                    logger.info(f"Cold Start successful. New baseline revision: {new_max}")
+                return
+
+            # 2. Запрашиваем изменения с последней ревизии
+            data = await self.iiko.get_deliveries_by_revision(
+                organization_id=organization_id,
+                initial_revision=current_revision,
+                api_login=settings_db.api_login
+            )
+            
+            # iiko_service.get_deliveries_by_revision возвращает уже распакованный ordersByOrganizations
+            orders = data.get("orders", [])
+            max_revision = data.get("maxRevision")
+            
+            if not orders:
+                logger.info("No new orders found by revision sync")
+                if max_revision and max_revision > current_revision:
+                    settings_db.last_order_revision = max_revision
+                    session.add(settings_db)
+                    session.commit()
+                    logger.info(f"Revision updated to {max_revision} even with no orders")
+                return
+
+            logger.info(f"Found {len(orders)} orders via revision sync. Processing...")
+            
+            count = 0
+            for order_data in orders:
+                try:
+                    # Обрабатываем каждый заказ
+                    await self.process_iiko_order(session, order_data, organization_id)
+                    count += 1
+                except Exception as e:
+                    logger.error(f"Error processing order from revision: {e}")
+            
+            # Обновляем ревизию в настройках
+            if max_revision:
+                settings_db.last_order_revision = max_revision
+                session.add(settings_db)
+                session.commit()
+                logger.info(f"Revision sync finished. New revision: {max_revision}, Processed: {count}")
+                
+        except httpx.HTTPStatusError as e:
+            # 3. Обрабатываем ошибку "TOO_OLD_REVISION" (Код 400)
+            if e.response.status_code == 400:
+                try:
+                    error_data = e.response.json()
+                    if error_data.get("error") == "TOO_OLD_REVISION":
+                        logger.warning(f"Revision {current_revision} is too old. Starting 'Cold Start' recovery...")
+                        
+                        # Сбрасываем ревизию, чтобы при следующем вызове (или рекурсивном) сработал Cold Start
+                        settings_db.last_order_revision = 0
+                        session.add(settings_db)
+                        session.commit()
+                        
+                        # Запускаем Cold Start немедленно
+                        await self.sync_orders_by_revision(session, organization_id)
+                        return 
+                except Exception as parse_err:
+                    logger.error(f"Failed to handle 400 error: {parse_err}")
+            
+            logger.error(f"Iiko API error during revision sync: {e}")
+        except Exception as e:
+            logger.error(f"Unexpected error in sync_orders_by_revision: {e}")
+
+    async def sync_order_by_id(self, session: Session, order_id: str, organization_id: str) -> bool:
+        """Синхронизация конкретного заказа по ID (вызывается вебхуками)"""
+        settings_db = session.exec(select(IikoSettings)).first()
+        api_login = settings_db.api_login if settings_db else None
+        try:
+            order_data = await self.iiko.get_order_by_id(order_id, organization_id, api_login=api_login)
+            if order_data:
+                await self.process_iiko_order(session, order_data, organization_id)
+                return True
+        except Exception as e:
+            logger.error(f"Failed to sync order {order_id}: {e}")
+        return False
+
+    async def sync_delivery_restrictions(self, session: Session) -> Dict[str, Any]:
+        """Синхронизация зон и условий доставки из iiko Cloud"""
+        settings_db = session.exec(select(IikoSettings)).first()
+        if not settings_db or not settings_db.organization_id:
+            return {"error": "Iiko not configured"}
             
         try:
-            menu_data = await iiko_service.get_external_menu_by_id(
-                settings_db.external_menu_id,
+            data = await iiko_service.get_delivery_restrictions(
                 api_login=settings_db.api_login,
                 organization_id=settings_db.organization_id
             )
             
-            categories_synced = 0
-            for cat_data in menu_data.get("itemCategories", []):
-                cat_iiko_id = cat_data.get("id")
-                cat_name = cat_data.get("name", "")
-                cat_image_id = cat_data.get("imageId")
-                items_in_cat = cat_data.get("items", [])
+            # Обработка ответа iiko может быть {"deliveryRestrictions": [...]} или просто списком
+            restrictions_data = []
+            if isinstance(data, dict):
+                restrictions_data = data.get("deliveryRestrictions", [])
+            elif isinstance(data, list):
+                restrictions_data = data
                 
-                if not cat_iiko_id:
+            if not restrictions_data:
+                logger.warning("Нет данных об ограничениях доставки от iiko")
+                return {"success": True, "synced": 0, "message": "No restrictions data"}
+
+            synced_count = 0
+            
+            for restriction_item in restrictions_data:
+                if not isinstance(restriction_item, dict):
                     continue
                     
-                category = session.exec(
-                    select(Category).where(Category.iiko_id == cat_iiko_id)
+                # 1. Находим филиал (терминальную группу)
+                tg_id = restriction_item.get("terminalGroupId")
+                if not tg_id:
+                    # Если terminalGroupId нет, возможно это общие ограничения для всех филиалов организации?
+                    # Но обычно в iiko они привязываются к TG. 
+                    # Пробуем найти первый филиал как fallback, если он один.
+                    branch = session.exec(select(Branch)).first()
+                    logger.warning("restriction_item missing terminalGroupId, using first branch as fallback")
+                else:
+                    branch = session.exec(select(Branch).where(Branch.iiko_terminal_id == tg_id)).first()
+                
+                if not branch:
+                    logger.warning(f"Филиал с iiko_terminal_id {tg_id} не найден в БД, пропускаем ограничения")
+                    continue
+
+                # 2. Собираем полигоны из KML для этого филиала/ограничения
+                branch_polygons = {}
+                map_url = restriction_item.get("deliveryRegionsMapUrl")
+                if map_url:
+                    logger.info(f"Найдена ссылка на карту для филиала {branch.name}: {map_url}. Загружаем полигоны...")
+                    try:
+                        kml_zones = await iiko_service.fetch_and_parse_kml(map_url)
+                        for kz in kml_zones:
+                            # Сохраняем полигон по имени зоны (в нижнем регистре для сопоставления)
+                            name_key = kz["name"].lower().strip()
+                            branch_polygons[name_key] = kz["coordinates"]
+                            logger.info(f"Загружена геометрия для зоны '{kz['name']}' из iiko-карты")
+                    except Exception as e:
+                        logger.error(f"Ошибка при загрузке полигонов для филиала {branch.name}: {e}")
+
+                # 3. Обрабатываем зоны внутри ограничений
+                for res in restriction_item.get("restrictions", []):
+                    zone_name = res.get("zone")
+                    if not zone_name:
+                        continue
+                        
+                    min_sum = float(res.get("minSum") or 0)
+                    delivery_cost = float(res.get("deliveryPrice") or 0)
+                    
+                    # Используем zoneId из iiko если есть, иначе имя
+                    iiko_zone_id = res.get("zoneId") or zone_name
+                    
+                    # Ищем зону для конкретного филиала
+                    zone = session.exec(select(DeliveryZone).where(
+                        (DeliveryZone.branch_id == branch.id) & 
+                        ((DeliveryZone.iiko_id == iiko_zone_id) | (DeliveryZone.name == zone_name))
+                    )).first()
+                    
+                    if not zone:
+                        logger.info(f"Создание новой зоны доставки '{zone_name}' для филиала {branch.name}")
+                        zone = DeliveryZone(
+                            name=zone_name, 
+                            branch_id=branch.id, 
+                            iiko_id=iiko_zone_id
+                        )
+                        session.add(zone)
+                        session.flush() # Получаем ID
+                    
+                    # Обновляем параметры зоны
+                    zone.iiko_id = iiko_zone_id
+                    zone.min_order_amount = min_sum
+                    zone.delivery_cost = delivery_cost
+                    zone.min_delivery_time = res.get("minDeliveryTime")
+                    zone.max_delivery_time = res.get("maxDeliveryTime")
+                    zone.free_delivery_sum = float(res.get("freeDeliverySum") or 0) if res.get("freeDeliverySum") is not None else None
+                    zone.priority = int(res.get("priority") or 0)
+                    zone.is_default = bool(res.get("isDefault"))
+                    zone.updated_at = datetime.now(timezone.utc)
+                    zone.is_active = True
+                    
+                    # 4. Синхронизируем геометрию в CustomPolygon
+                    zone_key = zone_name.lower().strip()
+                    if zone_key in branch_polygons:
+                        coords = branch_polygons[zone_key]
+                        # Ищем существующий полигон для этой зоны
+                        poly = session.exec(select(CustomPolygon).where(
+                            CustomPolygon.delivery_zone_id == zone.id
+                        )).first()
+                        
+                        if not poly:
+                            poly = CustomPolygon(
+                                name=zone.name,
+                                delivery_zone_id=zone.id,
+                                branch_id=branch.id,
+                                coordinates=coords,
+                                fill_color="#4caf50",
+                                priority=zone.priority,
+                                min_order_amount=zone.min_order_amount,
+                                delivery_cost=zone.delivery_cost,
+                                is_active=True
+                            )
+                            session.add(poly)
+                            logger.info(f"Создан новый полигон для зоны '{zone.name}'")
+                        else:
+                            # Обновляем координаты и параметры
+                            poly.coordinates = coords
+                            poly.priority = zone.priority
+                            poly.min_order_amount = zone.min_order_amount
+                            poly.delivery_cost = zone.delivery_cost
+                            poly.is_active = True
+                            session.add(poly)
+                            logger.info(f"Обновлена геометрия и параметры полигона для зоны '{zone.name}'")
+                        
+                        # Сохраняем и в текстовое поле зоны (для совместимости)
+                        zone.polygon_coordinates = json.dumps(coords)
+                    
+                    zone.additional_info = res
+                    session.add(zone)
+                    synced_count += 1
+                
+            session.commit()
+            logger.info(f"Синхронизация ограничений доставки завершена: {synced_count} зон")
+            return {"success": True, "synced": synced_count, "message": f"Successfully synced {synced_count} zones"}
+            
+        except Exception as e:
+            session.rollback()
+            logger.error(f"Ошибка при синхронизации ограничений доставки iiko: {e}", exc_info=True)
+            return {"error": str(e)}
+
+    async def get_available_iiko_zones(self, session: Session) -> List[Dict[str, Any]]:
+        """Получает список всех доступных зон из iiko Cloud (без сохранения)"""
+        settings_db = session.exec(select(IikoSettings)).first()
+        if not settings_db or not settings_db.organization_id:
+            return []
+            
+        try:
+            data = await iiko_service.get_delivery_restrictions(
+                api_login=settings_db.api_login,
+                organization_id=settings_db.organization_id
+            )
+            
+            unique_zones = {}
+            for org_data in data:
+                for res in org_data.get("restrictions", []):
+                    z_name = res.get("zone")
+                    z_id = res.get("zoneId") or z_name
+                    if z_name and z_id not in unique_zones:
+                        unique_zones[z_id] = {
+                            "iiko_id": z_id,
+                            "name": z_name
+                        }
+            
+            return list(unique_zones.values())
+        except Exception as e:
+            logger.error(f"Failed to fetch iiko zones list: {e}")
+            return []
+
+    async def sync_payment_types(self, session: Session) -> Dict[str, Any]:
+        """Синхронизация типов оплаты из iiko Cloud"""
+        from app.models.payment_type import PaymentType
+        
+        settings_db = session.exec(select(IikoSettings)).first()
+        if not settings_db or not settings_db.organization_id:
+            return {"error": "Iiko not configured"}
+            
+        try:
+            print(f"DEBUG: Calling iiko_service.get_payment_types with login: {settings_db.api_login}", flush=True)
+            payment_types = await iiko_service.get_payment_types(
+                api_login=settings_db.api_login,
+                organization_id=settings_db.organization_id
+            )
+            
+            synced_count = 0
+            logger.info(f"Начинаю обработку {len(payment_types)} типов оплаты из iiko")
+            for pt in payment_types:
+                pt_id = pt.get("id")
+                if not pt_id: continue
+                
+                existing = session.exec(select(PaymentType).where(PaymentType.iiko_id == pt_id)).first()
+                if existing:
+                    existing.name = pt.get("name") or existing.name
+                    existing.kind = pt.get("paymentTypeKind") or existing.kind
+                    existing.updated_at = datetime.now(timezone.utc)
+                    session.add(existing)
+                else:
+                    new_pt = PaymentType(
+                        iiko_id=pt_id,
+                        name=pt.get("name"),
+                        kind=pt.get("paymentTypeKind"),
+                        is_active=True # ВАЖНО! Иначе они пропадут при F5
+                    )
+                    session.add(new_pt)
+                synced_count += 1
+            
+            logger.info(f"Синхронизация завершена. Всего: {synced_count}")
+            session.commit()
+            return {"status": "success", "synced_count": synced_count}
+        except Exception as e:
+            logger.error(f"Payment types sync failed: {e}")
+            session.rollback()
+            return {"error": str(e)}
+
+
+    async def sync_stop_lists(self, session: Session = None):
+        """Синхронизация стоп-листов"""
+        # Логика стоп-листов
+        pass
+
+    async def sync_roles(self, session: Session) -> Dict[str, Any]:
+        """Синхронизация должностей из iiko как ролей в локальной БД"""
+        try:
+            settings_db = session.exec(select(IikoSettings)).first()
+            if not settings_db or not settings_db.resto_url:
+                return {"error": "Настройки iiko Resto не найдены"}
+
+            logger.info("Запрос списка ролей из iiko Resto...")
+            iiko_roles = await iiko_service.get_resto_roles(
+                resto_url=settings_db.resto_url,
+                resto_login=settings_db.resto_login,
+                resto_password=settings_db.resto_password
+            )
+
+            synced_count = 0
+            for r_data in iiko_roles:
+                iiko_id = r_data.get("id")
+                name = r_data.get("name")
+                code = r_data.get("code")
+                if not iiko_id or not name: continue
+
+                role = session.exec(select(Role).where(Role.iiko_id == iiko_id)).first()
+                if not role:
+                    role = Role(iiko_id=iiko_id, name=name, code=code)
+                    session.add(role)
+                else:
+                    role.name = name
+                    role.code = code
+                synced_count += 1
+            
+            session.commit()
+            logger.info(f"Синхронизировано ролей из iiko: {synced_count}")
+            return {"status": "success", "synced_count": synced_count}
+        except Exception as e:
+            logger.error(f"Error syncing roles: {e}")
+            session.rollback()
+            return {"error": str(e)}
+
+    async def ensure_super_admin(self, session: Session) -> None:
+        """Создание супер-администратора и базовых разрешений"""
+        try:
+            from app.core.security import get_password_hash
+            from app.models.role import RolePermissionLink
+            
+            # 1. Создаем базовые разрешения если их нет
+            base_perms = [
+                ("admin_access", "Доступ в админ-панель"),
+                ("users_manage", "Управление пользователями"),
+                ("roles_manage", "Управление ролями и правами"),
+                ("orders_view", "Просмотр заказов"),
+                ("reports_view", "Просмотр отчетов"),
+                ("settings_manage", "Управление настройками"),
+                ("sync_run", "Запуск синхронизации")
+            ]
+            
+            for code, name in base_perms:
+                perm = session.exec(select(Permission).where(Permission.code == code)).first()
+                if not perm:
+                    session.add(Permission(code=code, name=name))
+            
+            session.flush()
+
+            # 2. Создаем роль Супер Администратор
+            super_role = session.exec(select(Role).where(Role.code == "SUPER_ADMIN")).first()
+            if not super_role:
+                super_role = Role(name="Супер Администратор", code="SUPER_ADMIN")
+                session.add(super_role)
+                session.flush()
+            
+            # Привязываем все разрешения к роли SUPER_ADMIN
+            all_perms = session.exec(select(Permission)).all()
+            for p in all_perms:
+                link = session.exec(select(RolePermissionLink).where(
+                    RolePermissionLink.role_id == super_role.id,
+                    RolePermissionLink.permission_id == p.id
+                )).first()
+                if not link:
+                    session.add(RolePermissionLink(role_id=super_role.id, permission_id=p.id))
+
+            # 3. Создаем пользователя 0001
+            user = session.exec(select(User).where(User.username == "0001")).first()
+            if not user:
+                user = User(
+                    username="0001",
+                    email="admin@72roll.ru",
+                    hashed_password=get_password_hash("121212"),
+                    full_name="Супер Администратор",
+                    role_id=super_role.id,
+                    is_active=True,
+                    is_superuser=True
+                )
+                session.add(user)
+                logger.info("Создан супер-пользователь 0001")
+            else:
+                user.role_id = super_role.id
+                user.is_superuser = True
+            
+            session.commit()
+        except Exception as e:
+            logger.error(f"Error ensuring super admin: {e}")
+            session.rollback()
+
+    async def sync_employees_full(self, session: Session, days: int = 7) -> None:
+        """
+        Полная синхронизация сотрудников и их смен через iiko RESTO (Office) API.
+        """
+        settings_db = session.exec(select(IikoSettings)).first()
+        if not settings_db or not settings_db.resto_url:
+            logger.error("Настройки iiko Resto (Office) не найдены. Синхронизация отменена.")
+            return
+
+        tz = self._get_tz(session)
+        now_local = datetime.now(tz)
+        date_from = now_local - timedelta(days=days)
+
+        # --- Шаг 1: Синхронизация профилей сотрудников ---
+        # Параметры подключения берем из БД, а не из ENV
+        r_url = settings_db.resto_url
+        r_login = settings_db.resto_login
+        r_password = settings_db.resto_password
+        try:
+            logger.info("Запрос списка сотрудников из iiko Resto...")
+            iiko_employees = await iiko_service.get_resto_employees(
+                resto_url=r_url, resto_login=r_login, resto_password=r_password
+            )
+            
+            for emp in iiko_employees:
+                emp_iiko_id = emp.get("id")
+                if not emp_iiko_id: continue
+                
+                name = emp.get("name") or f"{emp.get('firstName', '')} {emp.get('lastName', '')}".strip()
+                role = emp.get("role")
+                rate = emp.get("salary")
+                
+                # Документы и доп. инфо
+                doc_info = {
+                    "inn": emp.get("inn"),
+                    "snils": emp.get("snils"),
+                    "code": emp.get("code"),
+                    "cardNumber": emp.get("cardNumber"),
+                    "birthday": emp.get("birthday")
+                }
+                
+                existing = session.exec(
+                    select(Employee).where(Employee.iiko_id == emp_iiko_id)
                 ).first()
                 
-                if not category:
-                    category = Category(iiko_id=cat_iiko_id, name=cat_name)
-                    session.add(category)
-                
-                category.name = cat_name
-                category.iiko_image_id = cat_image_id
-                if cat_image_id:
-                    category.image_url = f"https://api-ru.iiko.services/api/1/menu/download-image?imageId={cat_image_id}"
-                
-                category.is_active = True
-                category.products_count = len(items_in_cat)
-                category.modifiers_count = sum(
-                    len(item.get("itemModifierGroups", [])) for item in items_in_cat
-                )
-                category.updated_at = datetime.utcnow()
-                categories_synced += 1
-                
-            session.commit()
-            log.status = "success"
-            log.details = f"Синхронизировано {categories_synced} категорий"
-            session.commit()
-            return {"success": True, "categories_synced": categories_synced, "message": log.details}
-        except Exception as e:
-            log.status = "error"
-            log.details = str(e)
-            session.commit()
-            raise
+                def _flag_courier(r, n=""):
+                    r_l = (r or "").lower()
+                    n_l = (n or "").lower()
+                    return ("курьер" in r_l or "courier" in r_l or r_l in ["cur", "cour"]
+                            or "курьер" in n_l or "courier" in n_l)
+                def _flag_admin(r, n=""):
+                    r_l = (r or "").lower()
+                    return any(k in r_l for k in ["администратор", "оператор", "manager", "старший", "adm", "admin"])
 
-# Глобальный экземпляр
+                # Поиск роли в локальной БД
+                iiko_role_id = emp.get("mainRoleId")
+                local_role = None
+                if iiko_role_id:
+                    local_role = session.exec(select(Role).where(Role.iiko_id == iiko_role_id)).first()
+                
+                if not local_role and role:
+                    local_role = session.exec(select(Role).where(Role.name == role)).first()
+                
+                role_id = local_role.id if local_role else None
+
+                if existing:
+                    existing.name = name
+                    existing.role = role or existing.role
+                    existing.phone = emp.get("phone") or existing.phone
+                    existing.email = emp.get("email") or existing.email
+                    existing.address = emp.get("address") or existing.address
+                    existing.rate = rate if rate is not None else existing.rate
+                    existing.document_info = doc_info
+                    existing.status = "Deleted" if emp.get("deleted") else "Active"
+                    existing.is_courier = _flag_courier(existing.role, name)
+                    existing.is_admin = _flag_admin(existing.role)
+                    existing.updated_at = datetime.now(timezone.utc)
+                    session.add(existing)
+                else:
+                    new_emp = Employee(
+                        iiko_id=emp_iiko_id,
+                        name=name,
+                        role=role,
+                        phone=emp.get("phone"),
+                        email=emp.get("email"),
+                        address=emp.get("address"),
+                        rate=rate or 0.0,
+                        document_info=doc_info,
+                        status="Deleted" if emp.get("deleted") else "Active",
+                        is_courier=_flag_courier(role, name),
+                        is_admin=_flag_admin(role),
+                        created_at=datetime.now(timezone.utc),
+                        updated_at=datetime.now(timezone.utc)
+                    )
+                    session.add(new_emp)
+            
+            session.commit()
+            logger.info(f"Успешно синхронизировано {len(iiko_employees)} профилей сотрудников из iiko Resto")
+        except Exception as e:
+            logger.error(f"Ошибка синхронизации профилей: {e}")
+            session.rollback()
+
+        # --- Шаг 1.5: Дополнение данными из iiko Cloud (ОТКЛЮЧЕНО по требованию пользователя - старого Server API) ---
+        # try:
+        #      logger.info("Запрос дополнительных данных из iiko Cloud...")
+        #      cloud_employees = await iiko_service.get_employees(api_login=settings_db.api_login, organization_id=settings_db.organization_id)
+        #      updated_cloud_c = 0
+        #      for c_emp in cloud_employees:
+        #          emp_iiko_id = c_emp.get("id")
+        #          if not emp_iiko_id: continue
+        #          
+        #          existing = session.exec(select(Employee).where(Employee.iiko_id == emp_iiko_id)).first()
+        #          # Если сотрудника нет из Resto, но он есть в Cloud (например, внешний курьер)
+        #          if not existing:
+        #              role = ""
+        #              if c_emp.get("isCourier"): role = "Курьер (Cloud)"
+        #              
+        #              new_emp = Employee(
+        #                  iiko_id=emp_iiko_id,
+        #                  name=c_emp.get("name", "Unknown"),
+        #                  role=role,
+        #                  phone=c_emp.get("phone"),
+        #                  status="Active",
+        #                  is_courier=c_emp.get("isCourier", False),
+        #                  created_at=datetime.now(timezone.utc),
+        #                  updated_at=datetime.now(timezone.utc)
+        #              )
+        #              session.add(new_emp)
+        #              updated_cloud_c += 1
+        #          else:
+        #              # Дополняем данные, если их нет
+        #              if c_emp.get("isCourier") and not existing.is_courier:
+        #                  existing.is_courier = True
+        #                  session.add(existing)
+        #                  updated_cloud_c += 1
+        #      session.commit()
+        #      logger.info(f"Успешно дополнено {updated_cloud_c} профилей из iiko Cloud")
+        # except Exception as e:
+        #      logger.error(f"Ошибка при синхронизации профилей из Cloud: {e}")
+        #      session.rollback()
+
+        # --- Шаг 2: Синхронизация использования смен через Attendance API ---
+        try:
+            logger.info(f"Запрос явок (смен) через Attendance API ({date_from.date()} - {now_local.date()})...")
+            attendance_records = await iiko_service.get_resto_attendance(
+                resto_url=r_url, resto_login=r_login, resto_password=r_password,
+                date_from=date_from, date_to=now_local,
+                log_error=False
+            )
+
+            def _parse_to_utc(s):
+                if not s: return None
+                try:
+                    # Формат ISO 8601 с таймзоной (например 2026-04-11T10:17:00+05:00)
+                    return datetime.fromisoformat(str(s)).astimezone(timezone.utc)
+                except Exception:
+                    return None
+
+            created_c, updated_c = 0, 0
+            for row in attendance_records:
+                emp_iiko_id = row.get("employeeId")
+                if not emp_iiko_id:
+                    continue
+
+                employee = session.exec(select(Employee).where(Employee.iiko_id == emp_iiko_id)).first()
+                if not employee:
+                    # logger.debug(f"Attendance: Сотрудник с ID '{emp_iiko_id}' не найден в БД")
+                    continue
+
+                date_open = _parse_to_utc(row.get("dateOpen"))
+                date_close = _parse_to_utc(row.get("dateClose"))
+                if not date_open:
+                    continue
+
+                if not date_close:
+                    now_utc = datetime.now(timezone.utc)
+                    work_hours = (now_utc - date_open).total_seconds() / 3600.0
+                else:
+                    work_hours = (date_close - date_open).total_seconds() / 3600.0
+
+                # Ограничиваем максимальную длительность смены (макс 24 часа)
+                work_hours = min(work_hours, 24.0)
+
+                # Уникальный ключ
+                shift_iiko_id = row.get("id")
+                if not shift_iiko_id:
+                     shift_iiko_id = f"att_{employee.id}_{date_open.strftime('%Y%m%d%H%M')}"
+
+                # Поиск выручки при закрытии (из загруженных отчетов OLAP)
+                revenue_at_close = 0.0
+                if date_close:
+                    biz_date_str = date_open.astimezone(tz).strftime("%Y-%m-%d")
+                    # Берем выручку за бизнес-день открытия смены
+                    rev_record = session.exec(
+                        select(OlapRevenueRecord)
+                        .where(OlapRevenueRecord.business_date == biz_date_str)
+                        .order_by(OlapRevenueRecord.updated_at.desc())
+                    ).first()
+                    if rev_record:
+                        revenue_at_close = rev_record.revenue
+
+                existing_shift = session.exec(
+                    select(Shift).where(Shift.iiko_id == shift_iiko_id)
+                ).first()
+
+                if existing_shift:
+                    old_status = existing_shift.status
+                    existing_shift.date_close = date_close
+                    existing_shift.status = "CLOSED" if date_close else "OPEN"
+                    existing_shift.work_hours = round(work_hours, 2)
+                    # Обновляем выручку только если она еще не была установлена
+                    if date_close and (not existing_shift.revenue_at_close or existing_shift.revenue_at_close == 0):
+                        existing_shift.revenue_at_close = revenue_at_close
+                    existing_shift.updated_at = datetime.now(timezone.utc)
+                    session.add(existing_shift)
+                    updated_c += 1
+                    
+                    # Триггер на закрытие смены
+                    if old_status == "OPEN" and existing_shift.status == "CLOSED":
+                        await self._send_shift_vk_notification(existing_shift, employee, "shift_close")
+                else:
+                    new_shift = Shift(
+                        iiko_id=shift_iiko_id,
+                        employee_id=employee.id,
+                        date_open=date_open,
+                        date_close=date_close,
+                        status="CLOSED" if date_close else "OPEN",
+                        work_hours=round(work_hours, 2),
+                        cancelled_orders_count=0,
+                        revenue_at_close=revenue_at_close,
+                        created_at=datetime.now(timezone.utc),
+                        updated_at=datetime.now(timezone.utc)
+                    )
+                    session.add(new_shift)
+                    created_c += 1
+                    
+                    # Триггер на открытие смены
+                    if new_shift.status == "OPEN":
+                        await self._send_shift_vk_notification(new_shift, employee, "shift_open")
+
+            session.commit()
+            logger.info(f"Успешно: Attendance смены: создано {created_c}, обновлено {updated_c} из {len(attendance_records)} записей")
+        except Exception as e:
+            logger.error(f"Ошибка синхронизации Attendance смен: {e}", exc_info=True)
+            session.rollback()
+
+        # --- Шаг 3 (Удален): Синхронизация через personalSessions взамен Attendance ---
+        # Личные смены обрабатываются в Шаге 2 через Attendance API,
+        # поэтому вызов personalSessions здесь не нужен (он дублирует и выдает 404).
+        pass
+
+    async def get_employee_stats(self, session: Session, employee_id: int, mode: str = "calendar") -> Dict[str, Any]:
+        """
+        Получение статистики сотрудника за период.
+        mode: 'calendar' (текущая неделя) или 'sliding' (последние 7 дней)
+        """
+        tz = self._get_tz(session)
+        now_local = datetime.now(tz)
+        
+        if mode == "calendar":
+            # С понедельника текущей недели
+            start_date = (now_local - timedelta(days=now_local.weekday())).replace(hour=0, minute=0, second=0, microsecond=0)
+            end_date = now_local
+        else:
+            # Последние 7 дней
+            start_date = (now_local - timedelta(days=7)).replace(hour=0, minute=0, second=0, microsecond=0)
+            end_date = now_local
+            
+        # Загружаем смены из БД
+        shifts = session.exec(
+            select(Shift)
+            .where(Shift.employee_id == employee_id)
+            .where(Shift.date_open >= start_date.astimezone(timezone.utc))
+            .order_by(Shift.date_open.desc())
+        ).all()
+        
+        total_hours = sum(s.work_hours for s in shifts if s.work_hours)
+        total_revenue = sum(float(s.revenue_at_close or 0) for s in shifts)
+        
+        # Группировка по дням
+        daily_stats = {}
+        for s in shifts:
+            # Переводим время открытия в локальное для группировки по датам
+            s_open_local = s.date_open.astimezone(tz)
+            day_key = s_open_local.date().isoformat()
+            
+            if day_key not in daily_stats:
+                daily_stats[day_key] = {
+                    "date": day_key,
+                    "total_hours": 0.0,
+                    "shifts_count": 0,
+                    "revenue": 0.0,
+                    "shifts": []
+                }
+            daily_stats[day_key]["total_hours"] += float(s.work_hours or 0)
+            daily_stats[day_key]["shifts_count"] += 1
+            daily_stats[day_key]["revenue"] += float(s.revenue_at_close or 0)
+            
+            # Формируем объект смены для фронтенда
+            shift_info = {
+                "id": s.id,
+                "open": s_open_local.isoformat(),
+                "close": s.date_close.astimezone(tz).isoformat() if s.date_close else None,
+                "status": s.status,
+                "hours": round(s.work_hours, 2) if s.work_hours else 0,
+                "revenue": float(s.revenue_at_close or 0)
+            }
+            daily_stats[day_key]["shifts"].append(shift_info)
+            
+        return {
+            "total_hours_period": round(total_hours, 2),
+            "total_shifts": len(shifts),
+            "total_revenue": round(total_revenue, 2),
+            "daily_stats": sorted(daily_stats.values(), key=lambda x: x["date"], reverse=True)
+        }
+
+    async def sync_courier_deliveries(self, session: Session, days: int = 14, date_from: Optional[datetime] = None, date_to: Optional[datetime] = None) -> None:
+        from app.models.order import Order
+        """
+        Синхронизация детальных доставок курьеров из iiko Resto OLAP.
+        Заполняет таблицу courier_orders: зоны, суммы, временные метки, задержки.
+        """
+        settings_db = session.exec(select(IikoSettings)).first()
+        if not settings_db or not settings_db.resto_url:
+            logger.warning("Resto не настроен, синхронизация доставок пропущена")
+            return
+
+        tz = self._get_tz(session)
+        now_local = datetime.now(tz)
+        
+        if not date_from:
+            date_from = now_local - timedelta(days=days)
+        if not date_to:
+            date_to = now_local
+
+        logger.info(f"Синхронизация доставок курьеров из Resto OLAP ({date_from} до {date_to})...")
+
+        try:
+            org_id = settings_db.organization_id or ""
+            deliveries = await self.iiko.get_resto_detailed_deliveries(
+                date_from=date_from,
+                date_to=date_to,
+                organization_id=org_id,
+                resto_url=settings_db.resto_url,
+                resto_login=settings_db.resto_login,
+                resto_password=settings_db.resto_password
+            )
+            logger.info(f"Fetched {len(deliveries)} deliveries from OLAP")
+        except Exception as e:
+            logger.error(f"Ошибка получения доставок из Resto OLAP: {e}")
+            return
+
+        # Кэш курьеров по имени и по ID
+        all_employees = session.exec(select(Employee)).all()
+        courier_by_name: Dict[str, Employee] = {}
+        courier_by_id: Dict[str, Employee] = {}
+        for emp in all_employees:
+            # Учитываем флаг is_courier и различные написания ролей
+            is_c = emp.is_courier or any(k in (emp.role or "").lower() for k in ["курьер", "courier", "cur"])
+            if is_c:
+                courier_by_name[(emp.name or "").lower().strip()] = emp
+                if emp.iiko_id:
+                    courier_by_id[emp.iiko_id] = emp
+
+        def _parse_dt(s):
+            if not s: return None
+            try:
+                s_str = str(s)
+                if 'T' in s_str:
+                    s_c = s_str.replace("T", " ").split(".")[0]
+                else:
+                    s_c = s_str.split(".")[0]
+                dt = datetime.fromisoformat(s_c)
+                return dt.replace(tzinfo=tz).astimezone(timezone.utc).replace(tzinfo=None)
+            except Exception:
+                return None
+
+        created_count, updated_count = 0, 0
+        for d in deliveries:
+            order_num = str(d.get("Delivery.Number") or "").strip()
+            if not order_num:
+                continue
+
+            # Ищем курьера по ID или по имени
+            courier_emp = None
+            courier_iiko_id = d.get("Delivery.Courier.Id")
+            if courier_iiko_id:
+                courier_emp = courier_by_id.get(courier_iiko_id)
+            
+            if not courier_emp:
+                courier_name_raw = (d.get("Delivery.Courier") or "")
+                courier_name_key = (courier_name_raw or "").lower().strip()
+                courier_emp = courier_by_name.get(courier_name_key)
+                
+                if not courier_emp:
+                    def _get_meaningful_words(name):
+                        words = (name or "").lower().split()
+                        return {w for w in words if len(w) > 2 and w not in ["курьер", "courier", "cur"]}
+                    
+                    target_words = _get_meaningful_words(courier_name_raw)
+                    for key, emp in courier_by_name.items():
+                        emp_words = _get_meaningful_words(emp.name)
+                        if target_words and emp_words and (target_words & emp_words):
+                            courier_emp = emp
+                            break
+
+            if not courier_emp:
+                db_order = session.exec(
+                    select(Order).where(Order.external_number == order_num)
+                ).first()
+                if db_order and db_order.courier_name and db_order.courier_name != "Не назначен":
+                    c_name_raw = db_order.courier_name
+                    c_name_key = (c_name_raw or "").lower().strip()
+                    courier_emp = courier_by_name.get(c_name_key)
+                    if not courier_emp:
+                        target_words = _get_meaningful_words(c_name_raw)
+                        for key, emp in courier_by_name.items():
+                            emp_words = _get_meaningful_words(emp.name)
+                            if target_words and emp_words and (target_words & emp_words):
+                                courier_emp = emp
+                                break
+
+            if not courier_emp:
+                continue
+
+            # Повторно берем номер (уже проверен выше)
+            order_num = str(d.get("Delivery.Number") or "")
+            
+            cooking_done = _parse_dt(d.get("Delivery.CookingFinishTime"))
+            expected_dt = _parse_dt(d.get("Delivery.ExpectedTime"))
+            actual_dt = _parse_dt(d.get("Delivery.ActualTime") or d.get("Delivery.SendTime"))
+
+            delay_min = None
+            is_late = False
+            if expected_dt and actual_dt:
+                diff = (actual_dt - expected_dt).total_seconds() / 60
+                delay_min = int(diff)
+                is_late = diff > 0
+
+            # Сборка компонентов адреса из полей OLAP
+            addr_parts = {
+                "city": d.get("Delivery.City"),
+                "street": d.get("Delivery.Street"),
+                "house": d.get("Delivery.House"),
+                "flat": d.get("Delivery.Flat"),
+                "entrance": d.get("Delivery.Entrance"),
+                "floor": d.get("Delivery.Floor"),
+                "doorphone": d.get("Delivery.Doorphone"),
+                "line1": d.get("Delivery.Line1") or d.get("Delivery.Address")
+            }
+            raw_address_str = addr_parts["line1"] or ""
+            
+            # Интеллектуальный допарсинг, если поля пустые
+            if raw_address_str and (not addr_parts.get("house") or not addr_parts.get("flat")):
+                import re
+                def find_comp(regex, text):
+                    m = re.search(regex, text, re.IGNORECASE)
+                    return m.group(1).strip() if m else None
+                
+                if not addr_parts.get("house"):
+                    addr_parts["house"] = find_comp(r'[,\s](?:д\.|дом|уч\.)[\s]*([^\,\s]+)', raw_address_str)
+                if not addr_parts.get("flat"):
+                    addr_parts["flat"] = find_comp(r'[,\s](?:кв\.|квартира)[\s]*([^\,\s]+)', raw_address_str)
+                if not addr_parts.get("entrance"):
+                    addr_parts["entrance"] = find_comp(r'[,\s](?:под\.|подъезд)[\s]*([^\,\s]+)', raw_address_str)
+                if not addr_parts.get("floor"):
+                    addr_parts["floor"] = find_comp(r'[,\s](?:эт\.|этаж)[\s]*([^\,\s]+)', raw_address_str)
+                if not addr_parts.get("doorphone"):
+                    addr_parts["doorphone"] = find_comp(r'(?:код|домофон)[\.\s]*([^\,\s]+)', raw_address_str)
+
+            db_order = session.exec(select(Order).where(Order.external_number == order_num)).first()
+            if db_order and db_order.address_parts:
+                for key, val in db_order.address_parts.items():
+                    if not addr_parts.get(key) and val:
+                        addr_parts[key] = val
+            
+            city_name = settings_db.city_name if settings_db else "Тюмень"
+            address_str = self.format_address(addr_parts, city=city_name, fmt="line1")
+            
+            zone_name = d.get("Delivery.Zone")
+            if not zone_name or zone_name in ["---", "", None]:
+                geo_city = addr_parts.get("city") or city_name
+                geo_street = addr_parts.get("street") or ""
+                geo_house = addr_parts.get("house") or ""
+                if not geo_street and addr_parts.get("line1"):
+                    geo_street = addr_parts.get("line1")
+                
+                try:
+                    zone_info = await self.iiko.check_address_zone(
+                        organization_id=org_id,
+                        city=geo_city,
+                        street=geo_street,
+                        house=geo_house
+                    )
+                    if zone_info and zone_info.get("zone"):
+                        zone_name = zone_info["zone"]
+                    else:
+                        zone_name = "Вне зоны"
+                except Exception as e:
+                    logger.error(f"Error checking zone for {address_str}: {e}")
+                    zone_name = "Ошибка определения"
+
+            ref_date = actual_dt or cooking_done or datetime.now(timezone.utc)
+            iiko_uid = f"olap_{order_num}_{ref_date.strftime('%Y%m%d')}"
+
+            existing = session.exec(select(CourierOrder).where(CourierOrder.iiko_id == iiko_uid)).first()
+            amount_val = float(d.get("fullSum") or 0)
+
+            if existing:
+                existing.delivery_zone = zone_name or existing.delivery_zone
+                existing.amount = amount_val or existing.amount
+                existing.cooking_completed_at = cooking_done or existing.cooking_completed_at
+                existing.expected_delivery_time = expected_dt or existing.expected_delivery_time
+                existing.actual_delivery_time = actual_dt or existing.actual_delivery_time
+                existing.delay_minutes = delay_min
+                existing.is_late = is_late
+                existing.address = address_str or existing.address
+                existing.address_parts = addr_parts
+                existing.customer_name = d.get("Delivery.CustomerName") or existing.customer_name
+                existing.customer_phone = d.get("Delivery.Phone") or existing.customer_phone
+                existing.close_time = actual_dt
+                existing.updated_at = datetime.now(timezone.utc).replace(tzinfo=None)
+                session.add(existing)
+                updated_count += 1
+            else:
+                new_order = CourierOrder(
+                    iiko_id=iiko_uid,
+                    order_num=order_num,
+                    employee_id=courier_emp.id,
+                    address=address_str,
+                    address_parts=addr_parts,
+                    delivery_zone=zone_name,
+                    amount=amount_val,
+                    created_at_iiko=cooking_done,
+                    cooking_completed_at=cooking_done,
+                    expected_delivery_time=expected_dt,
+                    actual_delivery_time=actual_dt,
+                    close_time=actual_dt,
+                    delay_minutes=delay_min,
+                    is_late=is_late,
+                    customer_name=d.get("Delivery.CustomerName"),
+                    customer_phone=d.get("Delivery.Phone"),
+                    updated_at=datetime.now(timezone.utc).replace(tzinfo=None)
+                )
+                session.add(new_order)
+                created_count += 1
+        
+        try:
+            session.commit()
+            logger.info(f"Синхронизация доставок курьеров завершена: {created_count} создано, {updated_count} обновлено")
+        except Exception as e:
+            session.rollback()
+            logger.error(f"Ошибка сохранения синхронизации доставок: {e}")
+
+    async def sync_courier_deliveries_bg(self, date_from: datetime, date_to: datetime):
+        """Вспомогательный метод для запуска синхронизации в бэкграунде (через потоки)"""
+        from app.core.database import SessionLocal
+        with SessionLocal() as session:
+            try:
+                await self.sync_courier_deliveries(session, date_from=date_from, date_to=date_to)
+            except Exception as e:
+                logger.error(f"Error in courier deliveries background sync: {e}")
+                session.rollback()
+
+    async def sync_zones_from_external_map(self, session: Session, url: Optional[str] = None) -> Dict[str, Any]:
+        """Синхронизация внешних полигонов зон из облачного хранилища"""
+        settings_rec = session.exec(select(IikoSettings)).first()
+        if url and settings_rec:
+            settings_rec.delivery_zones_map_url = url
+            session.add(settings_rec)
+            session.commit()
+        map_url = url or (settings_rec.delivery_zones_map_url if settings_rec else None)
+
+        if not map_url:
+            return {"success": False, "error": "Ссылка на карту не задана"}
+        
+        try:
+            kml_zones = await self.iiko.fetch_and_parse_kml(map_url)
+            if not kml_zones:
+                return {"success": False, "error": "Не удалось получить зоны"}
+        except Exception as e:
+            return {"success": False, "error": f"Ошибка при загрузке: {str(e)}"}
+            
+        updated_count = 0
+        all_zones = session.exec(select(DeliveryZone)).all()
+        for kz in kml_zones:
+            name = kz["name"].strip()
+            matched_zone = next((z for z in all_zones if (z.name or "").lower() == name.lower()), None)
+            if matched_zone:
+                matched_zone.polygon_coordinates = json.dumps(kz["points"])
+                matched_zone.updated_at = datetime.now(timezone.utc).replace(tzinfo=None)
+                session.add(matched_zone)
+                updated_count += 1
+                
+        session.commit()
+        return {"success": True, "updated_count": updated_count}
+
+    async def sync_zones_from_kml_file(self, session: Session, kml_content: str) -> Dict[str, Any]:
+        """Синхронизация из загруженного KML файла"""
+        try:
+            kml_zones = self.iiko.parse_kml_content(kml_content)
+            if not kml_zones:
+                return {"success": False, "error": "Зоны не найдены"}
+        except Exception as e:
+            return {"success": False, "error": f"Ошибка парсинга: {str(e)}"}
+            
+        updated_count = 0
+        for kz in kml_zones:
+            name = kz["name"].strip()
+            matched_zone = session.exec(select(DeliveryZone).where(func.lower(DeliveryZone.name) == name.lower())).first()
+            if matched_zone:
+                matched_zone.polygon_coordinates = json.dumps(kz["points"])
+                matched_zone.is_manual_override = True
+                matched_zone.updated_at = datetime.now(timezone.utc).replace(tzinfo=None)
+                session.add(matched_zone)
+                updated_count += 1
+        
+        try:
+            session.commit()
+            try:
+                from app.core.redis import redis_client
+                await redis_client.delete("delivery_zones_all")
+            except Exception: pass
+            return {"success": True, "updated_count": updated_count, "total_from_file": len(kml_zones)}
+        except Exception as e:
+            session.rollback()
+            logger.error(f"Ошибка сохранения геометрии зон из файла: {e}")
+            return {"success": False, "error": str(e)}
+
+    # =========================================================================
+    # Управление клиентской базой (Очистка и объединение)
+    # =========================================================================
+
+    # =========================================================================
+    # Управление клиентской базой (Очистка и объединение)
+    # =========================================================================
+
+    async def find_customers_missing_iiko_data(self, session: Session) -> List[Customer]:
+        """Поиск клиентов, у которых отсутствует iiko_id или uid."""
+        from sqlalchemy import or_
+        statement = select(Customer).where(
+            or_(
+                Customer.iiko_id == None,
+                Customer.uid == None,
+                Customer.iiko_id == "",
+                Customer.uid == ""
+            )
+        )
+        customers = session.exec(statement).all()
+        logger.info(f"Найдено {len(customers)} клиентов с отсутствующими ID iiko")
+        return customers
+
+    async def merge_customers_by_uid(self, session: Session) -> Dict[str, Any]:
+        """Объединение аккаунтов с одинаковыми iiko UID (Неблокирующая версия)"""
+        def get_duplicates():
+            statement = select(Customer.uid).where(Customer.uid != None, Customer.uid != "").group_by(Customer.uid).having(func.count(Customer.uid) > 1)
+            return session.exec(statement).all()
+        
+        duplicate_uids = await asyncio.to_thread(get_duplicates)
+        if not duplicate_uids:
+            return {"success": True, "merged_groups": 0, "message": "Дубликаты по UID не найдены"}
+
+        merged_groups_count = 0
+        total_deleted = 0
+        
+        for uid in duplicate_uids:
+            def process_group():
+                group_statement = select(Customer).where(Customer.uid == uid).order_by(Customer.id)
+                group = session.exec(group_statement).all()
+                if len(group) < 2: return 0
+                
+                master = group[0]
+                duplicates = group[1:]
+                self._merge_customer_group_sync(session, master, duplicates)
+                session.commit()
+                return len(duplicates)
+            
+            deleted_count = await asyncio.to_thread(process_group)
+            if deleted_count > 0:
+                merged_groups_count += 1
+                total_deleted += deleted_count
+            
+        return {"success": True, "merged_groups": merged_groups_count, "total_deleted": total_deleted}
+
+    async def merge_customers_by_phone(self) -> Dict[str, Any]:
+        """Объединение аккаунтов с одинаковыми номерами телефонов (Неблокирующая версия)"""
+        def do_merge():
+            from app.core.database import engine, Session
+            with Session(engine) as session:
+                statement = select(Customer.phone).group_by(Customer.phone).having(func.count(Customer.phone) > 1)
+                duplicate_phones = session.exec(statement).all()
+                
+                if not duplicate_phones:
+                    return 0, 0
+
+                merged_groups_count = 0
+                total_deleted = 0
+                
+                for phone in duplicate_phones:
+                    group_statement = select(Customer).where(Customer.phone == phone).order_by(Customer.id)
+                    group = session.exec(group_statement).all()
+                    if len(group) < 2: continue
+                    
+                    master = group[0]
+                    duplicates = group[1:]
+                    self._merge_customer_group_sync(session, master, duplicates)
+                    session.commit()
+                    
+                    merged_groups_count += 1
+                    total_deleted += len(duplicates)
+                
+                return merged_groups_count, total_deleted
+        
+        merged_groups, total_deleted = await asyncio.to_thread(do_merge)
+        return {"success": True, "merged_groups": merged_groups, "total_deleted": total_deleted}
+
+    async def _update_master_from_iiko_async(self, session: Session, phone: str):
+        """Обновление данных мастера из iiko Cloud (Асинхронно)"""
+        try:
+            from app.services.iiko_service import iiko_service
+            iiko_data = await iiko_service.get_customer_info(phone)
+            if iiko_data and iiko_data.get("id"):
+                def update_sync():
+                    master = session.exec(select(Customer).where(Customer.phone == phone)).first()
+                    if not master: return
+                    
+                    master.iiko_id = iiko_data.get("id")
+                    master.iiko_customer_id = iiko_data.get("id")
+                    master.uid = iiko_data.get("id")
+                    
+                    if iiko_data.get("name") and (not master.name or master.name == "Гость"):
+                        master.name = iiko_data["name"]
+                    
+                    wallets = iiko_data.get("walletBalances", [])
+                    if wallets:
+                        master.bonus_points = Decimal(str(wallets[0].get("balance", 0)))
+                    
+                    master.updated_at = datetime.now(timezone.utc).replace(tzinfo=None)
+                    session.add(master)
+                    session.commit()
+                
+                await asyncio.to_thread(update_sync)
+        except Exception as e:
+            logger.error(f"Ошибка обновления мастера {phone}: {e}")
+
+    def _merge_customer_group_sync(self, session: Session, master: Customer, duplicates: List[Customer]):
+        """Синхронное слияние группы дублей (выполняется в asyncio.to_thread)"""
+        from app.models.order import Order
+        from app.models.customer import GuestPhone, GuestAddress, ClientAddressHistory, BonusTransaction, ClientBonusHistory
+        from sqlalchemy import update
+        
+        for dup in duplicates:
+            logger.info(f"Слияние дубля ID={dup.id} в мастер ID={master.id}")
+            
+            # 1. Перепривязка заказов
+            session.exec(update(Order).where(Order.customer_id == dup.id).values(customer_id=master.id))
+            
+            # 2. Перепривязка телефонов
+            for p in session.exec(select(GuestPhone).where(GuestPhone.customer_id == dup.id)).all():
+                exists = session.exec(select(GuestPhone).where(GuestPhone.customer_id == master.id, GuestPhone.phone == p.phone)).first()
+                if not exists and p.phone != master.phone:
+                    p.customer_id = master.id
+                    session.add(p)
+                else:
+                    session.delete(p)
+            
+            # 3. Перепривязка адресов
+            for a in session.exec(select(GuestAddress).where(GuestAddress.customer_id == dup.id)).all():
+                exists = session.exec(select(GuestAddress).where(GuestAddress.customer_id == master.id, GuestAddress.address == a.address)).first()
+                if not exists:
+                    a.customer_id = master.id
+                    session.add(a)
+                else:
+                    session.delete(a)
+            
+            # 4. Перепривязка транзакций и истории
+            session.exec(update(BonusTransaction).where(BonusTransaction.customer_id == dup.id).values(customer_id=master.id))
+            session.exec(update(ClientBonusHistory).where(ClientBonusHistory.client_id == dup.id).values(client_id=master.id))
+            session.exec(update(ClientAddressHistory).where(ClientAddressHistory.client_id == dup.id).values(client_id=master.id))
+            
+            # 5. Мета-данные
+            if not master.vk_user_id and dup.vk_user_id: master.vk_user_id = dup.vk_user_id
+            if not master.telegram_id and dup.telegram_id: master.telegram_id = dup.telegram_id
+            if not master.email and dup.email: master.email = dup.email
+            if not master.name or master.name == "Гость": master.name = dup.name
+            if not master.surname and dup.surname: master.surname = dup.surname
+            
+            # 6. Статистика
+            master.total_orders_count = (master.total_orders_count or 0) + (dup.total_orders_count or 0)
+            master.total_orders_amount = (master.total_orders_amount or Decimal("0")) + (dup.total_orders_amount or Decimal("0"))
+            master.total_purchases_sum = (master.total_purchases_sum or Decimal("0")) + (dup.total_purchases_sum or Decimal("0"))
+            
+            if dup.last_order_date and (not master.last_order_date or dup.last_order_date > master.last_order_date):
+                master.last_order_date = dup.last_order_date
+                master.last_iiko_order_id = dup.last_iiko_order_id
+            
+            # 7. Удаление дубликата
+            session.delete(dup)
+        
+        master.updated_at = datetime.now(timezone.utc).replace(tzinfo=None)
+        session.add(master)
+        session.flush()
+
 iiko_sync_service = IikoSyncService()
+
+# =========================================================================
+# Точки входа для планировщика задач (Entry Points)
+# =========================================================================
+
+async def sync_all():
+    """Полная синхронизация iiko."""
+    from app.core.database import SessionLocal
+    with SessionLocal() as session:
+        logger.info(">>> Запуск полной синхронизации iiko")
+        try:
+            # 1. Справочники
+            await iiko_sync_service.sync_categories_only(session)
+            await iiko_sync_service.sync_menu(session)
+            await iiko_sync_service.sync_stop_lists(session)
+            await iiko_sync_service.sync_payment_types(session)
+            await iiko_sync_service.sync_roles(session)
+            
+            # 2. Сотрудники и курьеры
+            await iiko_sync_service.sync_employees_full(session)
+            await iiko_sync_service.sync_courier_deliveries(session)
+            
+            # 3. Клиенты и выручка
+            await iiko_sync_service.merge_customers_by_uid(session)
+            from app.services.revenue_sync import revenue_sync_service
+            await revenue_sync_service.sync_today_revenue()
+            
+            logger.info("<<< Полная синхронизация завершена")
+        except Exception as e:
+            logger.error(f"!!! Ошибка синхронизации: {e}", exc_info=True)
+
+async def sync_orders_task(hours: int = 24):
+    """Синхронизация заказов."""
+    from app.core.database import SessionLocal
+    with SessionLocal() as session:
+        try:
+            await iiko_sync_service.sync_orders(session, hours=hours)
+        except Exception as e:
+            logger.error(f"!!! Ошибка синхронизации заказов: {e}", exc_info=True)
+
+async def merge_customers_task():
+    """Слияние клиентов."""
+    from app.core.database import SessionLocal
+    with SessionLocal() as session:
+        try:
+            await iiko_sync_service.merge_customers_by_uid(session)
+            await iiko_sync_service.merge_customers_by_phone()
+        except Exception as e:
+            logger.error(f"!!! Ошибка слияния клиентов: {e}", exc_info=True)
