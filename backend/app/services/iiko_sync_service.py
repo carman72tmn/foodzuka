@@ -2727,7 +2727,7 @@ class IikoSyncService:
                 existing.address = address_str or existing.address
                 existing.address_parts = addr_parts
                 existing.customer_name = d.get("Delivery.CustomerName") or existing.customer_name
-                existing.customer_phone = d.get("Delivery.Phone") or existing.customer_phone
+                existing.customer_phone = normalize_phone(d.get("Delivery.Phone")) or existing.customer_phone
                 existing.close_time = actual_dt
                 existing.updated_at = datetime.now(timezone.utc).replace(tzinfo=None)
                 session.add(existing)
@@ -2749,7 +2749,7 @@ class IikoSyncService:
                     delay_minutes=delay_min,
                     is_late=is_late,
                     customer_name=d.get("Delivery.CustomerName"),
-                    customer_phone=d.get("Delivery.Phone"),
+                    customer_phone=normalize_phone(d.get("Delivery.Phone")),
                     updated_at=datetime.now(timezone.utc).replace(tzinfo=None)
                 )
                 session.add(new_order)
