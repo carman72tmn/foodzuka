@@ -3,6 +3,7 @@
 """
 from typing import Optional
 from datetime import datetime
+from app.core.datetime_utils import utc_now
 from decimal import Decimal
 from sqlmodel import Field, SQLModel, Relationship, Column, JSON
 from sqlalchemy import Numeric
@@ -91,8 +92,8 @@ class Product(SQLModel, table=True):
     is_stopped: bool = Field(default=False)
     stopped_at: Optional[datetime] = Field(default=None)
 
-    created_at: datetime = Field(default_factory=datetime.utcnow)
-    updated_at: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(default_factory=utc_now)
+    updated_at: datetime = Field(default_factory=utc_now)
 
     sizes: list[ProductSize] = Relationship(
         back_populates="product",

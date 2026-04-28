@@ -3,6 +3,7 @@
 """
 from typing import Optional
 from datetime import datetime
+from app.core.datetime_utils import utc_now
 from sqlmodel import Field, SQLModel
 
 
@@ -34,10 +35,23 @@ class OlapRevenueRecord(SQLModel, table=True):
     discount_sum: float = Field(default=0.0, description="Сумма скидки")
     revenue: float = Field(default=0.0, description="Сумма со скидкой / выручка")
     orders_count: int = Field(default=0, description="Количество заказов")
+    
+    # Детализация (Добавлено 24.04.2026)
+    terminal_name: Optional[str] = Field(default=None, max_length=255, description="Название терминала")
+    cash_sum: float = Field(default=0.0, description="Оплата наличными")
+    card_sum: float = Field(default=0.0, description="Оплата картой")
+    online_sum: float = Field(default=0.0, description="Онлайн оплата")
+    bonus_sum: float = Field(default=0.0, description="Оплата бонусами")
+    
+    # Детализация купонов и скидок (Добавлено 24.04.2026)
+    coupon_number: Optional[str] = Field(default=None, max_length=255, description="Номер купона")
+    coupon_series: Optional[str] = Field(default=None, max_length=255, description="Серия купона")
+    discount_name: Optional[str] = Field(default=None, max_length=255, description="Наименование скидки")
+
 
     # Фильтры применявшиеся при запросе
     include_deleted: bool = Field(default=False, description="Включать ли удалённые заказы")
 
     # Мета-информация
-    created_at: datetime = Field(default_factory=datetime.utcnow)
-    updated_at: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(default_factory=utc_now)
+    updated_at: datetime = Field(default_factory=utc_now)

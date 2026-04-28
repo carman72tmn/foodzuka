@@ -2,7 +2,7 @@
 Модель Акций (Маркетинговые кампании / Подарки)
 """
 from typing import Optional
-from datetime import datetime, date
+from datetime import datetime, date, timezone
 from decimal import Decimal
 from sqlmodel import Field, SQLModel
 from sqlalchemy import Numeric
@@ -61,5 +61,5 @@ class Action(SQLModel, table=True):
     time_from: Optional[str] = Field(default=None, max_length=5)
     time_until: Optional[str] = Field(default=None, max_length=5)
     
-    created_at: datetime = Field(default_factory=datetime.utcnow)
-    updated_at: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))

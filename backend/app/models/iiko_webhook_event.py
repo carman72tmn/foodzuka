@@ -3,6 +3,7 @@
 """
 from typing import Optional, Dict
 from datetime import datetime
+from app.core.datetime_utils import utc_now
 from sqlmodel import Field, SQLModel, Column, JSON
 
 
@@ -26,4 +27,4 @@ class IikoWebhookEvent(SQLModel, table=True):
     processed: bool = Field(default=False, description="Обработано ли успешно")
     error: Optional[str] = Field(default=None, description="Текст ошибки при обработке")
     
-    created_at: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(default_factory=utc_now)

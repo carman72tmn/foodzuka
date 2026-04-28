@@ -3,6 +3,7 @@
 """
 from typing import Optional
 from datetime import datetime
+from app.core.datetime_utils import utc_now
 from sqlmodel import Field, SQLModel
 
 
@@ -33,5 +34,5 @@ class NpsReview(SQLModel, table=True):
     is_processed: bool = Field(default=False, description="Обработан ли отзыв менеджером")
     manager_comment: Optional[str] = Field(default=None, description="Комментарий менеджера (результат решения)")
     
-    created_at: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(default_factory=utc_now)
     processed_at: Optional[datetime] = Field(default=None, description="Дата обработки")

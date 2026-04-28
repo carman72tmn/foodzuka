@@ -17,6 +17,7 @@
 from typing import Optional
 from datetime import datetime, date
 from decimal import Decimal
+from app.core.datetime_utils import utc_now
 from sqlmodel import Field, SQLModel
 from sqlalchemy import Numeric
 
@@ -119,5 +120,5 @@ class PromoCode(SQLModel, table=True):
     )
 
     # Метаданные
-    created_at: datetime = Field(default_factory=datetime.utcnow)
-    updated_at: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(default_factory=utc_now)
+    updated_at: datetime = Field(default_factory=utc_now)

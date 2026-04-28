@@ -32,6 +32,40 @@ class Company(CompanyBase, table=True):
     branches: List["Branch"] = Relationship(back_populates="company", sa_relationship_kwargs={"cascade": "all, delete-orphan"})
 
 
+class CustomPolygonBase(SQLModel):
+    name: str
+    description: Optional[str] = None
+    branch_id: int = Field(foreign_key="branches.id")
+    delivery_zone_id: Optional[int] = Field(default=None, foreign_key="delivery_zones.id")
+
+    # Параметры доставки
+    min_delivery_time: Optional[int] = Field(default=None, description="Мин. время доставки (мин)")
+    max_delivery_time: Optional[int] = Field(default=None, description="Макс. время доставки (мин)")
+    min_order_amount: float = Field(default=0.0, description="Минимальная сумма заказа")
+    delivery_cost: float = Field(default=0.0, description="Стоимость доставки")
+    free_delivery_threshold: float = Field(default=0.0, description="Сумма для бесплатной доставки")
+
+    # Визуальные настройки
+    fill_color: str = Field(default="#4caf50", description="Цвет заливки полигона (HEX)")
+    priority: int = Field(default=0, description="Приоритет полигона (чем выше, тем главнее)")
+    
+    # Coordinates as a list of [lat, lng]
+    coordinates: List[List[float]] = Field(default_factory=list, sa_column=Column(JSONB))
+    is_active: bool = True
+
+
+class CustomPolygon(CustomPolygonBase, table=True):
+    __tablename__ = "custom_polygons"
+    
+    id: Optional[int] = Field(default=None, primary_key=True)
+    created_at: datetime = Field(default_factory=utc_now)
+    updated_at: datetime = Field(default_factory=utc_now)
+    
+    # Relationships
+    branch: "Branch" = Relationship(back_populates="custom_polygons")
+    delivery_zone: Optional["DeliveryZone"] = Relationship(back_populates="custom_polygons")
+
+
 class BranchBase(SQLModel):
     name: str
     address: str
@@ -104,35 +138,3 @@ class DeliveryZone(DeliveryZoneBase, table=True):
     custom_polygons: List["CustomPolygon"] = Relationship(back_populates="delivery_zone")
 
 
-class CustomPolygonBase(SQLModel):
-    name: str
-    description: Optional[str] = None
-    branch_id: int = Field(foreign_key="branches.id")
-    delivery_zone_id: Optional[int] = Field(default=None, foreign_key="delivery_zones.id")
-
-    # Параметры доставки
-    min_delivery_time: Optional[int] = Field(default=None, description="Мин. время доставки (мин)")
-    max_delivery_time: Optional[int] = Field(default=None, description="Макс. время доставки (мин)")
-    min_order_amount: float = Field(default=0.0, description="Минимальная сумма заказа")
-    delivery_cost: float = Field(default=0.0, description="Стоимость доставки")
-    free_delivery_threshold: float = Field(default=0.0, description="Сумма для бесплатной доставки")
-
-    # Визуальные настройки
-    fill_color: str = Field(default="#4caf50", description="Цвет заливки полигона (HEX)")
-    priority: int = Field(default=0, description="Приоритет полигона (чем выше, тем главнее)")
-    
-    # Coordinates as a list of [lat, lng]
-    coordinates: List[List[float]] = Field(default_factory=list, sa_column=Column(JSONB))
-    is_active: bool = True
-
-
-class CustomPolygon(CustomPolygonBase, table=True):
-    __tablename__ = "custom_polygons"
-    
-    id: Optional[int] = Field(default=None, primary_key=True)
-    created_at: datetime = Field(default_factory=utc_now)
-    updated_at: datetime = Field(default_factory=utc_now)
-    
-    # Relationships
-    branch: Branch = Relationship(back_populates="custom_polygons")
-    delivery_zone: Optional[DeliveryZone] = Relationship(back_populates="custom_polygons")

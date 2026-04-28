@@ -2,7 +2,7 @@
 API эндпоинты для управления Отзывами (NPS)
 """
 from typing import List, Optional
-from datetime import datetime
+from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlmodel import Session, select
 from app.core.database import get_session
@@ -71,7 +71,7 @@ async def process_review(
         setattr(review, key, value)
         
     if update_data.get('is_processed') and not review.processed_at:
-        review.processed_at = datetime.utcnow()
+        review.processed_at = datetime.now(timezone.utc)
 
     session.add(review)
     session.commit()

@@ -3,6 +3,7 @@
 """
 from typing import Optional
 from datetime import datetime
+from app.core.datetime_utils import utc_now
 from sqlmodel import Field, SQLModel
 
 
@@ -16,4 +17,4 @@ class VkActivity(SQLModel, table=True):
     item_id: Optional[str] = Field(default=None, max_length=100, description="ID поста или комментария, чтобы избежать повторов")
     points: int = Field(default=0, description="Начисленные баллы")
     is_synced: bool = Field(default=False, description="Синхронизировано ли с iikoCard")
-    created_at: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(default_factory=utc_now)

@@ -2,7 +2,7 @@
 Модель настроек интеграции с iiko
 """
 from typing import Optional
-from datetime import datetime
+from datetime import datetime, timezone
 from sqlmodel import Field, SQLModel
 
 
@@ -108,6 +108,52 @@ class IikoSettings(SQLModel, table=True):
         description="Пароль для iiko Resto API"
     )
 
+    # Настройки POS Loyalty Server
+    pos_loyalty_name: Optional[str] = Field(
+        default=None, max_length=255,
+        description="Наименование (pos_login) для Loyalty Server"
+    )
+    pos_loyalty_login: Optional[str] = Field(
+        default=None, max_length=255,
+        description="Логин для Loyalty Server"
+    )
+    pos_loyalty_password: Optional[str] = Field(
+        default=None, max_length=255,
+        description="Пароль для Loyalty Server"
+    )
+    pos_loyalty_channel: Optional[str] = Field(
+        default=None, max_length=255,
+        description="Канал подключения для Loyalty Server"
+    )
+
+    # Настройки управления (Дополнительно)
+    address_format: str = Field(
+        default="components", max_length=50,
+        description="Формат парсинга адреса: components (по полям) или line1 (строка)"
+    )
+    city_name: Optional[str] = Field(
+        default=None, max_length=100,
+        description="Название города для автоматической настройки часового пояса"
+    )
+    manual_timezone: Optional[str] = Field(
+        default=None, max_length=50,
+        description="Ручная настройка часового пояса (GMT+X)"
+    )
+    timezone_name: Optional[str] = Field(
+        default=None, max_length=100,
+        description="Внутреннее имя часового пояса (напр. Europe/Moscow)"
+    )
+
+    delivery_zones_map_url: Optional[str] = Field(
+        default=None, max_length=1000,
+        description="Ссылка на карту Google (KML/GeoJSON) для импорта геометрии зон"
+    )
+
+    last_order_revision: int = Field(
+        default=0,
+        description="Номер последней успешно обработанной ревизии заказов"
+    )
+
     # Метаданные
-    created_at: datetime = Field(default_factory=datetime.utcnow)
-    updated_at: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))

@@ -5,7 +5,7 @@ import json
 import random
 import string
 from typing import List, Optional
-from datetime import datetime, date
+from datetime import datetime, date, timezone
 from decimal import Decimal
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field, ConfigDict
@@ -133,7 +133,7 @@ async def update_promo_code(
         raise HTTPException(status_code=404, detail="Promo code not found")
     for key, value in data.model_dump().items():
         setattr(promo, key, value)
-    promo.updated_at = datetime.utcnow()
+    promo.updated_at = datetime.now(timezone.utc)
     session.commit()
     session.refresh(promo)
     return promo
@@ -165,7 +165,7 @@ async def toggle_promo_code(
     if not promo:
         raise HTTPException(status_code=404, detail="Promo code not found")
     promo.is_active = not promo.is_active
-    promo.updated_at = datetime.utcnow()
+    promo.updated_at = datetime.now(timezone.utc)
     session.commit()
     return {"success": True, "is_active": promo.is_active}
 

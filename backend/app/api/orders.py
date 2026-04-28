@@ -3,9 +3,11 @@ API эндпоинты для работы с заказами
 """
 from typing import List, Optional, Dict, Any
 from decimal import Decimal
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date
+from app.core.datetime_utils import utc_now
 from fastapi import APIRouter, Depends, HTTPException, status, Request, BackgroundTasks
 from sqlmodel import Session, select
+from sqlalchemy.orm import selectinload
 from sqlalchemy.orm.attributes import flag_modified
 from app.core.database import get_session
 from app.models.company import Branch, Company
@@ -19,6 +21,8 @@ from app.schemas import OrderCreate, OrderUpdate, OrderResponse, OrderItemRespon
 import logging
 from app.services.iiko_service import iiko_service
 from app.services.iiko_sync_service import iiko_sync_service
+from app.services.order_geo_service import geocode_order
+
 
 logger = logging.getLogger(__name__)
 
@@ -41,7 +45,7 @@ async def get_orders(
     - **status_filter**: Фильтр по статусу
     - **telegram_user_id**: Фильтр по пользователю Telegram
     """
-    query = select(Order).order_by(Order.created_at.desc()).offset(skip).limit(limit)
+    query = select(Order).options(selectinload(Order.resolved_zone)).order_by(Order.created_at.desc()).offset(skip).limit(limit)
 
     if status_filter:
         query = query.where(Order.status == status_filter)
@@ -57,6 +61,8 @@ async def get_orders(
         items_query = select(OrderItem).where(OrderItem.order_id == order.id)
         order_dict = order.model_dump()
         order_dict["items"] = list(session.exec(items_query).all())
+        # Явно добавляем имя зоны доставки из property
+        order_dict["resolved_delivery_zone_name"] = order.resolved_zone_name
         result.append(order_dict)
 
     return result
@@ -65,17 +71,18 @@ async def get_orders(
 @router.get("/{order_id}", response_model=OrderResponse)
 async def get_order(order_id: int, session: Session = Depends(get_session)):
     """Получить заказ по ID"""
-    order = session.get(Order, order_id)
+    # Получаем позиции заказа и зону
+    items_query = select(OrderItem).where(OrderItem.order_id == order_id)
+    order = session.exec(select(Order).options(selectinload(Order.resolved_zone)).where(Order.id == order_id)).first()
     if not order:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Order with id {order_id} not found"
         )
-
-    # Получаем позиции заказа
-    items_query = select(OrderItem).where(OrderItem.order_id == order_id)
     order_dict = order.model_dump()
     order_dict["items"] = list(session.exec(items_query).all())
+    # Явно добавляем имя зоны доставки из property
+    order_dict["resolved_delivery_zone_name"] = order.resolved_zone_name
 
     return order_dict
 
@@ -83,8 +90,10 @@ async def get_order(order_id: int, session: Session = Depends(get_session)):
 @router.post("/", response_model=OrderResponse, status_code=status.HTTP_201_CREATED)
 async def create_order(
     order_data: OrderCreate,
+    background_tasks: BackgroundTasks,
     session: Session = Depends(get_session)
 ):
+
     """
     Создать новый заказ
 
@@ -93,18 +102,24 @@ async def create_order(
     3. Создаем заказ в БД
     4. Отправляем заказ в iiko
     """
-    # Проверяем клиента (Черный список)
-    customer = session.exec(select(Customer).where(Customer.phone == order_data.customer_phone)).first()
+    # Проверяем клиента и создаем/обновляем карточку (Черный список)
+    order_info = f"Заказ с сайта/бота на адрес: {order_data.delivery_address}"
+    if order_data.comment:
+        order_info += f" | Коммент: {order_data.comment}"
+        
+    customer_id = await iiko_sync_service.ensure_customer_from_order(
+        phone=order_data.customer_phone,
+        name=order_data.customer_name,
+        surname=order_data.customer_surname,
+        order_info=order_info,
+        order_date=datetime.now(),
+        telegram_id=order_data.telegram_user_id
+    )
+    
+    customer = session.get(Customer, customer_id)
     if not customer:
-        # Создаем нового клиента если не найден
-        customer = Customer(
-            phone=order_data.customer_phone,
-            name=order_data.customer_name,
-            telegram_id=order_data.telegram_user_id
-        )
-        session.add(customer)
-        session.commit()
-        session.refresh(customer)
+        # Резервный вариант на случай ошибки в методе
+        customer = session.exec(select(Customer).where(Customer.phone == order_data.customer_phone)).first()
     
     if customer.is_blocked:
         raise HTTPException(
@@ -157,7 +172,7 @@ async def create_order(
             )
         
         # Проверка дат
-        today = datetime.utcnow().date()
+        today = utc_now().date()
         if (promo.valid_from and today < promo.valid_from) or (promo.valid_until and today > promo.valid_until):
              raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
@@ -292,7 +307,7 @@ async def create_order(
         total_discount=total_discount,
         promo_code_id=promo_code_id,
         comment=order_data.comment,
-        status=OrderStatus.NEW
+        status=OrderStatus.new
     )
     session.add(order)
     session.commit()
@@ -304,6 +319,10 @@ async def create_order(
         session.add(order_item)
 
     session.commit()
+    
+    # Фоновое геокодирование
+    background_tasks.add_task(geocode_order, order.id, lambda: Session(session.bind))
+
 
     # Отправляем заказ в iiko (асинхронно, не блокируем ответ)
     try:
@@ -340,7 +359,7 @@ async def create_order(
         # Сохраняем ID заказа из iiko
         if iiko_response.get("orderId"):
             order.iiko_order_id = iiko_response["orderId"]
-            order.status = OrderStatus.CONFIRMED
+            order.status = OrderStatus.confirmed
             session.add(order)
             session.commit()
     except Exception as e:
@@ -351,6 +370,8 @@ async def create_order(
     items_query = select(OrderItem).where(OrderItem.order_id == order.id)
     order_dict = order.model_dump()
     order_dict["items"] = list(session.exec(items_query).all())
+    # Явно добавляем имя зоны доставки из property
+    order_dict["resolved_delivery_zone_name"] = order.resolved_zone_name
 
     return order_dict
 
@@ -359,8 +380,10 @@ async def create_order(
 async def update_order(
     order_id: int,
     order_data: OrderUpdate,
+    background_tasks: BackgroundTasks,
     session: Session = Depends(get_session)
 ):
+
     """Обновить заказ"""
     order = session.get(Order, order_id)
     if not order:
@@ -377,6 +400,11 @@ async def update_order(
     session.add(order)
     session.commit()
     session.refresh(order)
+    
+    # Если адрес изменился, пересчитываем геопозицию
+    if order_data.delivery_address:
+        background_tasks.add_task(geocode_order, order.id, lambda: Session(session.bind))
+
 
     # Получаем позиции для ответа
     items_query = select(OrderItem).where(OrderItem.order_id == order_id)
@@ -396,7 +424,7 @@ async def cancel_order(order_id: int, session: Session = Depends(get_session)):
             detail=f"Order with id {order_id} not found"
         )
 
-    if order.status in [OrderStatus.DELIVERED, OrderStatus.CANCELLED]:
+    if order.status in [OrderStatus.delivered, OrderStatus.cancelled]:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Cannot cancel order with status {order.status}"
@@ -410,7 +438,7 @@ async def cancel_order(order_id: int, session: Session = Depends(get_session)):
             print(f"Error cancelling order in iiko: {e}")
 
     # Обновляем статус
-    order.status = OrderStatus.CANCELLED
+    order.status = OrderStatus.cancelled
     session.add(order)
     session.commit()
     session.refresh(order)
@@ -441,12 +469,22 @@ async def iiko_webhook(request: Request, session: Session = Depends(get_session)
 
     for event in data:
         event_type = event.get("eventType")
-        if event_type == "DeliveryOrderUpdate":
+        # Обрабатываем типы событий, которые содержат информацию о заказе
+        if event_type in ["DeliveryOrderUpdate", "DeliveryOrderCreate", "DeliveryOrderStatusChanged"]:
             event_info = event.get("eventInfo", {})
             org_id = event.get("organizationId")
-            print(f"INFO: [iiko_webhook] Received DeliveryOrderUpdate for org {org_id}. Event status: {event_info.get('status')}")
+            
+            # Извлекаем детальную информацию для лога
+            # В разных событиях структура может немного отличаться
+            o_data = event_info.get("order", event_info)
+            order_id = o_data.get("id") or event_info.get("id")
+            raw_status = o_data.get("status") or event_info.get("creationStatus")
+            
+            logger.info(f"WEBHOOK: [iiko_webhook] Event: {event_type} | Org: {org_id} | OrderID: {order_id} | Status: {raw_status}")
+            
             if event_info:
-                await iiko_sync_service.process_iiko_order(session, event_info, org_id)
+                # process_iiko_order умеет работать и с event_info и с o_data
+                await iiko_sync_service.process_iiko_order(event_info, org_id)
                 
     return {"status": "success"}
 
@@ -454,20 +492,26 @@ async def iiko_webhook(request: Request, session: Session = Depends(get_session)
 @router.post("/sync")
 async def sync_recent_orders(background_tasks: BackgroundTasks, session: Session = Depends(get_session)):
     """
-    Ручная синхронизация заказов из iiko за последние 24 часа.
+    Ручная синхронизация заказов из iiko (ревизии + последние 48 часов).
     """
     # Проверяем наличие настроек iiko в БД
     settings_db = session.exec(select(IikoSettings)).first()
     if not settings_db or not settings_db.api_login:
         raise HTTPException(status_code=400, detail="No iiko settings configured")
     
-    date_to = datetime.utcnow()
-    date_from = date_to - timedelta(hours=24)
-    
     async def run_sync():
-        with Session(session.bind) as sync_session:
-            # Ручная синхронизация за последние 30 дней (720 часов)
-            await iiko_sync_service.sync_orders(sync_session, hours=720)
+        try:
+            with Session(session.bind) as sync_session:
+                # Синхронизация заказов (внутри логика по ревизиям и по датам -24h/+24h)
+                logger.info("Starting manual order sync (Revision + 48h Window) via API")
+                await iiko_sync_service.sync_orders(sync_session)
+                logger.info("Manual order sync finished")
+        except Exception as e:
+            logger.error(f"Error in manual sync background task: {e}", exc_info=True)
     
-    background_tasks.add_task(run_sync)
-    return {"status": "accepted", "message": "Order synchronization started in background"}
+    try:
+        background_tasks.add_task(run_sync)
+        return {"status": "accepted", "message": "Order synchronization started in background"}
+    except Exception as e:
+        logger.error(f"Failed to add manual sync task to background: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to start synchronization: {str(e)}")

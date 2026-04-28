@@ -27,7 +27,15 @@ hiredis==2.3.2
 python-jose[cryptography]==3.3.0
 passlib[bcrypt]==1.7.4
 
+# Очереди задач
+celery[redis]==5.3.6
+
 # Утилиты
 python-dateutil==2.8.2
 pytz==2024.1
 APScheduler==3.10.4
+shapely==2.0.3
+lxml==5.1.0
+pandas==2.2.0
+openpyxl==3.1.2
+tzdata

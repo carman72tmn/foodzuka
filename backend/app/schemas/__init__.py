@@ -352,6 +352,7 @@ class OrderCreate(BaseModel):
     telegram_username: Optional[str] = None
     branch_id: int
     customer_name: str = Field(max_length=255)
+    customer_surname: Optional[str] = Field(default=None, max_length=255)
     customer_phone: str = Field(max_length=20)
     delivery_address: str = Field(max_length=500)
     comment: Optional[str] = None
@@ -492,6 +493,7 @@ class IikoSettingsCreate(BaseModel):
     city_name: Optional[str] = None
     manual_timezone: Optional[str] = None
     timezone_name: Optional[str] = None
+    delivery_zones_map_url: Optional[str] = None
 
 
 class IikoSettingsResponse(IikoSettingsCreate):
@@ -645,6 +647,13 @@ class CustomerBase(BaseModel):
     name: Optional[str] = None
     email: Optional[str] = None
     birthday: Optional[datetime] = None
+    city: Optional[str] = None
+    addresses: Optional[str] = None
+    notes: Optional[str] = None
+    is_risk: bool = False
+    risk_reason: Optional[str] = None
+    categories: Optional[str] = None
+    wallet_balances: Optional[str] = None
     is_blocked: bool = False
 
 class CustomerCreate(CustomerBase):
@@ -656,20 +665,76 @@ class CustomerUpdate(BaseModel):
     name: Optional[str] = None
     email: Optional[str] = None
     birthday: Optional[datetime] = None
+    city: Optional[str] = None
+    addresses: Optional[str] = None
+    notes: Optional[str] = None
+    is_risk: Optional[bool] = None
+    risk_reason: Optional[str] = None
+    categories: Optional[str] = None
+    wallet_balances: Optional[str] = None
     is_blocked: Optional[bool] = None
+
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+import json
 
 class CustomerResponse(CustomerBase):
     id: int
-    loyalty_status_id: Optional[int]
-    bonus_points: Decimal
-    status_points: int
-    iiko_customer_id: Optional[str]
-    total_orders_count: int
-    total_orders_amount: Decimal
-    last_order_date: Optional[datetime]
+    surname: Optional[str] = None
+    loyalty_status_id: Optional[int] = None
+    bonus_points: float = 0.0
+    status_points: int = 0
+    iiko_customer_id: Optional[str] = None
+    uid: Optional[str] = None
+    iiko_id: Optional[str] = None
+    vk_user_id: Optional[int] = None
+    last_order_id_iiko: Optional[str] = None
+    total_orders_count: int = 0
+    total_orders_amount: float = 0.0
+    last_order_date: Optional[datetime] = None
+    registration_date: Optional[datetime] = None
+    
+    # Premium Fields
+    is_high_risk: bool = False
+    risk_reason: Optional[str] = None
+    iiko_notes: Optional[str] = None
+    iiko_comment: Optional[str] = None
+    loyalty_categories: Optional[Union[str, List[str]]] = None
+    iiko_categories: Optional[List[str]] = []
+    additional_phones: Optional[List[str]] = []
+    
+    # Consents
+    gender: Optional[str] = None
+    consent_status: Optional[str] = None
+    is_marketing_consented: bool = True
+    is_system_notifications_consented: bool = True
+    marketing_consents: Optional[List[dict]] = []
+    
+    # Analytics & Compatibility
+    total_purchases_sum: float = 0.0
+    last_iiko_order_id: Optional[str] = None
+    is_new_guest: bool = True
+    card_number: Optional[str] = None
+    orders_history: Optional[List[dict]] = []
+    
     created_at: datetime
     updated_at: datetime
+
+    @field_validator('orders_history', 'iiko_categories', 'additional_phones', 'marketing_consents', 'loyalty_categories', mode='before')
+    @classmethod
+    def parse_json_string(cls, v):
+        if isinstance(v, str) and v.strip():
+            try:
+                return json.loads(v)
+            except Exception:
+                return v
+        return v
+
     model_config = ConfigDict(from_attributes=True)
+
+
+class CustomerPaginationResponse(BaseModel):
+    items: List[CustomerResponse]
+    total: int
 
 
 class NpsReviewBase(BaseModel):

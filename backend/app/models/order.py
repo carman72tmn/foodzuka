@@ -102,6 +102,7 @@ class Order(SQLModel, table=True):
     # JSON-поля для хранения детализированных данных, если они нужны
     order_items_details: Optional[List[Dict[str, Any]]] = Field(default=None, sa_column=Column(JSON), description="Полный состав заказа из iiko")
     customer_info_details: Optional[Dict[str, Any]] = Field(default=None, sa_column=Column(JSON), description="Полные данные заказчика")
+    address_parts: Optional[Dict[str, Any]] = Field(default=None, sa_column=Column(JSON), description="Детальные компоненты адреса (JSON)")
     
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
@@ -114,6 +115,8 @@ class Order(SQLModel, table=True):
 
     @property
     def resolved_zone_name(self) -> Optional[str]:
+        if self.order_type == "Самовывоз":
+            return "Самовывоз"
         return self.resolved_zone.name if self.resolved_zone else None
 
 

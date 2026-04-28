@@ -3,6 +3,7 @@
 """
 from typing import Optional
 from datetime import datetime
+from app.core.datetime_utils import utc_now
 from sqlmodel import Field, SQLModel
 from sqlalchemy import Numeric
 from decimal import Decimal
@@ -30,8 +31,8 @@ class LoyaltyStatus(SQLModel, table=True):
     )
     sort_order: int = Field(default=0)
     is_active: bool = Field(default=True)
-    created_at: datetime = Field(default_factory=datetime.utcnow)
-    updated_at: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(default_factory=utc_now)
+    updated_at: datetime = Field(default_factory=utc_now)
 
 
 class LoyaltyRule(SQLModel, table=True):
@@ -67,8 +68,8 @@ class LoyaltyRule(SQLModel, table=True):
         description="Срок жизни статусных баллов (дни, 0 = бессрочно)"
     )
     is_active: bool = Field(default=True)
-    created_at: datetime = Field(default_factory=datetime.utcnow)
-    updated_at: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(default_factory=utc_now)
+    updated_at: datetime = Field(default_factory=utc_now)
 
 
 class LoyaltyTransaction(SQLModel, table=True):
@@ -96,4 +97,4 @@ class LoyaltyTransaction(SQLModel, table=True):
         default=None, index=True,
         description="ID заказа (если транзакция привязана к заказу)"
     )
-    created_at: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(default_factory=utc_now)

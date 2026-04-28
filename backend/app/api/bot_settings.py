@@ -3,7 +3,7 @@ from sqlmodel import Session, select
 from app.core.database import get_session
 from app.models.bot_settings import BotSettings
 from pydantic import BaseModel
-from datetime import datetime
+from datetime import datetime, timezone
 
 router = APIRouter(prefix="/bot", tags=["Bot Settings"])
 
@@ -30,7 +30,7 @@ async def save_bot_settings(data: BotSettingsSchema, db: Session = Depends(get_s
         settings_db.telegram_bot_token = data.telegram_bot_token
         if data.welcome_message:
             settings_db.welcome_message = data.welcome_message
-        settings_db.updated_at = datetime.utcnow()
+        settings_db.updated_at = datetime.now(timezone.utc)
     else:
         settings_db = BotSettings(**data.model_dump())
         db.add(settings_db)

@@ -1,17 +1,19 @@
 """
 API эндпоинты для управления Филиалами и Зонами доставки
 """
-from typing import List
-from fastapi import APIRouter, Depends, HTTPException, status
+from typing import List, Optional
+from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File
 from sqlmodel import Session, select
 from app.core.database import get_session
-from app.models.company import Company, Branch, DeliveryZone
+from app.models.company import Company, Branch, DeliveryZone, CustomPolygon
 from app.models.iiko_settings import IikoSettings
 from app.services.iiko_service import iiko_service
 from app.schemas import (
     BranchCreate, BranchUpdate, BranchResponse,
-    DeliveryZoneCreate, DeliveryZoneUpdate, DeliveryZoneResponse
+    DeliveryZoneCreate, DeliveryZoneUpdate, DeliveryZoneResponse,
+    CustomPolygonCreate, CustomPolygonResponse, CustomPolygonUpdate
 )
+from app.utils.geo_utils import parse_kml, parse_geojson
 
 router = APIRouter(prefix="/branches", tags=["Branches"])
 
@@ -202,13 +204,22 @@ async def delete_branch(branch_id: int, session: Session = Depends(get_session))
 
 # ============= Зоны доставки =============
 
+from sqlalchemy.orm import selectinload
+
+@router.post("/zones/sync", response_model=dict)
+async def sync_delivery_zones(session: Session = Depends(get_session)):
+    """Синхронизация зон доставки из iiko"""
+    from app.services.iiko_sync_service import iiko_sync_service
+    result = await iiko_sync_service.sync_delivery_restrictions(session)
+    return result
+
 @router.get("/{branch_id}/zones", response_model=List[DeliveryZoneResponse])
 async def get_delivery_zones(
     branch_id: int,
     session: Session = Depends(get_session)
 ):
     """Списки зон доставки для конкретного филиала"""
-    query = select(DeliveryZone).where(DeliveryZone.branch_id == branch_id)
+    query = select(DeliveryZone).where(DeliveryZone.branch_id == branch_id).options(selectinload(DeliveryZone.custom_polygons))
     zones = session.exec(query).all()
     return zones
 
@@ -258,3 +269,80 @@ async def delete_delivery_zone(zone_id: int, session: Session = Depends(get_sess
 
     session.delete(zone)
     session.commit()
+@router.post("/{branch_id}/polygons/upload", response_model=List[CustomPolygonResponse])
+async def upload_branch_polygons(
+    branch_id: int,
+    file: UploadFile = File(...),
+    session: Session = Depends(get_session)
+):
+    """Загрузка и парсинг полигонов из KML или GeoJSON"""
+    branch = session.get(Branch, branch_id)
+    if not branch:
+        raise HTTPException(status_code=404, detail="Филиал не найден")
+        
+    content = await file.read()
+    content_str = content.decode("utf-8")
+    
+    polygons_data = []
+    if file.filename.endswith(".kml"):
+        polygons_data = parse_kml(content_str)
+    elif file.filename.endswith(".json") or file.filename.endswith(".geojson"):
+        polygons_data = parse_geojson(content_str)
+    else:
+        raise HTTPException(status_code=400, detail="Поддерживаются только .kml и .geojson файлы")
+        
+    if not polygons_data:
+        raise HTTPException(status_code=400, detail="Не удалось найти полигоны в файле")
+        
+    new_polygons = []
+    for data in polygons_data:
+        poly = CustomPolygon(
+            name=data["name"],
+            branch_id=branch_id,
+            coordinates=data["coordinates"]
+        )
+        session.add(poly)
+        new_polygons.append(poly)
+        
+    session.commit()
+    for poly in new_polygons:
+        session.refresh(poly)
+        
+    return new_polygons
+
+@router.get("/{branch_id}/polygons", response_model=List[CustomPolygonResponse])
+async def get_branch_polygons(branch_id: int, session: Session = Depends(get_session)):
+    """Получение списка загруженных полигонов для филиала"""
+    statement = select(CustomPolygon).where(CustomPolygon.branch_id == branch_id)
+    return session.exec(statement).all()
+
+@router.patch("/polygons/{polygon_id}", response_model=CustomPolygonResponse)
+async def update_polygon(
+    polygon_id: int,
+    polygon_data: CustomPolygonUpdate,
+    session: Session = Depends(get_session)
+):
+    """Обновление параметров загруженного полигона"""
+    poly = session.get(CustomPolygon, polygon_id)
+    if not poly:
+        raise HTTPException(status_code=404, detail="Полигон не найден")
+        
+    update_data = polygon_data.model_dump(exclude_unset=True)
+    for key, value in update_data.items():
+        setattr(poly, key, value)
+        
+    session.add(poly)
+    session.commit()
+    session.refresh(poly)
+    return poly
+
+@router.delete("/polygons/{polygon_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_polygon(polygon_id: int, session: Session = Depends(get_session)):
+    """Удаление загруженного полигона"""
+    poly = session.get(CustomPolygon, polygon_id)
+    if not poly:
+        raise HTTPException(status_code=404, detail="Полигон не найден")
+        
+    session.delete(poly)
+    session.commit()
+    return None

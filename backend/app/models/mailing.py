@@ -3,6 +3,7 @@
 """
 from typing import Optional
 from datetime import datetime
+from app.core.datetime_utils import utc_now
 from sqlmodel import Field, SQLModel
 
 
@@ -43,5 +44,5 @@ class Mailing(SQLModel, table=True):
     # Статус: draft, scheduled, running, completed, cancelled
     status: str = Field(default="draft", max_length=20, index=True)
     
-    created_at: datetime = Field(default_factory=datetime.utcnow)
-    updated_at: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(default_factory=utc_now)
+    updated_at: datetime = Field(default_factory=utc_now)

@@ -3,6 +3,7 @@
 """
 from typing import Optional
 from datetime import datetime
+from app.core.datetime_utils import utc_now
 from sqlmodel import Field, SQLModel
 
 
@@ -15,12 +16,13 @@ class PaymentType(SQLModel, table=True):
     iiko_id: str = Field(unique=True, index=True, max_length=255)
     kind: Optional[str] = Field(default=None, max_length=100)
     is_active: bool = Field(default=True)
-    created_at: datetime = Field(default_factory=datetime.utcnow)
-    updated_at: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(default_factory=utc_now)
+    updated_at: datetime = Field(default_factory=utc_now)
 
     # Поля для сопоставления (mapping)
-    # Например, если мы хотим связать iiko-оплату с нашим типом
-    # mapping_code: Optional[str] = Field(default=None, max_length=100)
+    mapping_type: Optional[str] = Field(default=None, max_length=100)
+    is_processed_externally: bool = Field(default=False)
+
 
     class Config:
         """Настройки модели"""

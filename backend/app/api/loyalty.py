@@ -2,7 +2,7 @@
 API эндпоинты для программы лояльности
 """
 from typing import List, Optional
-from datetime import datetime
+from datetime import datetime, timezone
 from decimal import Decimal
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field, ConfigDict
@@ -97,7 +97,7 @@ async def update_status(
         raise HTTPException(status_code=404, detail="Status not found")
     for key, value in data.model_dump().items():
         setattr(status, key, value)
-    status.updated_at = datetime.utcnow()
+    status.updated_at = datetime.now(timezone.utc)
     session.commit()
     session.refresh(status)
     return status
@@ -150,7 +150,7 @@ async def update_rule(
         raise HTTPException(status_code=404, detail="Rule not found")
     for key, value in data.model_dump().items():
         setattr(rule, key, value)
-    rule.updated_at = datetime.utcnow()
+    rule.updated_at = datetime.now(timezone.utc)
     session.commit()
     session.refresh(rule)
     return rule
@@ -187,16 +187,28 @@ async def list_transactions(
     return session.exec(query).all()
 
 
+from app.tasks.customer_tasks import sync_single_customer_task
+import logging
+
+logger = logging.getLogger(__name__)
+
 @router.post("/transactions", response_model=LoyaltyTransactionResponse)
 async def create_transaction(
     data: LoyaltyTransactionCreate,
     session: Session = Depends(get_session)
 ):
-    """Создать транзакцию (зачисление/списание)"""
+    """Создать транзакцию (зачисление/списание) и синхронизировать клиента"""
     tx = LoyaltyTransaction(**data.model_dump())
     session.add(tx)
     session.commit()
     session.refresh(tx)
+    
+    # Запускаем фоновую синхронизацию, так как баланс изменился
+    try:
+        sync_single_customer_task.delay(data.phone)
+    except Exception as e:
+        logger.warning(f"Failed to trigger sync after transaction for {data.phone}: {e}")
+        
     return tx
 
 

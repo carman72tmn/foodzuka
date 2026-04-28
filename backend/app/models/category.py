@@ -3,6 +3,7 @@
 """
 from typing import Optional, List
 from datetime import datetime
+from app.core.datetime_utils import utc_now
 from sqlmodel import Field, SQLModel, Relationship
 
 
@@ -32,8 +33,8 @@ class Category(SQLModel, table=True):
 
     sort_order: int = Field(default=0)
     is_active: bool = Field(default=True)
-    created_at: datetime = Field(default_factory=datetime.utcnow)
-    updated_at: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(default_factory=utc_now)
+    updated_at: datetime = Field(default_factory=utc_now)
 
     class Config:
         json_schema_extra = {
