@@ -6,6 +6,7 @@ from aiogram.types import Message, CallbackQuery
 from aiogram.filters import Command, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
+from ..utils.date_utils import format_datetime
 from keyboards import (
     get_main_menu_keyboard,
     get_categories_keyboard,
@@ -16,6 +17,7 @@ from keyboards import (
 )
 from utils.api_client import api_client
 from utils.cart import cart_storage
+from utils.date_utils import format_datetime
 
 router = Router()
 
@@ -105,8 +107,19 @@ async def show_orders(message: Message):
                 "cancelled": "Отменен"
             }.get(order["status"], order["status"])
 
+            status_emoji = {
+                "new": "🆕",
+                "confirmed": "✅",
+                "cooking": "👨‍🍳",
+                "ready": "🍕",
+                "delivering": "🚗",
+                "delivered": "✅",
+                "cancelled": "❌"
+            }.get(order["status"], "❓")
+
             orders_text += (
                 f"{status_emoji} Заказ #{order['id']}\n"
+                f"Дата: {format_datetime(order.get('created_at'))}\n"
                 f"Сумма: {float(order['total_amount']):.0f}₽\n"
                 f"Статус: {status_text}\n"
                 f"Адрес: {order['delivery_address']}\n\n"

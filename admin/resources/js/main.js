@@ -11,8 +11,13 @@ import '@styles/styles.scss'
 const app = createApp(App)
 
 
+// Toast
+import Toast from 'vue-toastification'
+import 'vue-toastification/dist/index.css'
+
 // Register plugins
 registerPlugins(app)
+app.use(Toast)
 
 // Mount vue app
 app.mount('#app')

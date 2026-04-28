@@ -1,0 +1,1 @@
+ALTER USER foodtech_user WITH PASSWORD '123456';

@@ -14,6 +14,8 @@ const polygons = ref([])
 const fileInput = ref(null)
 const yandexSettings = ref(null)
 const deliveryMap = ref(null)
+const syncing = ref(false)
+
 
 const API_BASE = "/api/v1"
 
@@ -200,6 +202,26 @@ const focusOnPolygon = (poly) => {
   }
 }
 
+const syncIikoZones = async () => {
+  loading.value = true
+  try {
+    const res = await fetch(`${API_BASE}/branches/zones/sync`, {
+      method: 'POST'
+    })
+    if (res.ok) {
+      const data = await res.json()
+      showMessage(`Синхронизация завершена: ${data.synced || 0} зон`)
+      await loadBranchData(selectedBranch.value)
+    } else {
+      showMessage("Ошибка при синхронизации", "error")
+    }
+  } catch (e) {
+    showMessage("Ошибка при синхронизации", "error")
+  } finally {
+    loading.value = false
+  }
+}
+
 onMounted(loadData)
 </script>
 
@@ -252,6 +274,9 @@ onMounted(loadData)
               @update:modelValue="onBranchChange"
             />
           </div>
+          <VBtn color="success" @click="syncIikoZones" :loading="syncing" class="me-2" variant="tonal" size="small">
+            <VIcon icon="bx-sync" class="me-1" /> Синхронизировать из iiko
+          </VBtn>
           <VBtn color="primary" @click="loadBranchData(selectedBranch)" class="me-2" :loading="loading" variant="tonal" size="small">
             <VIcon icon="bx-refresh" /> Обновить
           </VBtn>

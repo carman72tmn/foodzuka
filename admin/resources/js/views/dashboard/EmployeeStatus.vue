@@ -7,7 +7,7 @@ const loading = ref(false)
 const fetchOpenShifts = async () => {
   loading.value = true
   try {
-    const res = await fetch('/api/v1/employees/shifts/open')
+    const res = await fetch('/api/v1/employees/shifts/open/detailed')
     const data = await res.json()
     if (data.status === 'success') {
       openShifts.value = data.data
@@ -17,11 +17,6 @@ const fetchOpenShifts = async () => {
   } finally {
     loading.value = false
   }
-}
-
-const formatDate = (dateString) => {
-  if (!dateString) return ''
-  return new Date(dateString).toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' })
 }
 
 onMounted(fetchOpenShifts)
@@ -39,8 +34,14 @@ onMounted(fetchOpenShifts)
           v-for="shift in openShifts"
           :key="shift.id"
           :title="shift.employee_name"
-          :subtitle="`Начал в ${formatDate(shift.date_open)}`"
         >
+          <template #subtitle>
+            <div class="d-flex flex-column">
+              <span>{{ shift.employee_role || 'Персонал' }}</span>
+              <span class="text-primary font-weight-bold">На смене: {{ shift.elapsed_text }} (с {{ shift.shift_start }})</span>
+            </div>
+          </template>
+
           <template #prepend>
             <VAvatar color="success" variant="tonal" size="32">
               <VIcon icon="bx-user" size="18" />

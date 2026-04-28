@@ -1,5 +1,6 @@
 <script setup>
 import { ref, onMounted } from 'vue'
+import { formatDateTime } from '@/utils/date'
 
 const mailings = ref([])
 const loading = ref(true)
@@ -66,8 +67,7 @@ const fetchMailings = async () => {
 }
 
 const formatDate = (val) => {
-    if(!val) return '—'
-    return new Intl.DateTimeFormat('ru-RU', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' }).format(new Date(val))
+    return formatDateTime(val)
 }
 
 onMounted(() => {

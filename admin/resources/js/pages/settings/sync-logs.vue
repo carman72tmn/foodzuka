@@ -5,7 +5,7 @@ const loading = ref(false)
 const logs = ref([])
 const selectedType = ref(null)
 
-const API_BASE = "/api/iiko"
+const API_BASE = "/api/v1/iiko"
 
 const headers = [
   { title: "ID", key: "id", sortable: true, width: 60 },

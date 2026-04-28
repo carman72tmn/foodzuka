@@ -1,10 +1,36 @@
 <script setup>
+import { ref, onMounted, onUnmounted } from 'vue'
 import NavItems from '@/layouts/components/NavItems.vue'
 import logo from '@images/logo.svg?raw'
 import VerticalNavLayout from '@layouts/components/VerticalNavLayout.vue'
 import Footer from '@/layouts/components/Footer.vue'
-import NavbarThemeSwitcher from '@/layouts/components/NavbarThemeSwitcher.vue'
 import UserProfile from '@/layouts/components/UserProfile.vue'
+import NavbarThemeSwitcher from '@/layouts/components/NavbarThemeSwitcher.vue'
+
+import { formatDateTime } from '@/utils/date'
+
+const currentTime = ref('')
+
+const updateTime = () => {
+  currentTime.value = formatDateTime(new Date(), { 
+    hour: '2-digit', 
+    minute: '2-digit',
+    day: undefined,
+    month: undefined,
+    year: undefined
+  })
+}
+
+let timer = null
+
+onMounted(() => {
+  updateTime()
+  timer = setInterval(updateTime, 60000)
+})
+
+onUnmounted(() => {
+  if (timer) clearInterval(timer)
+})
 </script>
 
 <template>
@@ -45,6 +71,11 @@ import UserProfile from '@/layouts/components/UserProfile.vue'
         <NavbarThemeSwitcher class="me-1" />
 
         <UserProfile />
+
+        <div class="ms-4 font-weight-bold text-body-1 text-primary d-flex align-center">
+          <VIcon icon="bx-time-five" size="20" class="me-1" />
+          {{ currentTime }}
+        </div>
       </div>
     </template>
 

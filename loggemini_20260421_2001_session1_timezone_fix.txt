@@ -1,0 +1,11 @@
+Лог изменений Antigravity (foodzuka)
+Дата: 2026-04-21
+Сессия: 1
+Задача: Исправление отображения времени заказов в админ-панели (timezone fix)
+
+[15:01] Начало исследования.
+[15:02] Проверка файлов настроек iiko в корне и в admin/resources/js/pages/settings/iiko.vue.
+[15:03] Проверка модели бэкенда backend/app/models/iiko_settings.py. Нашел поля manual_timezone и timezone_name.
+[15:04] Проверка настроек в БД на сервере: Timezone Name: Asia/Yekaterinburg, Manual Timezone: GMT +5:00.
+[15:05] Проверка последнего заказа в БД: Iiko Creation Time: 2026-04-21 13:38:05.229000 (UTC).
+[15:06] Анализ admin/resources/js/utils/date.js. Логика применения appOffset кажется верной, но требует проверки на реактивность и правильность парсинга GMT +5:00.

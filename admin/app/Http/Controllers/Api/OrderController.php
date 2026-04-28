@@ -24,4 +24,9 @@ class OrderController extends Controller
         $order->update($request->only('status', 'comment'));
         return $order;
     }
+
+    public function getByIikoId($id)
+    {
+        return Order::with('items.product')->where('iiko_order_id', $id)->firstOrFail();
+    }
 }

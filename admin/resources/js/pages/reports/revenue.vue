@@ -200,6 +200,7 @@
 
 <script setup>
 import { ref, computed, onMounted } from 'vue'
+import { formatDateTime } from '@/utils/date'
 
 const BACKEND_URL = '' // Используем относительные пути для проксирования
 
@@ -230,16 +231,17 @@ const totals = computed(() => {
   if (!reportData.value.length) {
     return { revenue: 0, average_check: 0, discount_sum: 0, markup: 0, markup_percent: 0, cost_price: 0, cost_price_percent: 0, orders_count: 0 }
   }
-  const count = reportData.value.length
+  const rev = sum('revenue')
+  const ords = sumInt('orders_count')
   return {
-    revenue: sum('revenue'),
-    average_check: sum('average_check') / count,
+    revenue: rev,
+    average_check: ords > 0 ? (rev / ords) : 0,
     discount_sum: sum('discount_sum'),
     markup: sum('markup'),
-    markup_percent: sum('markup_percent') / count,
+    markup_percent: sum('markup_percent') / reportData.value.length,
     cost_price: sum('cost_price'),
-    cost_price_percent: sum('cost_price_percent') / count,
-    orders_count: sumInt('orders_count'),
+    cost_price_percent: sum('cost_price_percent') / reportData.value.length,
+    orders_count: ords,
   }
 })
 
@@ -300,7 +302,7 @@ async function fetchReport(forceRefresh = false) {
     dataSource.value = json.source || 'iiko_live'
     periodDateFrom.value = json.date_from
     periodDateTo.value = json.date_to
-    lastUpdated.value = new Date().toLocaleString('ru-RU')
+    lastUpdated.value = formatDateTime(new Date())
   } catch (e) {
     error.value = `Ошибка получения данных: ${e.message}`
   } finally {

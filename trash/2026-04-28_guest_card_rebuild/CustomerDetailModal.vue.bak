@@ -1,0 +1,1509 @@
+<script setup>
+import { ref, watch, computed, onUnmounted } from "vue"
+import { formatDateTime } from "@/utils/date"
+import OrderDetailModal from "./OrderDetailModal.vue"
+import "@/styles/customer-card-premium.css"
+
+const props = defineProps({
+  modelValue: {
+    type: Boolean,
+    default: false,
+  },
+  customer: {
+    type: Object,
+    default: () => ({}),
+  },
+})
+
+const emit = defineEmits(["update:modelValue", "updated"])
+
+const dialog = computed({
+  get: () => props.modelValue,
+  set: (val) => emit("update:modelValue", val)
+})
+
+const loading = ref(false)
+const syncLoading = ref(false)
+const tab = ref('anketa') // По умолчанию Анкета
+
+// Данные из API Laravel
+const fullClientData = ref(null)
+const statistics = ref({ total_orders: 0, total_sum: 0, registration_date: '—', last_order: {} })
+const bonusHistory = ref([])
+const addressesHistory = ref([])
+const ordersHistory = ref([])
+const olapStats = ref({
+  total_sum: 0,
+  total_count: 0,
+  average_check: 0,
+  last_order_date: null,
+  first_order_date: null,
+  total_discount: 0,
+  total_items: 0,
+  days_since_last_order: null,
+  frequency_days: 0
+})
+const olapLoading = ref(false)
+const olapError = ref(null)
+const dataLoading = ref(false)
+
+let syncTimer = null
+
+onUnmounted(() => {
+  if (syncTimer) clearTimeout(syncTimer)
+})
+
+const orderSearch = ref('')
+const selectedLocalOrder = ref(null)
+const showLocalOrderDetail = ref(false)
+const selectedIikoOrder = ref(null)
+const showIikoOrderDetail = ref(false)
+
+const filteredOrders = computed(() => {
+  if (!orderSearch.value) return ordersHistory.value
+  const s = orderSearch.value.toLowerCase()
+  return ordersHistory.value.filter(o => 
+    (o.number && o.number.toString().toLowerCase().includes(s)) ||
+    (o.id && o.id.toString().toLowerCase().includes(s)) ||
+    (o.date && o.date.toLowerCase().includes(s))
+  )
+})
+
+const availableCategories = ref([])
+const categoriesLoading = ref(false)
+
+const editableCustomer = ref({
+  name: '',
+  surname: '',
+  first_name: '',
+  last_name: '',
+  email: '',
+  notes: '',
+  birthday: '',
+  gender: 'Не указан',
+  iiko_categories: [],
+  additional_phones: [],
+  marketing_consents: {
+    promo: true,
+    loyalty: true,
+    order_status: true
+  },
+  is_high_risk: false,
+  risk_reason: ''
+})
+
+watch(() => props.customer?.id, (newId) => {
+  if (newId) {
+    const newVal = props.customer
+    editableCustomer.value = {
+      name: newVal.name || '',
+      surname: newVal.surname || '',
+      first_name: newVal.first_name || '',
+      last_name: newVal.last_name || '',
+      email: newVal.email || '',
+      notes: newVal.iiko_notes || newVal.notes || '',
+      birthday: newVal.birthday ? newVal.birthday.split('T')[0] : '',
+      gender: newVal.gender || 'Не указан',
+      iiko_categories: newVal.iiko_categories || [],
+      additional_phones: newVal.additional_phones || [],
+      marketing_consents: newVal.marketing_consents || { promo: true, loyalty: true, order_status: true },
+      is_high_risk: !!newVal.is_high_risk,
+      risk_reason: newVal.risk_reason || ''
+    }
+    fetchFullClientData()
+    fetchAvailableCategories()
+  }
+}, { immediate: true })
+
+const getAuthHeaders = () => ({
+  'Authorization': `Bearer ${localStorage.getItem('accessToken')}`,
+  'Content-Type': 'application/json',
+  'Accept': 'application/json'
+})
+
+const fetchAvailableCategories = async () => {
+  categoriesLoading.value = true
+  try {
+    const response = await fetch('/api/loyalty-categories', {
+      headers: getAuthHeaders()
+    })
+    if (response.ok) {
+      availableCategories.value = await response.json()
+    }
+  } catch (error) {
+    console.error("Failed to fetch available categories:", error)
+  } finally {
+    categoriesLoading.value = false
+  }
+}
+
+const fetchFullClientData = async () => {
+  if (!props.customer?.id) return
+  
+  dataLoading.value = true
+  try {
+    const response = await fetch(`/api/clients/${props.customer.id}`, {
+      headers: getAuthHeaders()
+    })
+    if (response.ok) {
+      const data = await response.json()
+      
+      if (!data || !data.client) {
+        console.error("Сервер не вернул данные клиента")
+        return
+      }
+
+      fullClientData.value = data.client
+      statistics.value = data.statistics || { total_orders: 0, total_sum: 0, registration_date: '—', last_order: {} }
+      bonusHistory.value = data.client.bonuses || []
+      addressesHistory.value = data.client.addresses || []
+      
+      const c = data.client
+      editableCustomer.value = {
+        name: c.name || '',
+        surname: c.surname || '',
+        first_name: c.first_name || '',
+        last_name: c.last_name || '',
+        email: c.email || '',
+        notes: c.iiko_notes || c.notes || '',
+        birthday: c.birthday ? c.birthday.split('T')[0] : '',
+        gender: c.gender || 'Не указан',
+        iiko_categories: c.iiko_categories || [],
+        additional_phones: c.additional_phones || [],
+        marketing_consents: c.marketing_consents || { promo: true, loyalty: true, order_status: true },
+        is_high_risk: !!c.is_high_risk,
+        risk_reason: c.risk_reason || ''
+      }
+      
+      if (data.orders_history && data.orders_history.length) {
+          ordersHistory.value = data.orders_history
+      } else if (data.client.orders && data.client.orders.length) {
+          ordersHistory.value = data.client.orders.map(o => ({
+              id: o.iiko_id || o.id,
+              local_id: o.id,
+              number: o.order_number || o.id,
+              sum: o.total_sum,
+              date: formatDateTime(o.created_at),
+              status: o.status || 'NEW',
+              exists_locally: !!o.id,
+              details: []
+          }))
+      }
+    }
+  } catch (error) {
+    console.error("Failed to fetch full client data:", error)
+  } finally {
+    dataLoading.value = false
+    // Параллельно загружаем OLAP статистику
+    fetchOlapStats()
+  }
+}
+
+const fetchOlapStats = async () => {
+  if (!props.customer?.id) return
+  
+  olapLoading.value = true
+  olapError.value = null
+  try {
+    const response = await fetch(`/api/customers/${props.customer.id}/olap-stats`, {
+      headers: getAuthHeaders()
+    })
+    if (response.ok) {
+      olapStats.value = await response.json()
+    } else {
+      const err = await response.json()
+      olapError.value = err.detail || "Ошибка загрузки OLAP"
+      if (response.status === 403) {
+        olapError.value = "Лицензия Resto API (OLAP) отсутствует"
+      }
+    }
+  } catch (error) {
+    console.error("Failed to fetch OLAP stats:", error)
+    olapError.value = "Ошибка соединения"
+  } finally {
+    olapLoading.value = false
+  }
+}
+
+const syncOrdersFromIiko = async (months = 12) => {
+  if (!props.customer?.id) return
+  
+  syncLoading.value = true
+  try {
+    const response = await fetch(`/api/clients/${props.customer.id}/sync-iiko-orders?months=${months}`, {
+      method: 'POST',
+      headers: getAuthHeaders()
+    })
+    if (response.ok) {
+      const data = await response.json()
+      ordersHistory.value = data
+    } else {
+      const errorData = await response.json()
+      alert("Ошибка: " + (errorData.message || "Не удалось загрузить историю заказов"))
+    }
+  } catch (error) {
+    alert("Ошибка соединения: " + error.message)
+  } finally {
+    syncLoading.value = false
+  }
+}
+
+const openOrderDetail = async (order) => {
+  if (order.exists_locally) {
+    try {
+      dataLoading.value = true
+      const response = await fetch(`/api/orders/by-iiko-id/${order.id}`, {
+        headers: getAuthHeaders()
+      })
+      if (response.ok) {
+        selectedLocalOrder.value = await response.json()
+        showLocalOrderDetail.value = true
+      } else {
+        selectedIikoOrder.value = order
+        showIikoOrderDetail.value = true
+      }
+    } catch (e) {
+      selectedIikoOrder.value = order
+      showIikoOrderDetail.value = true
+    } finally {
+      dataLoading.value = false
+    }
+  } else {
+    selectedIikoOrder.value = order
+    showIikoOrderDetail.value = true
+  }
+}
+
+const getStatusColor = (status) => {
+  if (!status) return 'grey'
+  const s = status.toLowerCase()
+  if (s.includes('delivered') || s.includes('closed')) return 'success'
+  if (s.includes('cancel')) return 'error'
+  if (s.includes('progress') || s.includes('cook')) return 'info'
+  if (s.includes('new') || s.includes('unconfirm')) return 'warning'
+  return 'primary'
+}
+
+const bonusOperationModal = ref(false)
+const bonusOperation = ref({
+  type: 'topup',
+  amount: null,
+  comment: ''
+})
+const bonusOperationLoading = ref(false)
+
+const openBonusOperation = (type) => {
+  bonusOperation.value = {
+    type,
+    amount: null,
+    comment: ''
+  }
+  bonusOperationModal.value = true
+}
+
+const submitBonusOperation = async () => {
+  if (!props.customer?.id) return
+  if (!bonusOperation.value.amount || bonusOperation.value.amount <= 0) {
+    alert("Введите корректную сумму")
+    return
+  }
+  if (!bonusOperation.value.comment) {
+    alert("Комментарий обязателен")
+    return
+  }
+
+  bonusOperationLoading.value = true
+  try {
+    const response = await fetch(`/api/clients/${props.customer.id}/bonus-operation`, {
+      method: 'POST',
+      headers: getAuthHeaders(),
+      body: JSON.stringify({
+        operation: bonusOperation.value.type,
+        amount: bonusOperation.value.amount,
+        comment: bonusOperation.value.comment
+      })
+    })
+
+    if (response.ok) {
+      const data = await response.json()
+      bonusHistory.value = data.bonuses
+      
+      if (fullClientData.value) {
+          if (bonusOperation.value.type === 'topup') {
+              fullClientData.value.bonus_points = Number(fullClientData.value.bonus_points || 0) + Number(bonusOperation.value.amount)
+          } else {
+              fullClientData.value.bonus_points = Number(fullClientData.value.bonus_points || 0) - Number(bonusOperation.value.amount)
+          }
+      }
+      
+      bonusOperationModal.value = false
+      alert("Операция успешно выполнена")
+    } else {
+      const errorData = await response.json()
+      alert("Ошибка: " + (errorData.message || "Не удалось выполнить операцию"))
+    }
+  } catch (error) {
+    alert("Ошибка соединения: " + error.message)
+  } finally {
+    bonusOperationLoading.value = false
+  }
+}
+
+const syncBonusesFromIiko = async () => {
+  if (!props.customer?.id) return
+  
+  syncLoading.value = true
+  try {
+    const response = await fetch(`/api/clients/${props.customer.id}/sync-bonus-history`, {
+      method: 'POST',
+      headers: getAuthHeaders()
+    })
+    if (response.ok) {
+      const data = await response.json()
+      bonusHistory.value = data
+      alert("История бонусов успешно обновлена")
+    } else {
+      const errorData = await response.json()
+      alert("Ошибка: " + (errorData.message || "Не удалось загрузить историю бонусов"))
+    }
+  } catch (error) {
+    alert("Ошибка соединения: " + error.message)
+  } finally {
+    syncLoading.value = false
+  }
+}
+
+const triggerFullSync = async () => {
+  if (!props.customer?.id) return
+  
+  syncLoading.value = true
+  try {
+    const response = await fetch(`/api/clients/${props.customer.id}/sync-full`, {
+      method: 'POST',
+      headers: getAuthHeaders()
+    })
+    
+    if (response.ok) {
+        alert("Полная синхронизация запущена в фоновом режиме. Данные обновятся через несколько секунд.")
+        syncTimer = setTimeout(() => {
+            fetchFullClientData()
+        }, 3000)
+    } else {
+      const errorData = await response.json()
+      alert("Ошибка: " + (errorData.message || "Не удалось запустить синхронизацию"))
+    }
+  } catch (error) {
+    alert("Ошибка соединения: " + error.message)
+  } finally {
+    syncLoading.value = false
+  }
+}
+
+const saveToIiko = async () => {
+  if (!props.customer?.id) return
+  
+  loading.value = true
+  try {
+    const response = await fetch(`/api/clients/${props.customer.id}`, {
+      method: 'PUT',
+      headers: getAuthHeaders(),
+      body: JSON.stringify(editableCustomer.value)
+    })
+    
+    if (response.ok) {
+      const result = await response.json()
+      fullClientData.value = result.client
+      
+      const c = result.client
+      editableCustomer.value = {
+        ...editableCustomer.value,
+        ...c,
+        is_high_risk: !!c.is_high_risk
+      }
+      
+      emit("updated")
+    } else {
+      const errorData = await response.json()
+      alert("Ошибка сохранения: " + (errorData.message || response.statusText))
+    }
+  } catch (error) {
+    alert("Ошибка: " + error.message)
+  } finally {
+    loading.value = false
+  }
+}
+
+const addPhone = () => {
+  if (!editableCustomer.value.additional_phones) editableCustomer.value.additional_phones = []
+  editableCustomer.value.additional_phones.push('')
+}
+
+const removePhone = (index) => {
+  editableCustomer.value.additional_phones.splice(index, 1)
+}
+
+const copyToClipboard = (text) => {
+  if (!text) return
+  navigator.clipboard.writeText(text)
+}
+
+const formatDate = (dateString) => {
+  if (!dateString) return '—'
+  return formatDateTime(dateString)
+}
+
+const toggleAddressStatus = async (addressId) => {
+  try {
+    const response = await fetch(`/api/clients/${props.customer.id}/addresses/${addressId}/toggle`, {
+      method: 'PUT',
+      headers: getAuthHeaders()
+    })
+    
+    if (response.ok) {
+      const result = await response.json()
+      const addrIndex = addressesHistory.value.findIndex(a => a.id === addressId)
+      if (addrIndex !== -1) {
+        addressesHistory.value[addrIndex].is_active = result.is_active
+      }
+    }
+  } catch (e) {
+    console.error("Ошибка запроса смены статуса", e)
+  }
+}
+
+const formatPhone = (phone) => {
+  if (!phone) return '—'
+  const cleaned = ('' + phone).replace(/\D/g, '')
+  const match = cleaned.match(/^(\d{1})(\d{3})(\d{3})(\d{2})(\d{2})$/)
+  if (match) {
+    return `+${match[1]} (${match[2]}) ${match[3]}-${match[4]}-${match[5]}`
+  }
+  return phone
+}
+
+const formatCurrency = (val) => {
+  return new Intl.NumberFormat('ru-RU').format(val)
+}
+</script>
+
+<template>
+  <VDialog v-model="dialog" max-width="1200" scrollable transition="dialog-bottom-transition">
+    <VCard v-if="customer" class="customer-modal-premium">
+      <!-- HEADER -->
+      <VCardTitle class="customer-header-premium pa-0">
+        <div class="header-gradient d-flex align-center py-6 px-8">
+          <VAvatar size="80" color="white" variant="tonal" class="me-6 avatar-border">
+            <VIcon icon="bx-user" size="40" color="white" />
+          </VAvatar>
+          
+          <div class="d-flex flex-column text-white">
+            <div class="d-flex align-center">
+              <span class="text-h3 font-weight-black">{{ customer.name || 'Гость' }} {{ customer.surname || '' }}</span>
+              <VChip v-if="fullClientData?.is_new_guest" color="success" size="small" class="ms-4 font-weight-bold px-3" variant="flat">
+                НОВЫЙ
+              </VChip>
+              <VIcon v-if="fullClientData?.is_high_risk" icon="bx-error-circle" color="error" class="ms-3" size="32">
+                 <VTooltip activator="parent" location="top">{{ fullClientData.risk_reason || 'Внимание: Высокий риск' }}</VTooltip>
+              </VIcon>
+            </div>
+            <div class="d-flex align-center mt-2 opacity-80">
+              <VIcon icon="bx-phone" size="20" class="me-2" />
+              <span class="text-h5">{{ formatPhone(customer.phone) }}</span>
+              <VBtn icon size="x-small" variant="text" color="white" class="ms-2" @click="copyToClipboard(customer.phone)">
+                <VIcon icon="bx-copy-alt" size="16" />
+              </VBtn>
+            </div>
+          </div>
+          
+          <VSpacer />
+          
+          <div class="d-flex align-center ga-4">
+            <VBtn 
+              prepend-icon="bx-sync" 
+              color="white" 
+              variant="flat" 
+              class="rounded-pill font-weight-bold text-primary sync-btn-premium" 
+              :loading="syncLoading"
+              @click="triggerFullSync"
+            >
+              Синхронизировать iiko
+            </VBtn>
+            
+            <VBtn icon variant="tonal" @click="dialog = false" color="white" class="close-btn-premium">
+              <VIcon icon="bx-x" size="28" />
+            </VBtn>
+          </div>
+        </div>
+      </VCardTitle>
+
+      <!-- CONTENT -->
+      <VCardText class="pa-0 bg-premium-content">
+        <VRow no-gutters>
+          <!-- LEFT: NAVIGATION & CONTENT -->
+          <VCol cols="12" md="8" class="pa-0 border-e">
+            <div class="tabs-container-premium">
+              <VTabs v-model="tab" color="primary" direction="horizontal" class="tabs-premium" grow>
+                <VTab value="anketa" class="tab-item"><VIcon icon="bx-user-detail" size="20" class="me-2" /> Анкета</VTab>
+                <VTab value="bonuses" class="tab-item"><VIcon icon="bx-wallet" size="20" class="me-2" /> Бонусы</VTab>
+                <VTab value="orders" class="tab-item"><VIcon icon="bx-receipt" size="20" class="me-2" /> Заказы</VTab>
+                <VTab value="analytics" class="tab-item"><VIcon icon="bx-bar-chart-alt-2" size="20" class="me-2" /> Аналитика</VTab>
+                <VTab value="risks" class="tab-item danger-tab"><VIcon icon="bx-error" size="20" class="me-2" /> Риски</VTab>
+                <VTab value="addresses" class="tab-item"><VIcon icon="bx-map" size="20" class="me-2" /> Адреса</VTab>
+                <VTab value="notifications" class="tab-item"><VIcon icon="bx-bell" size="20" class="me-2" /> Уведомления</VTab>
+                <VTab value="additional" class="tab-item"><VIcon icon="bx-plus-circle" size="20" class="me-2" /> Дополнительно</VTab>
+              </VTabs>
+            </div>
+
+            <VTabsWindow v-model="tab" class="pa-8 window-content-premium">
+              <!-- 1. АНКЕТА -->
+              <VTabsWindowItem value="anketa">
+                <div class="d-flex align-center justify-space-between mb-8">
+                   <h2 class="text-h5 font-weight-black d-flex align-center">
+                     <VIcon icon="bx-id-card" color="primary" class="me-3" /> Основная информация
+                   </h2>
+                   <VBtn v-if="fullClientData?.vk_link" :href="fullClientData.vk_link" target="_blank" color="info" variant="flat" class="rounded-pill px-6" prepend-icon="bxl-vk">
+                      Профиль VK
+                   </VBtn>
+                </div>
+
+                <VRow>
+                  <VCol cols="12" md="6">
+                    <VCard variant="flat" class="pa-6 rounded-xl info-glass-card mb-6">
+                      <div class="info-row mb-4">
+                        <div class="info-label">ПОЛ</div>
+                        <div class="info-value">{{ fullClientData?.gender || 'Не указан' }}</div>
+                      </div>
+                      <div class="info-row mb-4">
+                        <div class="info-label">ДАТА РОЖДЕНИЯ</div>
+                        <div class="info-value">{{ fullClientData?.birthday ? formatDate(fullClientData.birthday).split(',')[0] : '—' }}</div>
+                      </div>
+                      <div class="info-row">
+                        <div class="info-label">ДАТА РЕГИСТРАЦИИ</div>
+                        <div class="info-value">{{ fullClientData?.registration_date ? formatDate(fullClientData.registration_date) : '—' }}</div>
+                      </div>
+                    </VCard>
+                  </VCol>
+                  <VCol cols="12" md="6">
+                    <VCard variant="flat" class="pa-6 rounded-xl info-glass-card">
+                      <div class="info-row mb-4">
+                        <div class="info-label">СТАТУС СОГЛАСИЯ</div>
+                        <div class="info-value d-flex align-center">
+                          <VChip :color="fullClientData?.consent_status ? 'success' : 'warning'" size="small" variant="tonal" class="font-weight-bold">
+                            {{ fullClientData?.consent_status || 'НЕ ОПРЕДЕЛЕН' }}
+                          </VChip>
+                        </div>
+                      </div>
+                      <div class="info-row mb-4">
+                        <div class="info-label">МАРКЕТИНГ</div>
+                        <div class="info-value">
+                          <VChip :color="fullClientData?.is_marketing_consented ? 'success' : 'error'" size="small" variant="flat" class="font-weight-bold">
+                            {{ fullClientData?.is_marketing_consented ? 'СОГЛАСЕН' : 'ОТКАЗ' }}
+                          </VChip>
+                        </div>
+                      </div>
+                      <div class="info-row">
+                        <div class="info-label">СИСТЕМНЫЕ</div>
+                        <div class="info-value">
+                          <VChip :color="fullClientData?.is_system_notifications_consented ? 'success' : 'error'" size="small" variant="flat" class="font-weight-bold">
+                            {{ fullClientData?.is_system_notifications_consented ? 'СОГЛАСЕН' : 'ОТКАЗ' }}
+                          </VChip>
+                        </div>
+                      </div>
+                    </VCard>
+                  </VCol>
+                </VRow>
+
+                <h3 class="text-h6 font-weight-black mt-8 mb-4">Категории гостя в iiko</h3>
+                <div class="d-flex flex-wrap ga-2">
+                   <VChip v-for="cat in (fullClientData?.iiko_categories || [])" :key="cat" color="secondary" size="medium" variant="tonal" class="rounded-pill px-4">
+                     {{ cat }}
+                   </VChip>
+                   <div v-if="!fullClientData?.iiko_categories?.length" class="text-grey text-body-2 italic">Категории не заданы</div>
+                </div>
+              </VTabsWindowItem>
+
+              <!-- 2. БОНУСЫ -->
+              <VTabsWindowItem value="bonuses">
+                <div class="d-flex justify-space-between align-center mb-8">
+                  <h2 class="text-h5 font-weight-black d-flex align-center">
+                    <VIcon icon="bx-wallet" color="warning" class="me-3" /> Бонусная программа
+                  </h2>
+                  <VBtn 
+                    color="warning" 
+                    variant="tonal" 
+                    class="rounded-pill font-weight-bold" 
+                    :loading="syncLoading"
+                    prepend-icon="bx-sync"
+                    @click="syncBonusesFromIiko"
+                  >
+                    Обновить баланс
+                  </VBtn>
+                </div>
+                
+                <VCard variant="flat" class="balance-card-premium pa-8 rounded-xl mb-8 d-flex align-center justify-space-between">
+                  <div class="d-flex flex-column">
+                    <span class="text-subtitle-1 text-white opacity-70 font-weight-bold uppercase letter-spacing-1">Текущий баланс</span>
+                    <span class="text-h2 text-white font-weight-black mt-1">{{ fullClientData?.bonus_points || 0 }} <span class="text-h4 opacity-80">баллов</span></span>
+                  </div>
+                  <div class="d-flex ga-4">
+                    <VBtn 
+                      color="white" 
+                      variant="flat" 
+                      size="large"
+                      class="rounded-pill font-weight-black text-success action-btn-premium"
+                      prepend-icon="bx-plus-circle"
+                      @click="openBonusOperation('topup')"
+                    >
+                      Начислить
+                    </VBtn>
+                    <VBtn 
+                      color="white" 
+                      variant="flat" 
+                      size="large"
+                      class="rounded-pill font-weight-black text-error action-btn-premium"
+                      prepend-icon="bx-minus-circle"
+                      @click="openBonusOperation('chargeoff')"
+                    >
+                      Списать
+                    </VBtn>
+                  </div>
+                </VCard>
+
+                <h3 class="text-h6 font-weight-black mb-4">История транзакций</h3>
+                <VTable class="premium-table border rounded-xl overflow-hidden">
+                  <thead>
+                    <tr>
+                      <th class="text-left">ДАТА</th>
+                      <th class="text-center">СУММА</th>
+                      <th class="text-left">КОММЕНТАРИЙ</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr v-for="bonus in bonusHistory" :key="bonus.id">
+                      <td class="text-body-2 font-weight-medium">{{ formatDate(bonus.transaction_date) }}</td>
+                      <td class="text-center">
+                        <VChip :color="bonus.amount >= 0 ? 'success' : 'error'" size="small" variant="flat" class="font-weight-bold min-width-60">
+                           {{ bonus.amount >= 0 ? '+' : '' }}{{ bonus.amount }}
+                        </VChip>
+                      </td>
+                      <td class="text-caption text-grey-darken-1">{{ bonus.comment || '—' }}</td>
+                    </tr>
+                    <tr v-if="!bonusHistory.length">
+                      <td colspan="3" class="text-center py-8 text-grey">История транзакций пуста</td>
+                    </tr>
+                  </tbody>
+                </VTable>
+              </VTabsWindowItem>
+
+              <!-- 3. ЗАКАЗЫ -->
+              <VTabsWindowItem value="orders">
+                <div class="d-flex align-center flex-wrap ga-4 mb-8">
+                  <h2 class="text-h5 font-weight-black d-flex align-center">
+                    <VIcon icon="bx-receipt" color="primary" class="me-3" /> История заказов
+                  </h2>
+                  <VSpacer />
+                  <div class="period-selectors ga-2 d-flex">
+                    <VBtn v-for="m in [1, 3, 6, 12]" :key="m" 
+                      color="primary" 
+                      :variant="syncLoading ? 'tonal' : 'tonal'" 
+                      size="small" 
+                      class="rounded-pill font-weight-bold"
+                      @click="syncOrdersFromIiko(m)"
+                    >
+                      {{ m }} мес
+                    </VBtn>
+                  </div>
+                </div>
+                
+                <VTextField
+                  v-model="orderSearch"
+                  prepend-inner-icon="bx-search"
+                  label="Поиск по номеру или дате"
+                  variant="outlined"
+                  class="search-premium mb-6"
+                  hide-details
+                  clearable
+                />
+
+                <div v-if="dataLoading" class="text-center py-12">
+                  <VProgressCircular indeterminate color="primary" size="64" />
+                </div>
+
+                <div v-else class="orders-list-premium">
+                  <VCard 
+                    v-for="order in filteredOrders" 
+                    :key="order.id" 
+                    class="order-card-premium mb-4 elevation-0 border-s-lg"
+                    :style="{ borderLeftColor: `var(--v-theme-${getStatusColor(order.status)}) !important`, borderLeftWidth: '8px !important' }"
+                  >
+                    <VCardText class="pa-5">
+                      <VRow align="center">
+                        <VCol cols="12" sm="3" class="d-flex flex-column">
+                          <span class="text-caption text-grey font-weight-bold uppercase mb-1">ЗАКАЗ #</span>
+                          <span class="text-h6 font-weight-black">{{ order.number || 'б/н' }}</span>
+                        </VCol>
+                        <VCol cols="12" sm="4" class="d-flex flex-column">
+                          <span class="text-caption text-grey font-weight-bold uppercase mb-1">ДАТА И ВРЕМЯ</span>
+                          <span class="text-body-1 font-weight-medium">{{ order.date || '—' }}</span>
+                        </VCol>
+                        <VCol cols="6" sm="2" class="d-flex flex-column text-center">
+                          <span class="text-caption text-grey font-weight-bold uppercase mb-1">СУММА</span>
+                          <span class="text-h6 font-weight-black text-primary">{{ order.sum }} ₽</span>
+                        </VCol>
+                        <VCol cols="6" sm="3" class="d-flex align-center justify-end">
+                          <VChip 
+                            size="small" 
+                            :color="getStatusColor(order.status)" 
+                            variant="flat" 
+                            class="font-weight-bold me-3"
+                          >
+                            {{ order.status }}
+                          </VChip>
+                          <VBtn 
+                            icon="bx-chevron-right" 
+                            variant="tonal" 
+                            color="primary" 
+                            size="small"
+                            @click="openOrderDetail(order)"
+                          />
+                        </VCol>
+                      </VRow>
+                    </VCardText>
+                  </VCard>
+                  
+                  <div v-if="!filteredOrders.length" class="text-center py-12 text-grey opacity-40">
+                    <VIcon icon="bx-receipt" size="80" class="mb-4" />
+                    <p class="text-h6">Заказов не найдено</p>
+                  </div>
+                </div>
+              </VTabsWindowItem>
+
+              <!-- 4. АНАЛИТИКА (НОВАЯ) -->
+              <VTabsWindowItem value="analytics">
+                <div class="d-flex align-center justify-space-between mb-8">
+                  <h2 class="text-h5 font-weight-black d-flex align-center">
+                    <VIcon icon="bx-bar-chart-alt-2" color="primary" class="me-3" /> Аналитика из iiko Resto
+                  </h2>
+                  <VBtn 
+                    prepend-icon="bx-refresh" 
+                    variant="tonal" 
+                    color="primary" 
+                    size="small" 
+                    class="rounded-pill"
+                    :loading="olapLoading"
+                    @click="fetchOlapStats"
+                  >
+                    Обновить данные
+                  </VBtn>
+                </div>
+
+                <div v-if="olapError" class="pa-8 text-center glass-card border-error mb-8">
+                   <VIcon icon="bx-error-circle" color="error" size="48" class="mb-2" />
+                   <div class="text-h6 text-error font-weight-bold">{{ olapError }}</div>
+                   <p class="text-body-2 text-grey-darken-1 mt-2">Функция требует активного модуля iiko REST_API</p>
+                </div>
+
+                <VRow v-if="!olapError">
+                  <VCol cols="12" md="4">
+                    <div class="mini-stat-card animate-fade-in" style="animation-delay: 0.1s">
+                      <span class="stat-label">Всего покупок</span>
+                      <span class="stat-value text-primary">{{ olapStats.total_sum }} ₽</span>
+                    </div>
+                  </VCol>
+                  <VCol cols="12" md="4">
+                    <div class="mini-stat-card animate-fade-in" style="animation-delay: 0.2s">
+                      <span class="stat-label">Кол-во заказов</span>
+                      <span class="stat-value">{{ olapStats.total_count }}</span>
+                    </div>
+                  </VCol>
+                  <VCol cols="12" md="4">
+                    <div class="mini-stat-card animate-fade-in" style="animation-delay: 0.3s">
+                      <span class="stat-label">Средний чек</span>
+                      <span class="stat-value">{{ olapStats.average_check }} ₽</span>
+                    </div>
+                  </VCol>
+                  
+                  <VCol cols="12" md="6" class="mt-4">
+                    <VCard variant="flat" class="pa-6 rounded-xl border bg-white">
+                      <div class="text-subtitle-2 text-grey font-weight-bold uppercase mb-4">Жизненный цикл</div>
+                      <div class="d-flex justify-space-between mb-3 pb-3 border-b border-dashed">
+                        <span class="text-body-2 text-grey">Первый заказ:</span>
+                        <span class="text-body-2 font-weight-black">{{ olapStats.first_order_date ? formatDate(olapStats.first_order_date).split(',')[0] : '—' }}</span>
+                      </div>
+                      <div class="d-flex justify-space-between mb-3 pb-3 border-b border-dashed">
+                        <span class="text-body-2 text-grey">Последний заказ:</span>
+                        <span class="text-body-2 font-weight-black">{{ olapStats.last_order_date ? formatDate(olapStats.last_order_date).split(',')[0] : '—' }}</span>
+                      </div>
+                      <div class="d-flex justify-space-between">
+                        <span class="text-body-2 text-grey">Частота (раз в ... дней):</span>
+                        <span class="text-body-2 font-weight-black">{{ olapStats.frequency_days }} дн.</span>
+                      </div>
+                    </VCard>
+                  </VCol>
+
+                  <VCol cols="12" md="6" class="mt-4">
+                    <VCard variant="flat" class="pa-6 rounded-xl border bg-white">
+                      <div class="text-subtitle-2 text-grey font-weight-bold uppercase mb-4">Лояльность и скидки</div>
+                      <div class="d-flex justify-space-between mb-3 pb-3 border-b border-dashed">
+                        <span class="text-body-2 text-grey">Сумма всех скидок:</span>
+                        <span class="text-body-2 font-weight-black text-error">{{ olapStats.total_discount }} ₽</span>
+                      </div>
+                      <div class="d-flex justify-space-between mb-3 pb-3 border-b border-dashed">
+                        <span class="text-body-2 text-grey">Куплено позиций:</span>
+                        <span class="text-body-2 font-weight-black">{{ olapStats.total_items }}</span>
+                      </div>
+                      <div class="d-flex justify-space-between">
+                        <span class="text-body-2 text-grey">Дней с последнего заказа:</span>
+                        <span class="text-body-2 font-weight-black" :class="olapStats.days_since_last_order > 30 ? 'text-error' : 'text-success'">
+                          {{ olapStats.days_since_last_order || 0 }}
+                        </span>
+                      </div>
+                    </VCard>
+                  </VCol>
+                </VRow>
+              </VTabsWindowItem>
+
+              <!-- 4. РИСКИ -->
+              <VTabsWindowItem value="risks">
+                <h2 class="text-h5 font-weight-black d-flex align-center mb-8">
+                  <VIcon icon="bx-error" color="error" class="me-3" /> Управление рисками
+                </h2>
+
+                <VCard 
+                  :color="editableCustomer.is_high_risk ? 'error' : 'success'" 
+                  variant="tonal" 
+                  class="pa-8 rounded-xl border-dashed mb-8 text-center"
+                >
+                  <VIcon 
+                    :icon="editableCustomer.is_high_risk ? 'bx-block' : 'bx-check-shield'" 
+                    size="80" 
+                    class="mb-4" 
+                  />
+                  <h3 class="text-h4 font-weight-black mb-2">
+                    {{ editableCustomer.is_high_risk ? 'КЛИЕНТ В ЧЕРНОМ СПИСКЕ' : 'КЛИЕНТ ПРОВЕРЕН' }}
+                  </h3>
+                  <p class="text-body-1 opacity-80 mb-6">
+                    {{ editableCustomer.is_high_risk ? 'Данный гость отмечен как проблемный. Будьте внимательны при обработке заказов.' : 'У данного гостя нет активных предупреждений или жалоб.' }}
+                  </p>
+                  
+                  <VSwitch 
+                    v-model="editableCustomer.is_high_risk" 
+                    label="Статус высокого риска" 
+                    color="error" 
+                    class="d-inline-flex font-weight-black"
+                    inset
+                    hide-details
+                  />
+                </VCard>
+
+                <div v-if="editableCustomer.is_high_risk">
+                  <h3 class="text-h6 font-weight-black mb-3">Причина постановки на учет</h3>
+                  <VTextarea 
+                    v-model="editableCustomer.risk_reason" 
+                    placeholder="Опишите причину возникновения риска (конфликты, неоплата, ложные вызовы)..." 
+                    variant="outlined" 
+                    rows="4" 
+                    class="bg-white rounded-xl"
+                  />
+                  <VBtn color="primary" block class="mt-4 rounded-pill" size="large" @click="saveToIiko" :loading="loading">
+                    Сохранить статус риска
+                  </VBtn>
+                </div>
+              </VTabsWindowItem>
+
+              <!-- 5. АДРЕСА -->
+              <VTabsWindowItem value="addresses">
+                <h2 class="text-h5 font-weight-black d-flex align-center mb-8">
+                  <VIcon icon="bx-map" color="primary" class="me-3" /> Адреса доставки
+                </h2>
+
+                <div class="addresses-grid">
+                  <VCard 
+                    v-for="addr in addressesHistory" 
+                    :key="addr.id" 
+                    variant="flat" 
+                    class="address-card-premium pa-6 rounded-xl border mb-4"
+                    :class="{'inactive-address': addr.is_active === false}"
+                  >
+                    <div class="d-flex align-start">
+                      <VAvatar color="primary" variant="tonal" class="me-4">
+                        <VIcon icon="bx-home-alt" />
+                      </VAvatar>
+                      
+                      <div class="d-flex flex-column flex-grow-1">
+                        <div class="d-flex justify-space-between">
+                          <span class="text-h6 font-weight-black">
+                            {{ addr.city }}, {{ addr.street }}, {{ addr.house }}
+                          </span>
+                          <VBtn 
+                            icon 
+                            variant="text" 
+                            size="small" 
+                            :color="addr.is_active === false ? 'success' : 'error'"
+                            @click="toggleAddressStatus(addr.id)"
+                          >
+                            <VIcon :icon="addr.is_active === false ? 'bx-check-circle' : 'bx-x-circle'" />
+                            <VTooltip activator="parent">{{ addr.is_active === false ? 'Активировать' : 'Деактивировать' }}</VTooltip>
+                          </VBtn>
+                        </div>
+                        <span class="text-body-2 text-grey-darken-1 mt-1">
+                          квартира: {{ addr.apartment || '—' }} | подъезд: {{ addr.entrance || '—' }} | этаж: {{ addr.floor || '—' }}
+                        </span>
+                        
+                        <div class="d-flex align-center mt-4">
+                          <VChip size="x-small" color="grey" variant="tonal" class="me-2">
+                            Использован: {{ formatDate(addr.last_used_at) }}
+                          </VChip>
+                          <VChip v-if="addr.is_main" size="x-small" color="info" variant="flat" class="font-weight-bold">ОСНОВНОЙ</VChip>
+                        </div>
+                      </div>
+                    </div>
+                  </VCard>
+                  
+                  <div v-if="!addressesHistory.length" class="text-center py-12 text-grey opacity-40">
+                    <VIcon icon="bx-map-alt" size="80" class="mb-4" />
+                    <p class="text-h6">Адреса отсутствуют</p>
+                  </div>
+                </div>
+              </VTabsWindowItem>
+
+              <!-- 6. УВЕДОМЛЕНИЯ -->
+              <VTabsWindowItem value="notifications">
+                <h2 class="text-h5 font-weight-black d-flex align-center mb-8">
+                  <VIcon icon="bx-bell" color="primary" class="me-3" /> Настройка уведомлений
+                </h2>
+
+                <VRow>
+                  <VCol cols="12" md="7">
+                    <VCard variant="flat" class="pa-6 rounded-xl border bg-white mb-6">
+                      <div class="d-flex align-center mb-6">
+                        <VIcon icon="bx-mail-send" color="primary" class="me-3" />
+                        <span class="text-h6 font-weight-bold">Каналы iiko Cloud</span>
+                      </div>
+                      
+                      <div class="ga-4 d-flex flex-column">
+                        <div class="d-flex align-center justify-space-between pa-3 rounded-lg border">
+                          <div class="d-flex flex-column">
+                            <span class="text-subtitle-1 font-weight-black">Маркетинговые акции</span>
+                            <span class="text-caption text-grey">SMS и Email рассылки о спецпредложениях</span>
+                          </div>
+                          <VSwitch v-model="editableCustomer.marketing_consents.promo" color="success" inset hide-details />
+                        </div>
+                        
+                        <div class="d-flex align-center justify-space-between pa-3 rounded-lg border">
+                          <div class="d-flex flex-column">
+                            <span class="text-subtitle-1 font-weight-black">Программа лояльности</span>
+                            <span class="text-caption text-grey">Информация о бонусном балансе и рангах</span>
+                          </div>
+                          <VSwitch v-model="editableCustomer.marketing_consents.loyalty" color="success" inset hide-details />
+                        </div>
+                        
+                        <div class="d-flex align-center justify-space-between pa-3 rounded-lg border">
+                          <div class="d-flex flex-column">
+                            <span class="text-subtitle-1 font-weight-black">Статусы заказов</span>
+                            <span class="text-caption text-grey">Уведомления об изменении этапов доставки</span>
+                          </div>
+                          <VSwitch v-model="editableCustomer.marketing_consents.order_status" color="success" inset hide-details />
+                        </div>
+                      </div>
+                      
+                      <VBtn color="primary" block class="mt-8 rounded-pill" @click="saveToIiko" :loading="loading">
+                        Обновить подписки в iiko
+                      </VBtn>
+                    </VCard>
+                  </VCol>
+                  
+                  <VCol cols="12" md="5">
+                    <VCard variant="flat" class="pa-6 rounded-xl border bg-slate-50">
+                      <div class="d-flex align-center mb-4">
+                        <VIcon icon="bxl-vk" color="info" class="me-3" />
+                        <span class="text-h6 font-weight-bold">Бот ВКонтакте</span>
+                      </div>
+                      
+                      <div v-if="fullClientData?.vk_user_id" class="d-flex flex-column align-center text-center py-4">
+                         <VAvatar size="64" color="info" variant="tonal" class="mb-3">
+                           <VIcon icon="bx-link" />
+                         </VAvatar>
+                         <span class="text-subtitle-1 font-weight-black">Активная привязка</span>
+                         <span class="text-caption text-grey">ID: {{ fullClientData.vk_user_id }}</span>
+                         <VBtn :href="fullClientData.vk_link" target="_blank" variant="text" color="info" size="small" class="mt-2">Перейти в профиль</VBtn>
+                      </div>
+                      <div v-else class="text-center py-6">
+                        <VIcon icon="bx-link-external" size="48" class="text-grey opacity-20 mb-3" />
+                        <p class="text-body-2 text-grey">Пользователь еще не авторизовался через ВК бота</p>
+                      </div>
+                    </VCard>
+                  </VCol>
+                </VRow>
+              </VTabsWindowItem>
+
+              <!-- 7. ДОПОЛНИТЕЛЬНО -->
+              <VTabsWindowItem value="additional">
+                <h2 class="text-h5 font-weight-black d-flex align-center mb-8">
+                  <VIcon icon="bx-plus-circle" color="primary" class="me-3" /> Редактирование профиля
+                </h2>
+
+                <VRow>
+                  <VCol cols="12" md="12">
+                    <VCard variant="flat" class="pa-8 rounded-xl border bg-white mb-8">
+                      <div class="text-subtitle-1 font-weight-black mb-6 d-flex align-center">
+                        <VIcon icon="bx-user-pin" color="primary" class="me-2" /> Персональные данные
+                      </div>
+                      
+                      <VRow>
+                        <VCol cols="12" md="6">
+                          <VTextField v-model="editableCustomer.name" label="Имя" variant="outlined" class="rounded-lg" />
+                        </VCol>
+                        <VCol cols="12" md="6">
+                          <VTextField v-model="editableCustomer.surname" label="Фамилия" variant="outlined" class="rounded-lg" />
+                        </VCol>
+                        <VCol cols="12" md="6">
+                          <VTextField v-model="editableCustomer.birthday" label="Дата рождения" type="date" variant="outlined" />
+                        </VCol>
+                        <VCol cols="12" md="6">
+                          <VSelect 
+                            v-model="editableCustomer.gender" 
+                            :items="[
+                              { title: 'Мужской', value: 'male' }, 
+                              { title: 'Женский', value: 'female' }, 
+                              { title: 'Не указан', value: 'null' }
+                            ]" 
+                            item-title="title"
+                            item-value="value"
+                            label="Пол" 
+                            variant="outlined" 
+                          />
+                        </VCol>
+                        <VCol cols="12">
+                          <VTextField v-model="editableCustomer.email" label="Email" variant="outlined" prepend-inner-icon="bx-envelope" />
+                        </VCol>
+                      </VRow>
+
+                      <div class="text-subtitle-1 font-weight-black mt-8 mb-4 d-flex align-center">
+                        <VIcon icon="bx-purchase-tag" color="secondary" class="me-2" /> Управление категориями
+                      </div>
+                      <VAutocomplete
+                        v-model="editableCustomer.iiko_categories"
+                        :items="availableCategories"
+                        item-title="name"
+                        return-object
+                        multiple
+                        chips
+                        closable-chips
+                        label="Выберите категории лояльности iiko"
+                        variant="outlined"
+                        :loading="categoriesLoading"
+                      />
+
+                      <div class="text-subtitle-1 font-weight-black mt-8 mb-4 d-flex align-center">
+                        <VIcon icon="bx-phone-call" color="success" class="me-2" /> Дополнительные контакты
+                      </div>
+                      <div v-for="(phone, index) in editableCustomer.additional_phones" :key="'phone-'+index" class="d-flex align-center mb-3">
+                        <VTextField 
+                          :model-value="editableCustomer.additional_phones[index]"
+                          @update:model-value="val => editableCustomer.additional_phones[index] = val"
+                          placeholder="Доп. телефон" 
+                          variant="outlined" 
+                          density="compact" 
+                          hide-details 
+                          prepend-inner-icon="bx-plus" 
+                        />
+                        <VBtn icon="bx-trash" variant="text" color="error" class="ms-2" @click="removePhone(index)" />
+                      </div>
+                      <VBtn prepend-icon="bx-plus" variant="tonal" color="success" class="rounded-pill" @click="addPhone">Добавить контакт</VBtn>
+
+                      <div class="text-subtitle-1 font-weight-black mt-8 mb-4 d-flex align-center">
+                        <VIcon icon="bx-note" color="warning" class="me-2" /> Заметки в iiko
+                      </div>
+                      <VTextarea v-model="editableCustomer.notes" placeholder="Комментарии для персонала, особенности гостя..." variant="outlined" rows="3" />
+
+                      <VBtn color="primary" block class="mt-8 rounded-pill" size="large" :loading="loading" @click="saveToIiko">
+                        <VIcon icon="bx-cloud-upload" class="me-2" /> Сохранить данные в iiko Cloud
+                      </VBtn>
+                    </VCard>
+                  </VCol>
+                </VRow>
+              </VTabsWindowItem>
+            </VTabsWindow>
+          </VCol>
+
+          <!-- RIGHT: STATISTICS SIDEBAR -->
+          <VCol cols="12" md="4" class="pa-8 bg-slate-50 sidebar-premium">
+            <h3 class="text-subtitle-2 font-weight-black text-grey-darken-1 text-uppercase letter-spacing-1 mb-6">Сводная статистика</h3>
+            
+            <VRow dense>
+              <VCol cols="12">
+                <VCard variant="flat" class="pa-6 rounded-xl stats-box-premium mb-4 text-white bg-primary-gradient">
+                  <div class="text-caption opacity-70 font-weight-bold uppercase">Общий LTV</div>
+                  <div class="text-h3 font-weight-black mt-1">{{ formatCurrency(statistics.total_sum) }} ₽</div>
+                  <VIcon icon="bx-trending-up" class="stats-icon-bg" />
+                </VCard>
+              </VCol>
+              
+              <VCol cols="6">
+                <VCard variant="flat" class="pa-5 rounded-xl stats-box-premium bg-white border">
+                  <div class="text-caption text-grey font-weight-bold uppercase">Заказов</div>
+                  <div class="text-h4 font-weight-black text-primary">{{ statistics.total_orders }}</div>
+                </VCard>
+              </VCol>
+              
+              <VCol cols="6">
+                <VCard variant="flat" class="pa-5 rounded-xl stats-box-premium bg-white border">
+                  <div class="text-caption text-grey font-weight-bold uppercase">Средний чек</div>
+                  <div class="text-h5 font-weight-black">
+                    {{ olapStats.average_check > 0 ? olapStats.average_check : formatCurrency(statistics.total_orders > 0 ? (statistics.total_sum / statistics.total_orders).toFixed(0) : 0) }} ₽
+                  </div>
+                </VCard>
+              </VCol>
+            </VRow>
+
+            <VDivider class="my-8" />
+
+            <div class="last-activity-premium">
+              <h4 class="text-subtitle-2 font-weight-black mb-4 d-flex align-center">
+                <VIcon icon="bx-time-five" color="grey" class="me-2" size="18" /> ПОСЛЕДНЯЯ АКТИВНОСТЬ
+              </h4>
+              <div class="activity-item d-flex mb-4">
+                <div class="activity-dot"></div>
+                <div class="d-flex flex-column">
+                  <span class="text-caption text-grey uppercase font-weight-bold">Последний заказ</span>
+                  <span class="text-body-2 font-weight-black">{{ statistics.last_order?.date || '—' }}</span>
+                  <span class="text-caption text-primary font-weight-bold">ID: {{ statistics.last_order?.iiko_id || '—' }}</span>
+                </div>
+              </div>
+              <div class="activity-item d-flex">
+                <div class="activity-dot bg-success"></div>
+                <div class="d-flex flex-column">
+                  <span class="text-caption text-grey uppercase font-weight-bold">Регистрация</span>
+                  <span class="text-body-2 font-weight-black">{{ statistics.registration_date }}</span>
+                </div>
+              </div>
+            </div>
+
+            <VSpacer class="mt-12" />
+
+            <div class="system-ids-premium pa-4 rounded-xl border mt-auto">
+              <div class="d-flex justify-space-between mb-2">
+                <span class="text-caption text-grey">iiko Customer ID</span>
+                <span class="text-caption font-weight-black truncate ms-4">{{ customer.iiko_customer_id || '—' }}</span>
+              </div>
+              <div class="d-flex justify-space-between">
+                <span class="text-caption text-grey">iiko User ID</span>
+                <span class="text-caption font-weight-black truncate ms-4">{{ customer.iiko_id || '—' }}</span>
+              </div>
+            </div>
+          </VCol>
+        </VRow>
+      </VCardText>
+    </VCard>
+  </VDialog>
+
+  <!-- БОНУСНАЯ ОПЕРАЦИЯ -->
+  <VDialog v-model="bonusOperationModal" max-width="400">
+    <VCard class="rounded-xl overflow-hidden">
+      <VCardTitle :class="bonusOperation.type === 'topup' ? 'bg-success' : 'bg-error'" class="text-white py-4 px-6">
+        {{ bonusOperation.type === 'topup' ? 'Начисление бонусов' : 'Списание бонусов' }}
+      </VCardTitle>
+      <VCardText class="pa-6">
+        <VTextField 
+          v-model.number="bonusOperation.amount" 
+          label="Сумма" 
+          type="number" 
+          variant="outlined" 
+          autofocus 
+          class="mb-4"
+          prepend-inner-icon="bx-coin"
+        />
+        <VTextarea 
+          v-model="bonusOperation.comment" 
+          label="Комментарий (Обязательно)" 
+          variant="outlined" 
+          rows="2"
+        />
+      </VCardText>
+      <VCardActions class="pa-6 pt-0">
+        <VSpacer />
+        <VBtn variant="text" @click="bonusOperationModal = false">Отмена</VBtn>
+        <VBtn 
+          :color="bonusOperation.type === 'topup' ? 'success' : 'error'" 
+          variant="flat" 
+          class="px-8 rounded-pill"
+          :loading="bonusOperationLoading"
+          @click="submitBonusOperation"
+        >
+          Подтвердить
+        </VBtn>
+      </VCardActions>
+    </VCard>
+  </VDialog>
+
+  <!-- ДЕТАЛИ ЗАКАЗА IIKO -->
+  <VDialog v-model="showIikoOrderDetail" max-width="600">
+    <VCard v-if="selectedIikoOrder" class="rounded-xl overflow-hidden">
+      <VCardTitle class="bg-primary text-white d-flex align-center py-5 px-8">
+        <div class="d-flex flex-column">
+          <span class="text-h6 font-weight-bold">Детали заказа iiko #{{ selectedIikoOrder.number }}</span>
+          <span class="text-caption opacity-70">ID: {{ selectedIikoOrder.id }}</span>
+        </div>
+        <VSpacer />
+        <VBtn icon variant="text" @click="showIikoOrderDetail = false" color="white"><VIcon icon="bx-x" /></VBtn>
+      </VCardTitle>
+      <VCardText class="pa-8">
+        <div class="d-flex justify-space-between mb-8">
+          <div>
+            <div class="text-caption text-grey font-weight-bold uppercase mb-1">Статус заказа</div>
+            <VChip :color="getStatusColor(selectedIikoOrder.status)" variant="flat" class="font-weight-black">{{ selectedIikoOrder.status }}</VChip>
+          </div>
+          <div class="text-right">
+            <div class="text-caption text-grey font-weight-bold uppercase mb-1">Дата и время</div>
+            <div class="text-body-1 font-weight-black">{{ selectedIikoOrder.date }}</div>
+          </div>
+        </div>
+
+        <div class="items-list pa-4 bg-grey-lighten-4 rounded-xl">
+          <div v-for="item in selectedIikoOrder.details" :key="item.productId" class="d-flex justify-space-between mb-3 pb-3 border-b border-dashed">
+            <div class="d-flex flex-column">
+              <span class="text-body-2 font-weight-black">{{ item.name }}</span>
+              <span class="text-caption text-grey">{{ item.amount }} шт. x {{ (item.sum / item.amount).toFixed(2) }} ₽</span>
+            </div>
+            <span class="text-body-1 font-weight-black">{{ item.sum }} ₽</span>
+          </div>
+          <div v-if="!selectedIikoOrder.details?.length" class="text-center py-4 text-grey italic">Детали состава заказа отсутствуют</div>
+        </div>
+        
+        <div class="d-flex justify-space-between align-center mt-8">
+          <span class="text-h5 font-weight-black">ИТОГО К ОПЛАТЕ:</span>
+          <span class="text-h4 font-weight-black text-primary">{{ selectedIikoOrder.sum }} ₽</span>
+        </div>
+      </VCardText>
+      <VCardActions class="pa-8 pt-0">
+        <VBtn block variant="flat" color="primary" size="large" class="rounded-pill" @click="showIikoOrderDetail = false">Закрыть</VBtn>
+      </VCardActions>
+    </VCard>
+  </VDialog>
+
+  <!-- ЛОКАЛЬНЫЙ ЗАКАЗ -->
+  <OrderDetailModal v-model="showLocalOrderDetail" :order="selectedLocalOrder" />
+</template>
+
+<style scoped>
+.customer-modal-premium {
+  border-radius: 32px !important;
+  overflow: hidden;
+  box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.25) !important;
+}
+
+.header-gradient {
+  background: linear-gradient(135deg, #1e293b 0%, #0f172a 100%);
+  position: relative;
+  z-index: 1;
+}
+
+.header-gradient::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  background: url("data:image/svg+xml,%3Csvg width='100' height='100' viewBox='0 0 100 100' xmlns='http://www.w3.org/2000/svg'%3E%3Cpath d='M11 18c3.866 0 7-3.134 7-7s-3.134-7-7-7-7 3.134-7 7 3.134 7 7 7zm48 25c3.866 0 7-3.134 7-7s-3.134-7-7-7-7 3.134-7 7 3.134 7 7 7zm-43-7c1.657 0 3-1.343 3-3s-1.343-3-3-3-3 1.343-3 3 1.343 3 3 3zm63 31c1.657 0 3-1.343 3-3s-1.343-3-3-3-3 1.343-3 3 1.343 3 3 3zM34 90c1.657 0 3-1.343 3-3s-1.343-3-3-3-3 1.343-3 3 1.343 3 3 3zm56-76c1.105 0 2-.895 2-2s-.895-2-2-2-2 .895-2 2 .895 2 2 2zM12 86c1.105 0 2-.895 2-2s-.895-2-2-2-2 .895-2 2 .895 2 2 2zm66 3c1.105 0 2-.895 2-2s-.895-2-2-2-2 .895-2 2 .895 2 2 2zm-46-45c1.105 0 2-.895 2-2s-.895-2-2-2-2 .895-2 2 .895 2 2 2zm13-18c1.105 0 2-.895 2-2s-.895-2-2-2-2 .895-2 2 .895 2 2 2zm-7-7c.552 0 1-.448 1-1s-.448-1-1-1-1 .448-1 1 .448 1 1 1z' fill='%23ffffff' fill-opacity='0.05' fill-rule='evenodd'/%3E%3C/svg%3E");
+  z-index: -1;
+}
+
+.avatar-border {
+  border: 4px solid rgba(255, 255, 255, 0.1);
+  box-shadow: 0 0 20px rgba(0,0,0,0.2);
+}
+
+.sync-btn-premium {
+  transition: all 0.3s ease;
+  box-shadow: 0 4px 15px rgba(255,255,255,0.1);
+}
+
+.sync-btn-premium:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 8px 20px rgba(255,255,255,0.2);
+}
+
+.tabs-container-premium {
+  background: white;
+  border-bottom: 1px solid #e2e8f0;
+  position: sticky;
+  top: 0;
+  z-index: 10;
+}
+
+.tab-item {
+  text-transform: none !important;
+  font-weight: 700 !important;
+  font-size: 0.9rem !important;
+  letter-spacing: 0 !important;
+  padding: 0 24px !important;
+}
+
+.danger-tab {
+  color: #ef4444 !important;
+}
+
+.bg-premium-content {
+  background: #f8fafc;
+}
+
+.info-glass-card {
+  background: rgba(255, 255, 255, 0.8) !important;
+  backdrop-filter: blur(10px);
+  border: 1px solid #e2e8f0 !important;
+  transition: all 0.3s ease;
+}
+
+.info-glass-card:hover {
+  transform: translateY(-3px);
+  box-shadow: 0 12px 20px -5px rgba(0,0,0,0.05) !important;
+}
+
+.info-row .info-label {
+  font-size: 0.65rem;
+  font-weight: 800;
+  color: #64748b;
+  letter-spacing: 0.05em;
+  margin-bottom: 4px;
+}
+
+.info-row .info-value {
+  font-size: 1.1rem;
+  font-weight: 700;
+  color: #1e293b;
+}
+
+.balance-card-premium {
+  background: linear-gradient(135deg, #f59e0b 0%, #fbbf24 100%);
+  box-shadow: 0 15px 30px -10px rgba(245, 158, 11, 0.4) !important;
+  position: relative;
+  overflow: hidden;
+}
+
+.balance-card-premium::before {
+  content: "iiko Card";
+  position: absolute;
+  top: -10px;
+  right: -20px;
+  font-size: 8rem;
+  font-weight: 900;
+  color: white;
+  opacity: 0.1;
+  pointer-events: none;
+}
+
+.action-btn-premium {
+  transition: all 0.2s ease;
+}
+
+.action-btn-premium:hover {
+  transform: scale(1.05);
+}
+
+.premium-table {
+  background: white !important;
+}
+
+.premium-table th {
+  background: #f1f5f9 !important;
+  color: #475569 !important;
+  font-weight: 800 !important;
+  font-size: 0.7rem !important;
+  letter-spacing: 0.05em !important;
+}
+
+.order-card-premium {
+  background: white !important;
+  border: 1px solid #e2e8f0 !important;
+  transition: all 0.3s ease;
+}
+
+.order-card-premium:hover {
+  transform: translateX(5px);
+  border-color: #cbd5e1 !important;
+  box-shadow: 0 4px 12px rgba(0,0,0,0.05) !important;
+}
+
+.sidebar-premium {
+  background: #f1f5f9;
+  position: sticky;
+  top: 0;
+  height: auto;
+}
+
+.stats-box-premium {
+  transition: all 0.3s ease;
+}
+
+.bg-primary-gradient {
+  background: linear-gradient(135deg, #3b82f6 0%, #2563eb 100%) !important;
+  position: relative;
+  overflow: hidden;
+}
+
+.stats-icon-bg {
+  position: absolute;
+  bottom: -10px;
+  right: -10px;
+  font-size: 5rem !important;
+  opacity: 0.15;
+}
+
+.activity-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: #3b82f6;
+  margin-right: 15px;
+  margin-top: 5px;
+  flex-shrink: 0;
+  position: relative;
+}
+
+.activity-dot::after {
+  content: "";
+  position: absolute;
+  top: 10px;
+  left: 4.5px;
+  width: 1px;
+  height: 40px;
+  background: #e2e8f0;
+}
+
+.activity-item:last-child .activity-dot::after {
+  display: none;
+}
+
+.system-ids-premium {
+  background: rgba(255,255,255,0.5);
+  font-family: 'Fira Code', monospace;
+}
+
+.truncate {
+  max-width: 180px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.letter-spacing-1 {
+  letter-spacing: 1px;
+}
+
+.inactive-address {
+  opacity: 0.6;
+  background: #f1f5f9 !important;
+}
+
+/* Animations */
+.v-window-item-active {
+  animation: fadeIn 0.4s ease;
+}
+
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(10px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+</style>

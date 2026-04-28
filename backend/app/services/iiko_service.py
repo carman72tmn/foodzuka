@@ -2229,7 +2229,8 @@ class IikoService:
                         date_from=date_from,
                         date_to=date_to,
                         organization_id=org_id,
-                        filters=filters
+                        filters=filters,
+                        log_error=False
                     )
                     
                     if rows:
@@ -2543,7 +2544,8 @@ class IikoService:
         date_from: datetime,
         date_to: datetime,
         organization_id: Optional[str] = None,
-        filters: Optional[Dict] = None
+        filters: Optional[Dict] = None,
+        log_error: bool = True
     ) -> List[Dict[str, Any]]:
         """Универсальный метод для получения любых OLAP-отчетов через Server API"""
         from datetime import timedelta
@@ -2577,13 +2579,14 @@ class IikoService:
             response = await self._resto_request(
                 "POST", "/v2/reports/olap",
                 json_data=payload,
-                organization_id=org_id
+                organization_id=org_id,
+                log_error=log_error
             )
             return self._parse_olap_response(response)
         except Exception as e:
-            # Не спамим ошибками в основной лог, если это просто "неверное поле" (будет отловлено вызывающим методом)
-            logger.warning(f"Custom OLAP report ({report_type}) field/request failed: {e}")
-            raise e # Пробрасываем выше для обработки в циклах retry
+            if log_error:
+                logger.warning(f"Custom OLAP report ({report_type}) field/request failed: {e}")
+            raise e
 
     async def get_payment_types_report(
         self,
@@ -2640,9 +2643,11 @@ class IikoService:
                 base_url = f"{base_url}/resto/api"
         
             # 1. Получаем токен (с ретри на 403 "no connections")
-            max_retries = 3
+            max_retries = 2
             token = None
             for attempt in range(max_retries):
+                # Добавляем небольшую задержку перед запросом, чтобы не спамить API
+                await asyncio.sleep(0.5)
                 async with httpx.AsyncClient(verify=False, timeout=timeout) as client:
                     auth_url = f"{base_url}/auth"
                     password_sha1 = hashlib.sha1(password.encode()).hexdigest()

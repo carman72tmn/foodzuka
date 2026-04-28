@@ -1,0 +1,7 @@
+[2026-04-26 14:15] Task: Автоматическое создание карточек гостей.
+- Modified iiko_service.py: URL fix for get_customers (/api/1/loyalty/iiko/get_customers).
+- Modified iiko_sync_service.py: Updated ensure_customer_from_order to include order items in notes and check dates.
+- Modified iiko_sync_service.py: Moved customer creation to the end of process_iiko_order.
+- Files saved in UTF-8.
+- Uploaded to VPS foodtech and restarted services.
+- Documentation updated in system_faq.md and sql_faq.md created.

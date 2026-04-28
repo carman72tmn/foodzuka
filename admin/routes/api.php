@@ -6,13 +6,28 @@ use App\Http\Controllers\Api\ProductController;
 use App\Http\Controllers\Api\CategoryController;
 use App\Http\Controllers\Api\OrderController;
 
+use App\Http\Controllers\Api\ClientController;
+
 Route::get('/user', function (Request $request) {
     return $request->user();
 })->middleware('auth:sanctum');
 
 Route::apiResource('products', ProductController::class);
 Route::apiResource('categories', CategoryController::class);
+Route::get('orders/by-iiko-id/{id}', [OrderController::class, 'getByIikoId']);
 Route::apiResource('orders', OrderController::class);
+
+Route::get('clients', [ClientController::class, 'index']);
+Route::get('loyalty-categories', [ClientController::class, 'categories']);
+Route::delete('clients/delete-all-force', [ClientController::class, 'destroyAll']);
+Route::get('clients/{id}', [ClientController::class, 'show']);
+Route::put('clients/{id}', [ClientController::class, 'update']);
+Route::post('clients/{id}/sync-iiko-orders', [ClientController::class, 'syncIikoOrders']);
+Route::post('clients/{id}/sync-bonus-history', [ClientController::class, 'syncBonusHistory']);
+Route::post('clients/{id}/sync-full', [ClientController::class, 'syncFull']);
+Route::post('clients/{id}/bonus-operation', [ClientController::class, 'handleBonusOperation']);
+Route::put('clients/{id}/addresses/{address_id}/toggle', [ClientController::class, 'toggleAddressStatus']);
+
 
     // Proxy requests to the FastAPI backend
     Route::any('v1/{path}', function (Request $request, $path) {

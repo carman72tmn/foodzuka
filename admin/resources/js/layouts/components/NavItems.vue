@@ -24,7 +24,7 @@ import VerticalNavLink from "@layouts/components/VerticalNavLink.vue"
 
   <VerticalNavGroup :item="{ title: 'Клиенты', icon: 'bx-group' }">
     <VerticalNavLink :item="{ title: 'Все клиенты', to: '/clients' }" />
-    <VerticalNavLink :item="{ title: 'Посетители ВК', to: '/clients/vk' }" />
+    <!-- <VerticalNavLink :item="{ title: 'Посетители ВК', to: '/clients/vk' }" /> -->
   </VerticalNavGroup>
 
   <VerticalNavGroup :item="{ title: 'NPS', icon: 'bx-message-square-detail' }">
@@ -51,6 +51,11 @@ import VerticalNavLink from "@layouts/components/VerticalNavLink.vue"
     <VerticalNavLink :item="{ title: 'Настройки iiko', to: '/settings/iiko' }" />
     <VerticalNavLink :item="{ title: 'Настройки Telegram Бота', to: '/settings/bot' }" />
     <VerticalNavLink :item="{ title: 'Настройки VK Бота', to: '/settings/vk' }" />
+    <VerticalNavLink :item="{ title: 'Уведомления VK Бота', to: '/settings/vk-notifications' }" />
+    <VerticalNavLink :item="{ title: 'Логи синхронизации', to: '/settings/sync-logs' }" />
+    <VerticalNavLink :item="{ title: 'Настройки Яндекс', to: '/settings/yandex' }" />
+    <VerticalNavLink :item="{ title: 'Фоновые процессы', icon: 'bx-refresh', to: '/system/tasks' }" />
+    <VerticalNavLink :item="{ title: 'Логи системы', icon: 'bx-list-ul', to: '/system/logs' }" />
   </VerticalNavGroup>
 
   <VerticalNavGroup :item="{ title: 'Отчеты', icon: 'bx-bar-chart-alt-2' }">
@@ -60,6 +65,7 @@ import VerticalNavLink from "@layouts/components/VerticalNavLink.vue"
     <VerticalNavLink :item="{ title: 'Продажи (по дням)', to: '/reports/days' }" />
     <VerticalNavLink :item="{ title: 'Клиенты', to: '/reports/clients' }" />
     <VerticalNavLink :item="{ title: 'Заказы', to: '/reports/orders' }" />
+    <VerticalNavLink :item="{ title: 'Типы оплат', to: '/reports/payments' }" />
   </VerticalNavGroup>
 
   <VerticalNavSectionTitle :item="{ heading: 'Администрирование' }" />

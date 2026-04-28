@@ -1,0 +1,81 @@
+<template>
+  <div>
+    <VCard class="mb-6">
+      <VCardTitle class="d-flex align-center justify-space-between flex-wrap gap-3 pa-4">
+        <div>
+          <div class="text-h5 font-weight-bold">📅 Продажи по дням</div>
+          <div class="text-caption text-medium-emphasis">Динамика продаж и среднего чека.</div>
+        </div>
+        <div class="d-flex align-center gap-2 flex-wrap">
+          <VBtnToggle v-model="selectedPeriod" density="compact" color="primary" variant="outlined" divided @update:model-value="fetchReport">
+            <VBtn value="week">7 дней</VBtn>
+            <VBtn value="month">Месяц</VBtn>
+            <VBtn value="custom">Период</VBtn>
+          </VBtnToggle>
+          <VBtn :loading="loading" color="primary" variant="tonal" size="small" prepend-icon="ri-refresh-line" @click="fetchReport(true)">
+            Обновить
+          </VBtn>
+        </div>
+      </VCardTitle>
+      <VCardText v-if="selectedPeriod === 'custom'">
+        <VRow>
+          <VCol cols="12" sm="5"><VTextField v-model="customFrom" type="date" label="От" density="compact" /></VCol>
+          <VCol cols="12" sm="5"><VTextField v-model="customTo" type="date" label="До" density="compact" /></VCol>
+          <VCol cols="12" sm="2"><VBtn color="primary" block @click="fetchReport(true)">Ок</VBtn></VCol>
+        </VRow>
+      </VCardText>
+    </VCard>
+
+    <VCard>
+      <VDataTable :headers="headers" :items="reportData" :loading="loading" hover>
+        <template #item.DishSum="{ item }">
+          {{ formatCurrency(item.DishSum) }}
+        </template>
+        <template #item.AverageCheque="{ item }">
+          {{ formatCurrency(item.AverageCheque) }}
+        </template>
+      </VDataTable>
+    </VCard>
+  </div>
+</template>
+
+<script setup>
+import { ref, onMounted } from 'vue'
+
+const selectedPeriod = ref('month')
+const customFrom = ref('')
+const customTo = ref('')
+const loading = ref(false)
+const reportData = ref([])
+
+const headers = [
+  { title: 'Дата', key: 'Date' },
+  { title: 'Заказов', key: 'OrderCount', align: 'end' },
+  { title: 'Сумма', key: 'DishSum', align: 'end' },
+  { title: 'Средний чек', key: 'AverageCheque', align: 'end' },
+]
+
+function formatCurrency(val) {
+  return new Intl.NumberFormat('ru-RU', { style: 'currency', currency: 'RUB', minimumFractionDigits: 0 }).format(val || 0)
+}
+
+async function fetchReport(forceRefresh = false) {
+  loading.value = true
+  try {
+    const params = new URLSearchParams({ period: selectedPeriod.value, refresh: forceRefresh })
+    if (selectedPeriod.value === 'custom') {
+      params.set('date_from', customFrom.value)
+      params.set('date_to', customTo.value)
+    }
+    const resp = await fetch(`/api/v1/reports/olap/days?${params}`)
+    const json = await resp.json()
+    reportData.value = json.data || []
+  } catch (e) {
+    console.error(e)
+  } finally {
+    loading.value = false
+  }
+}
+
+onMounted(fetchReport)
+</script>

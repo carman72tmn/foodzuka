@@ -2,7 +2,6 @@ from datetime import datetime, timezone
 import zoneinfo
 from typing import Optional
 from sqlmodel import Session, select
-from app.models.iiko_settings import IikoSettings
 
 def utc_now():
     """Возвращает текущее время в UTC с информацией о часовом поясе"""
@@ -10,6 +9,7 @@ def utc_now():
 
 def get_tz_name(session: Session) -> str:
     """Получает имя часового пояса из настроек БД или возвращает дефолт"""
+    from app.models.iiko_settings import IikoSettings
     settings = session.exec(select(IikoSettings)).first()
     if settings:
         if settings.timezone_name:

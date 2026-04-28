@@ -3,14 +3,33 @@ import AuthProvider from '@/views/pages/authentication/AuthProvider.vue'
 import logo from '@images/logo.svg?raw'
 import authV1BottomShape from '@images/svg/auth-v1-bottom-shape.svg?url'
 import authV1TopShape from '@images/svg/auth-v1-top-shape.svg?url'
+import { login } from '@/utils/auth'
+import { useRouter } from 'vue-router'
+
+const router = useRouter()
 
 const form = ref({
-  email: '',
+  username: '',
   password: '',
   remember: false,
 })
 
 const isPasswordVisible = ref(false)
+const isLoading = ref(false)
+const loginError = ref('')
+
+const handleLogin = async () => {
+  isLoading.value = true
+  loginError.value = ''
+  try {
+    await login(form.value.username, form.value.password)
+    router.push('/')
+  } catch (e) {
+    loginError.value = e.message || 'Неверный логин или пароль'
+  } finally {
+    isLoading.value = false
+  }
+}
 </script>
 
 <template>
@@ -60,16 +79,27 @@ const isPasswordVisible = ref(false)
         </VCardText>
 
         <VCardText>
-          <VForm @submit.prevent="$router.push('/')">
+          <VAlert
+            v-if="loginError"
+            type="error"
+            variant="tonal"
+            closable
+            class="mb-4"
+            @click:close="loginError = ''"
+          >
+            {{ loginError }}
+          </VAlert>
+
+          <VForm @submit.prevent="handleLogin">
             <VRow>
-              <!-- email -->
+              <!-- login -->
               <VCol cols="12">
                 <VTextField
-                  v-model="form.email"
+                  v-model="form.username"
                   autofocus
-                  label="Email или Логин"
-                  type="email"
-                  placeholder="admin@example.com"
+                  label="Логин"
+                  type="text"
+                  placeholder="0001"
                 />
               </VCol>
 
@@ -104,6 +134,7 @@ const isPasswordVisible = ref(false)
                 <VBtn
                   block
                   type="submit"
+                  :loading="isLoading"
                 >
                   Войти
                 </VBtn>

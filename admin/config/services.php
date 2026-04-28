@@ -35,4 +35,10 @@ return [
         ],
     ],
 
+    'iiko' => [
+        'api_key' => env('IIKO_API_LOGIN'),
+        'organization_id' => env('IIKO_ORGANIZATION_ID'),
+        'base_url' => env('IIKO_BASE_URL', 'https://api-ru.iiko.services'),
+    ],
+
 ];

@@ -1,0 +1,5 @@
+ALTER TABLE delivery_zones 
+ADD COLUMN IF NOT EXISTS min_delivery_time INTEGER,
+ADD COLUMN IF NOT EXISTS max_delivery_time INTEGER,
+ADD COLUMN IF NOT EXISTS description TEXT,
+ADD COLUMN IF NOT EXISTS additional_info JSONB;
