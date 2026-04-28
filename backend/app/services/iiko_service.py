@@ -2940,7 +2940,8 @@ class IikoService:
                     resto_url=resto_url,
                     resto_login=resto_login,
                     resto_password=resto_password,
-                    organization_id=organization_id
+                    organization_id=organization_id,
+                    log_error=False # Подавляем ошибку, так как мы сделаем ретрий без расширенных полей
                 )
             except Exception as e:
                 # Если 400 (Bad Request), вероятно какое-то поле не поддерживается (например, Delivery.House)
