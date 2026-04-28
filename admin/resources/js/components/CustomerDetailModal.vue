@@ -5,11 +5,15 @@
     scrollable
     transition="dialog-bottom-transition"
   >
-    <VCard class="customer-detail-card overflow-hidden">
+    <VCard 
+      class="customer-detail-card overflow-hidden"
+      :class="{ 'high-risk-border': customer?.is_high_risk }"
+    >
       <!-- Toolbar / Header -->
       <VToolbar
-        color="primary"
-        class="px-4"
+        :color="customer?.is_high_risk ? '#ff4d4f' : 'primary'"
+        class="px-4 transition-all"
+        :class="{ 'high-risk-header': customer?.is_high_risk }"
         elevation="0"
       >
         <VAvatar
@@ -42,6 +46,17 @@
           НОВЫЙ ГОСТЬ
         </VChip>
 
+        <VChip
+          v-if="customer?.is_high_risk"
+          color="white"
+          size="small"
+          class="me-4 font-weight-bold pulse-animation"
+          variant="elevated"
+          prepend-icon="ri-error-warning-fill"
+        >
+          ВЫСОКИЙ РИСК
+        </VChip>
+
         <VBtn
           icon="ri-close-line"
           variant="text"
@@ -61,10 +76,14 @@
             class="bg-grey-lighten-5 border-e d-flex flex-column pa-4"
           >
             <div class="sidebar-analytics-box mb-6 pa-4 rounded-lg bg-white elevation-1">
-              <div class="text-overline text-disabled mb-2">Общая аналитика</div>
+              <div class="text-overline text-disabled mb-2">
+                Общая аналитика
+              </div>
               
               <div class="mb-4">
-                <div class="text-caption text-muted">LTV (Выручка)</div>
+                <div class="text-caption text-muted">
+                  LTV (Выручка)
+                </div>
                 <div class="text-h6 font-weight-bold text-primary">
                   {{ formatPrice(customer?.total_purchases_sum || customer?.total_orders_amount || 0) }}
                 </div>
@@ -88,6 +107,15 @@
                 <div class="text-caption text-muted">Последний визит</div>
                 <div class="text-body-2 font-weight-medium">
                   {{ formatDate(customer?.last_order_date) }}
+                </div>
+              </div>
+
+              <!-- Barcode Section -->
+              <div class="mt-6 text-center barcode-container pa-2 rounded bg-white border">
+                <div class="text-overline text-disabled mb-1">Карта лояльности</div>
+                <canvas id="barcode-canvas" />
+                <div class="text-caption font-weight-bold mt-1">
+                  {{ customer?.card_number || (customer?.iiko_card_numbers?.length ? customer?.iiko_card_numbers[0] : 'НЕТ КАРТЫ') }}
                 </div>
               </div>
             </div>
@@ -130,23 +158,252 @@
               <VWindowItem value="profile">
                 <VContainer class="pa-6">
                   <VRow>
-                    <VCol cols="12" md="6">
-                      <VTextField v-model="form.name" label="Имя" variant="outlined" density="compact" />
+                    <VCol 
+                      cols="12" 
+                      md="4"
+                    >
+                      <VTextField 
+                        v-model="form.surname" 
+                        label="Фамилия" 
+                        variant="outlined" 
+                        density="compact" 
+                      />
                     </VCol>
-                    <VCol cols="12" md="6">
-                      <VTextField v-model="form.surname" label="Фамилия" variant="outlined" density="compact" />
+                    <VCol 
+                      cols="12" 
+                      md="4"
+                    >
+                      <VTextField 
+                        v-model="form.name" 
+                        label="Имя" 
+                        variant="outlined" 
+                        density="compact" 
+                      />
                     </VCol>
-                    <VCol cols="12" md="6">
-                      <VTextField v-model="form.email" label="Email" variant="outlined" density="compact" />
+                    <VCol 
+                      cols="12" 
+                      md="4"
+                    >
+                      <VTextField 
+                        v-model="form.middleName" 
+                        label="Отчество" 
+                        variant="outlined" 
+                        density="compact" 
+                      />
                     </VCol>
-                    <VCol cols="12" md="6">
-                      <VTextField v-model="form.birthday" label="Дата рождения" type="date" variant="outlined" density="compact" />
+
+                    <VCol 
+                      cols="12" 
+                      md="6"
+                    >
+                      <VTextField 
+                        :model-value="customer?.phone" 
+                        label="Основной телефон (iiko)" 
+                        variant="outlined" 
+                        density="compact" 
+                        readonly 
+                        bg-color="grey-lighten-4" 
+                      />
                     </VCol>
+                    <VCol 
+                      cols="12" 
+                      md="6"
+                    >
+                      <VSelect
+                        v-model="form.gender"
+                        label="Пол"
+                        :items="[
+                          { title: 'Мужской', value: 'Мужской' },
+                          { title: 'Женский', value: 'Женский' },
+                          { title: 'Не указан', value: 'NotSpecified' }
+                        ]"
+                        variant="outlined"
+                        density="compact"
+                      />
+                    </VCol>
+
+                    <VCol 
+                      cols="12" 
+                      md="6"
+                    >
+                      <VTextField 
+                        v-model="form.email" 
+                        label="Email" 
+                        variant="outlined" 
+                        density="compact" 
+                      />
+                    </VCol>
+                    <VCol 
+                      cols="12" 
+                      md="6"
+                    >
+                      <VTextField 
+                        v-model="form.birthday" 
+                        label="Дата рождения" 
+                        type="date" 
+                        variant="outlined" 
+                        density="compact" 
+                      />
+                    </VCol>
+
+                    <!-- Дополнительные поля -->
+                    <VCol 
+                      cols="12" 
+                      md="4"
+                    >
+                      <VTextField 
+                        v-model="form.referrer" 
+                        label="Рекомендатель (ID)" 
+                        variant="outlined" 
+                        density="compact" 
+                      />
+                    </VCol>
+                    <VCol 
+                      cols="12" 
+                      md="4"
+                    >
+                      <VTextField 
+                        v-model="form.registrationSource" 
+                        label="Источник регистрации" 
+                        variant="outlined" 
+                        density="compact" 
+                      />
+                    </VCol>
+                    <VCol 
+                      cols="12" 
+                      md="4"
+                    >
+                      <VTextField 
+                        v-model="form.registeredOrganization" 
+                        label="Организация" 
+                        variant="outlined" 
+                        density="compact" 
+                      />
+                    </VCol>
+
                     <VCol cols="12">
-                      <VTextarea v-model="form.iikoNotes" label="Заметки iiko / Комментарий" variant="outlined" density="compact" rows="3" />
+                      <VTextarea 
+                        v-model="form.iikoNotes" 
+                        label="Заметки iiko / Комментарий" 
+                        variant="outlined" 
+                        density="compact" 
+                        rows="2" 
+                      />
                     </VCol>
                   </VRow>
-                  <div class="d-flex justify-end mt-4">
+
+                  <!-- Дополнительные телефоны -->
+                  <div class="mt-6 border rounded-lg pa-4 bg-grey-lighten-5">
+                    <div class="text-subtitle-2 font-weight-bold mb-3 d-flex align-center">
+                      <VIcon icon="ri-phone-line" size="small" class="me-2" />
+                      Дополнительные телефоны
+                    </div>
+                    
+                    <VRow v-if="localPhones.length" class="mb-2">
+                      <VCol v-for="p in localPhones" :key="p.id" cols="auto">
+                        <VChip
+                          closable
+                          color="info"
+                          variant="tonal"
+                          @click:close="deletePhone(p.id)"
+                        >
+                          {{ p.phone }}
+                        </VChip>
+                      </VCol>
+                    </VRow>
+
+                    <div class="d-flex gap-2">
+                      <VTextField
+                        v-model="newPhone"
+                        placeholder="+7 (___) ___-__-__"
+                        variant="outlined"
+                        density="compact"
+                        hide-details
+                        @keyup.enter="addPhone"
+                      />
+                      <VBtn
+                        icon="ri-add-line"
+                        color="success"
+                        variant="elevated"
+                        :loading="isAddingPhone"
+                        @click="addPhone"
+                      />
+                    </div>
+                  </div>
+
+                  <!-- Карты iiko -->
+                  <div class="mt-6" v-if="customer?.iiko_card_numbers?.length">
+                    <div class="text-subtitle-2 font-weight-bold mb-2 d-flex align-center">
+                      <VIcon icon="ri-id-card-line" size="small" class="me-2" />
+                      Карты лояльности iiko
+                    </div>
+                    <div class="d-flex flex-wrap gap-2">
+                      <VChip
+                        v-for="card in customer.iiko_card_numbers"
+                        :key="card"
+                        size="small"
+                        variant="outlined"
+                      >
+                        {{ card }}
+                      </VChip>
+                    </div>
+                  </div>
+
+                  <!-- Категории iiko -->
+                  <div class="mt-6">
+                    <div class="text-subtitle-2 font-weight-bold mb-2 d-flex align-center">
+                      <VIcon icon="ri-price-tag-3-line" size="small" class="me-2" />
+                      Категории iiko
+                    </div>
+                    <div class="d-flex flex-wrap gap-2 align-center">
+                      <template v-for="cat in form.iikoCategories" :key="cat">
+                        <VMenu location="bottom">
+                          <template #activator="{ props: activatorProps }">
+                            <VChip
+                              v-bind="activatorProps"
+                              size="small"
+                              color="secondary"
+                              variant="tonal"
+                              class="cursor-pointer"
+                            >
+                              {{ cat }}
+                            </VChip>
+                          </template>
+                          <VList density="compact">
+                            <VListItem
+                              prepend-icon="ri-delete-bin-line"
+                              title="Удалить из категории"
+                              color="error"
+                              @click="removeCategory(cat)"
+                            />
+                          </VList>
+                        </VMenu>
+                      </template>
+                      
+                      <VMenu v-model="categoryMenu" :close-on-content-click="false">
+                        <template #activator="{ props: menuProps }">
+                          <VBtn
+                            v-bind="menuProps"
+                            icon="ri-add-line"
+                            size="x-small"
+                            color="primary"
+                            variant="tonal"
+                          />
+                        </template>
+                        <VList density="compact" max-height="300" min-width="200">
+                          <VListItem
+                            v-for="cat in availableCategories"
+                            :key="cat.id"
+                            :title="cat.name"
+                            @click="addCategory(cat.name)"
+                          />
+                          <VListItem v-if="!availableCategories.length" title="Нет доступных категорий" disabled />
+                        </VList>
+                      </VMenu>
+                    </div>
+                  </div>
+
+                  <div class="d-flex justify-end mt-6">
                     <VBtn color="primary" @click="saveProfile">Сохранить изменения</VBtn>
                   </div>
                 </VContainer>
@@ -348,9 +605,16 @@
 </template>
 
 <script setup>
-import { ref, computed, watch, onMounted } from 'vue'
+import {
+  ref,
+  computed,
+  watch,
+  onMounted,
+  nextTick,
+} from 'vue'
 import axios from 'axios'
 import { useToast } from 'vue-toastification'
+import JsBarcode from 'jsbarcode'
 
 const props = defineProps({
   modelValue: Boolean,
@@ -378,15 +642,31 @@ const bonusAdjustment = ref({
   comment: 'Ручная корректировка из админ-панели'
 })
 
+const allIikoCategories = ref([])
+const categoryMenu = ref(false)
+
 const form = ref({
   name: '',
   surname: '',
+  middleName: '',
   email: '',
   birthday: '',
   gender: 'NotSpecified',
+  referrer: '',
+  registrationSource: '',
+  registeredOrganization: '',
   iikoNotes: '',
   isHighRisk: false,
   riskReason: '',
+  iikoCategories: [],
+})
+
+const localPhones = ref([])
+const newPhone = ref('')
+const isAddingPhone = ref(false)
+
+const availableCategories = computed(() => {
+  return allIikoCategories.value.filter(cat => !form.value.iikoCategories.includes(cat.name))
 })
 
 const tabs = [
@@ -394,7 +674,12 @@ const tabs = [
   { id: 'bonuses', title: 'Бонусы', icon: 'ri-coin-line' },
   { id: 'orders', title: 'Заказы', icon: 'ri-shopping-bag-line' },
   { id: 'analytics', title: 'Аналитика', icon: 'ri-bar-chart-line' },
-  { id: 'risks', title: 'Риски', icon: 'ri-error-warning-line' },
+  { 
+    id: 'risks', 
+    title: 'Риски', 
+    icon: props.customer?.is_high_risk ? 'ri-error-warning-fill' : 'ri-error-warning-line',
+    color: props.customer?.is_high_risk ? 'error' : ''
+  },
   { id: 'addresses', title: 'Адреса', icon: 'ri-map-pin-line' },
   { id: 'notifications', title: 'Инфо', icon: 'ri-notification-line' },
   { id: 'extra', title: 'Лог', icon: 'ri-code-line' },
@@ -412,6 +697,22 @@ const guestAvatar = computed(() => {
 
 const close = () => {
   isVisible.value = false
+}
+
+const generateBarcode = () => {
+  nextTick(() => {
+    const cardNumber = props.customer?.card_number || (props.customer?.iiko_card_numbers?.length ? props.customer?.iiko_card_numbers[0] : null)
+    if (cardNumber) {
+      JsBarcode("#barcode-canvas", cardNumber, {
+        format: "CODE128",
+        width: 1.5,
+        height: 40,
+        displayValue: false,
+        margin: 0,
+        background: "transparent",
+      })
+    }
+  })
 }
 
 const parseAddresses = () => {
@@ -480,18 +781,112 @@ const loadBonusHistory = async () => {
   }
 }
 
+const loadLocalPhones = async () => {
+  if (!props.customer?.id) return
+  try {
+    const response = await fetch(`/api/v1/customers/${props.customer.id}/local-phones`)
+    const data = await response.json()
+    localPhones.value = data.phones || []
+  } catch (e) {
+    console.warn('Failed to load local phones')
+  }
+}
+
+const addPhone = async () => {
+  if (!newPhone.value || isAddingPhone.value) return
+  isAddingPhone.value = true
+  try {
+    const response = await fetch(`/api/v1/customers/${props.customer.id}/local-phones`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ phone: newPhone.value })
+    })
+    if (!response.ok) throw new Error('Failed to add phone')
+    newPhone.value = ''
+    await loadLocalPhones()
+    toast.success('Телефон добавлен')
+  } catch (e) {
+    toast.error('Ошибка при добавлении телефона')
+  } finally {
+    isAddingPhone.value = false
+  }
+}
+
+const deletePhone = async (phoneId) => {
+  try {
+    const response = await fetch(`/api/v1/customers/${props.customer.id}/local-phones/${phoneId}`, {
+      method: 'DELETE'
+    })
+    if (!response.ok) throw new Error('Failed to delete phone')
+    await loadLocalPhones()
+    toast.success('Телефон удален')
+  } catch (e) {
+    toast.error('Ошибка при удалении телефона')
+  }
+}
+
+const loadAllCategories = async () => {
+  try {
+    const response = await fetch('/api/v1/customers/all-iiko-categories')
+    if (!response.ok) throw new Error('Failed to fetch categories')
+    allIikoCategories.value = await response.json()
+  } catch (e) {
+    console.warn('Failed to load iiko categories', e)
+  }
+}
+
+const addCategory = (name) => {
+  if (!form.value.iikoCategories.includes(name)) {
+    form.value.iikoCategories.push(name)
+  }
+  categoryMenu.value = false
+}
+
+const removeCategory = (name) => {
+  form.value.iikoCategories = form.value.iikoCategories.filter(c => c !== name)
+}
+
 const initData = async () => {
   if (!props.customer?.id) return
 
   form.value = {
     name: props.customer.name || '',
     surname: props.customer.surname || '',
+    middleName: props.customer.middle_name || '',
     email: props.customer.email || '',
     birthday: props.customer.birthday ? String(props.customer.birthday).split('T')[0] : '',
     gender: props.customer.gender || 'NotSpecified',
+    referrer: props.customer.referrer || '',
+    registrationSource: props.customer.registration_source || '',
+    registeredOrganization: props.customer.registered_organization || '',
     iikoNotes: props.customer.iiko_notes || props.customer.notes || '',
     isHighRisk: props.customer.is_high_risk || false,
     riskReason: props.customer.risk_reason || '',
+    iikoCategories: (() => {
+      // Пытаемся взять из основного массива
+      if (Array.isArray(props.customer.iiko_categories) && props.customer.iiko_categories.length > 0) {
+        return [...props.customer.iiko_categories]
+      }
+      
+      // Если пусто, пробуем распарсить из строки loyalty_categories (иногда iiko присылает JSON-строку)
+      const loyaltyCats = props.customer.loyalty_categories || props.customer.categories
+      if (loyaltyCats) {
+        if (Array.isArray(loyaltyCats)) return [...loyaltyCats]
+        if (typeof loyaltyCats === 'string') {
+          if (loyaltyCats.trim().startsWith('[')) {
+            try {
+              const parsed = JSON.parse(loyaltyCats)
+              if (Array.isArray(parsed)) return parsed
+            } catch (e) {
+              console.error('Failed to parse loyalty_categories JSON', e)
+            }
+          }
+          // Если это строка через запятую
+          return loyaltyCats.split(',').map(s => s.trim()).filter(Boolean)
+        }
+      }
+      return []
+    })(),
   }
 
   parseAddresses()
@@ -500,7 +895,11 @@ const initData = async () => {
     loadOlapStats(),
     loadOrderHistory(),
     loadBonusHistory(),
+    loadAllCategories(),
+    loadLocalPhones(),
   ])
+
+  generateBarcode()
 }
 
 const syncFullData = async () => {
@@ -525,13 +924,22 @@ const syncFullData = async () => {
 const saveProfile = async () => {
   if (!props.customer?.id) return
   try {
+    // Преобразование camelCase в snake_case для бэкенда
+    const payload = {
+      ...form.value,
+      ['middle_name']: form.value.middleName,
+      ['registration_source']: form.value.registrationSource,
+      ['registered_organization']: form.value.registeredOrganization,
+    }
+
     const response = await fetch(`/api/v1/customers/${props.customer.id}`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(form.value)
+      body: JSON.stringify(payload),
     })
     if (!response.ok) throw new Error('Failed to save profile')
     const data = await response.json()
+
     emit('updated', data)
     toast.success('Сохранено')
   } catch (error) {
@@ -609,5 +1017,31 @@ onMounted(() => {
 }
 .text-muted {
   color: rgba(0, 0, 0, 0.6);
+}
+
+.high-risk-header {
+  background: linear-gradient(90deg, #ff4d4f 0%, #ff7875 100%) !important;
+}
+
+.high-risk-border {
+  border: 2px solid #ff4d4f !important;
+}
+
+.pulse-animation {
+  animation: pulse-red 2s infinite;
+}
+
+@keyframes pulse-red {
+  0% { box-shadow: 0 0 0 0 rgba(255, 77, 79, 0.7); }
+  70% { box-shadow: 0 0 0 10px rgba(255, 77, 79, 0); }
+  100% { box-shadow: 0 0 0 0 rgba(255, 77, 79, 0); }
+}
+
+.barcode-container canvas {
+  max-width: 100%;
+}
+
+.transition-all {
+  transition: all 0.3s ease;
 }
 </style>

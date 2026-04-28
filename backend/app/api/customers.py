@@ -113,6 +113,17 @@ async def get_categories_list(session: Session = Depends(get_session)):
                     unique_categories.add(c.strip())
                     
     return sorted(list(unique_categories))
+    
+@router.get("/all-iiko-categories")
+async def get_all_iiko_categories():
+    """Получить полный список категорий из iiko Cloud"""
+    try:
+        categories_data = await iiko_service.get_customer_categories()
+        # В iiko Cloud ответ содержит {"guestCategories": [{"id": "...", "name": "..."}, ...]}
+        return categories_data.get("guestCategories", [])
+    except Exception as e:
+        logger.error(f"Error fetching categories from iiko: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 @router.get("/{customer_id}", response_model=CustomerResponse)
 async def get_customer(customer_id: int, session: Session = Depends(get_session)):
@@ -148,6 +159,7 @@ async def create_customer(
     session.refresh(customer)
     return customer
 
+@router.put("/{customer_id}", response_model=CustomerResponse)
 @router.patch("/{customer_id}", response_model=CustomerResponse)
 async def update_customer(
     customer_id: int,
@@ -163,18 +175,36 @@ async def update_customer(
     if "phone" in update_data:
         update_data["phone"] = normalize_phone(update_data["phone"])
         
+    # Синхронизируем поля имен
+    if "name" in update_data and "first_name" not in update_data:
+        update_data["first_name"] = update_data["name"]
+    elif "first_name" in update_data and "name" not in update_data:
+        update_data["name"] = update_data["first_name"]
+        
+    if "surname" in update_data and "last_name" not in update_data:
+        update_data["last_name"] = update_data["surname"]
+    elif "last_name" in update_data and "surname" not in update_data:
+        update_data["surname"] = update_data["last_name"]
+
+    # Convert empty strings to None for fields that should be NULL in DB
+    for key in ["birthday", "middle_name", "referrer", "registration_source", "registered_organization", "risk_reason", "iiko_notes"]:
+        if key in update_data and update_data[key] == "":
+            update_data[key] = None
+
     for key, value in update_data.items():
-        setattr(customer, key, value)
+        if hasattr(customer, key):
+            setattr(customer, key, value)
 
     session.add(customer)
     session.commit()
     session.refresh(customer)
     
-    # Запускаем фоновую синхронизацию
+    # Запускаем фоновую синхронизацию (выгрузка в iiko Cloud)
     try:
-        sync_single_customer_task.delay(customer.phone)
+        from app.tasks.customer_tasks import export_customer_to_iiko_task
+        export_customer_to_iiko_task.delay(customer.id)
     except Exception as e:
-        logger.warning(f"Failed to trigger sync after update for {customer.phone}: {e}")
+        logger.warning(f"Failed to trigger export after update for {customer.phone}: {e}")
         
     return customer
 
@@ -213,7 +243,7 @@ async def sync_customer(customer_id: int, session: Session = Depends(get_session
             
             # Риски
             if "shouldBeCheckedForRisk" in iiko_data:
-                customer.is_risk = iiko_data.get("shouldBeCheckedForRisk", False)
+                customer.is_high_risk = bool(iiko_data.get("shouldBeCheckedForRisk", False))
             
             # Категории (сохраняем только имена для фронтенда)
             if "categories" in iiko_data:
@@ -325,6 +355,58 @@ async def get_local_phones(
         .order_by(GuestPhone.created_at.desc())
     ).all()
     return {"phones": phones}
+
+@router.post("/{customer_id}/local-phones")
+async def add_local_phone(
+    customer_id: int,
+    phone_data: Dict[str, str],
+    session: Session = Depends(get_session)
+):
+    """Добавление дополнительного телефона гостя"""
+    phone = phone_data.get("phone")
+    if not phone:
+        raise HTTPException(status_code=400, detail="Номер телефона обязателен")
+    
+    normalized = normalize_phone(phone)
+    
+    # Проверка на дубликат у этого же клиента
+    existing = session.exec(
+        select(GuestPhone).where(
+            GuestPhone.customer_id == customer_id,
+            GuestPhone.phone == normalized
+        )
+    ).first()
+    
+    if existing:
+        return {"status": "exists", "phone": existing}
+    
+    new_phone = GuestPhone(
+        customer_id=customer_id,
+        phone=normalized,
+        is_active=True
+    )
+    session.add(new_phone)
+    session.commit()
+    session.refresh(new_phone)
+    
+    # Опционально: запуск синхронизации если нужно обновить iiko (но доп телефоны iiko пока не всегда умеет принимать пачкой)
+    
+    return {"status": "success", "phone": new_phone}
+
+@router.delete("/{customer_id}/local-phones/{phone_id}")
+async def delete_local_phone(
+    customer_id: int,
+    phone_id: int,
+    session: Session = Depends(get_session)
+):
+    """Удаление дополнительного телефона гостя"""
+    phone = session.get(GuestPhone, phone_id)
+    if not phone or phone.customer_id != customer_id:
+        raise HTTPException(status_code=404, detail="Телефон не найден")
+    
+    session.delete(phone)
+    session.commit()
+    return {"status": "success"}
 
 @router.post("/import")
 async def import_customers(
@@ -492,6 +574,32 @@ async def update_customer_in_iiko(
                 birthday = birthday.split('T')[0]
             if isinstance(birthday, str):
                 iiko_payload["birthday"] = f"{birthday} 00:00:00.000"
+
+        # Новые поля для анкеты
+        middle_name = customer_data.get("middle_name", customer.middle_name)
+        if middle_name:
+            iiko_payload["middleName"] = middle_name
+            
+        gender = customer_data.get("gender", customer.gender)
+        if gender == "Мужской":
+            iiko_payload["sex"] = 1
+        elif gender == "Женский":
+            iiko_payload["sex"] = 2
+        else:
+            iiko_payload["sex"] = 0
+
+        referrer = customer_data.get("referrer", customer.referrer)
+        if referrer:
+            iiko_payload["referrerId"] = referrer
+
+        # Синхронизация статуса риска (отправляем оба варианта поля для совместимости)
+        is_high_risk = customer_data.get("is_high_risk")
+        if is_high_risk is None:
+            is_high_risk = customer.is_high_risk
+            
+        is_high_risk_val = bool(is_high_risk)
+        iiko_payload["shouldBeCheckedForRisk"] = is_high_risk_val
+        iiko_payload["isHighRisk"] = is_high_risk_val
             
         # Удаляем None и пустые значения
         iiko_payload = {k: v for k, v in iiko_payload.items() if v is not None and str(v).strip() != ""}
@@ -664,8 +772,8 @@ async def adjust_customer_bonuses(
             try:
                 balances = json.loads(customer.wallet_balances)
                 if balances and isinstance(balances, list):
-                    # Ищем кошелек, который не нулевой или первый попавшийся
-                    wallet_id = balances[0].get("walletId")
+                    # Проверяем и 'id' и 'walletId' (iiko Cloud может присылать по-разному)
+                    wallet_id = balances[0].get("id") or balances[0].get("walletId")
             except:
                 pass
         
@@ -674,23 +782,29 @@ async def adjust_customer_bonuses(
             info = await iiko_service.get_customer_info(customer.phone)
             balances = info.get("walletBalances", [])
             if balances:
-                wallet_id = balances[0].get("walletId")
+                wallet_id = balances[0].get("id") or balances[0].get("walletId")
         
         if not wallet_id:
             raise HTTPException(status_code=400, detail="Could not find bonus wallet for this customer")
             
-        result = await iiko_service.add_customer_balance(
-            customer_id=customer.iiko_customer_id or customer.uid,
-            wallet_id=wallet_id,
-            amount=float(amount),
-            comment=comment
-        )
-        
+        try:
+            result = await iiko_service.add_customer_balance(
+                customer_id=customer.iiko_customer_id or customer.uid,
+                wallet_id=wallet_id,
+                amount=float(amount),
+                comment=comment
+            )
+        except ValueError as ve:
+            raise HTTPException(status_code=400, detail=str(ve))
+        except Exception as e:
+            logger.error(f"Iiko balance update failed: {e}")
+            raise HTTPException(status_code=500, detail="Internal error during iiko update")
+            
         # После изменения баланса запускаем синхронизацию, чтобы обновить данные в БД
         from app.services.iiko_sync_service import iiko_sync_service
         await iiko_sync_service.sync_single_customer(session, customer.phone)
         
-        return {"status": "success", "result": result}
+        return {"status": "success", "message": "Balance updated and synced", "result": result}
     except Exception as e:
         logger.error(f"Bonus adjustment failed for {customer.phone}: {e}")
         raise HTTPException(status_code=500, detail=str(e))

@@ -144,8 +144,39 @@ class IikoSyncService:
             if iiko_data.get("surname"):
                 customer.surname = iiko_data["surname"]
                 customer.last_name = iiko_data["surname"]
+            if iiko_data.get("middleName"):
+                customer.middle_name = iiko_data["middleName"]
             if iiko_data.get("email"):
                 customer.email = iiko_data["email"]
+            
+            # Пол (0: Не указан, 1: Мужской, 2: Женский)
+            sex_val = iiko_data.get("sex", 0)
+            if sex_val == 1:
+                customer.gender = "Мужской"
+            elif sex_val == 2:
+                customer.gender = "Женский"
+            else:
+                customer.gender = "Не указан"
+
+            # Карты
+            if "cards" in iiko_data and iiko_data["cards"]:
+                card_nums = [c.get("number") for c in iiko_data["cards"] if c.get("number")]
+                customer.iiko_card_numbers = card_nums
+                if card_nums:
+                    customer.card_number = card_nums[0]
+            
+            # Данные о регистрации
+            if iiko_data.get("whenRegistered"):
+                try:
+                    # iiko присылает "2022-06-17 00:00:00.000"
+                    reg_str = iiko_data["whenRegistered"].replace(" ", "T")
+                    customer.registration_date = datetime.fromisoformat(reg_str).replace(tzinfo=None)
+                except:
+                    pass
+            
+            customer.registered_organization = iiko_data.get("registrationOrganizationId")
+            customer.referrer = iiko_data.get("referrerId")
+            customer.registration_source = iiko_data.get("registrationSourceId")
             
             # Баланс
             if "walletBalances" in iiko_data:
@@ -161,6 +192,10 @@ class IikoSyncService:
             
             # Комментарий iiko (но не история заказов!)
             customer.iiko_comment = iiko_data.get("comment")
+
+            # Флаг риска
+            if "shouldBeCheckedForRisk" in iiko_data:
+                customer.is_high_risk = bool(iiko_data.get("shouldBeCheckedForRisk", False))
             
         # 2. Аналитика из OLAP
         try:
@@ -779,14 +814,8 @@ class IikoSyncService:
             settings_db = session.exec(select(IikoSettings)).first()
             city_from_settings = settings_db.city_name if settings_db else "Тюмень"
 
-            # Очистка строк от плейсхолдеров
-            def clean(v):
-                if v is None: return None
-                s = str(v).strip()
-                # Удаляем артефакты "None", "null" и прочие плейсхолдеры
-                if s.lower() in ["none", "null", "", "-", "--", "---", "----", "----------", ".", "undefined"]: 
-                    return None
-                return s
+            # Очистка строк (используем глобальный метод класса для защиты кодировки)
+            clean = self.clean_str
 
             # 2. Статус и внешние номера
             raw_status = clean(o_data.get("status") or iiko_order_data.get("creationStatus"))
@@ -2401,13 +2430,11 @@ class IikoSyncService:
                 if date_close:
                     biz_date_str = date_open.astimezone(tz).strftime("%Y-%m-%d")
                     # Берем выручку за бизнес-день открытия смены
-                    rev_record = session.exec(
-                        select(OlapRevenueRecord)
+                    # Агрегируем выручку по всем терминалам за бизнес-день
+                    revenue_at_close = session.exec(
+                        select(func.sum(OlapRevenueRecord.revenue))
                         .where(OlapRevenueRecord.business_date == biz_date_str)
-                        .order_by(OlapRevenueRecord.updated_at.desc())
-                    ).first()
-                    if rev_record:
-                        revenue_at_close = rev_record.revenue
+                    ).first() or 0.0
 
                 existing_shift = session.exec(
                     select(Shift).where(Shift.iiko_id == shift_iiko_id)
@@ -2419,7 +2446,8 @@ class IikoSyncService:
                     existing_shift.status = "CLOSED" if date_close else "OPEN"
                     existing_shift.work_hours = round(work_hours, 2)
                     # Обновляем выручку только если она еще не была установлена
-                    if date_close and (not existing_shift.revenue_at_close or existing_shift.revenue_at_close == 0):
+                    # Обновляем выручку всегда, если она отличается от данных OLAP
+                    if date_close and existing_shift.revenue_at_close != revenue_at_close:
                         existing_shift.revenue_at_close = revenue_at_close
                     existing_shift.updated_at = datetime.now(timezone.utc)
                     session.add(existing_shift)

@@ -516,3 +516,104 @@ def sync_guest_data_task(customer_id: int):
         if customer and customer.phone:
             loop.run_until_complete(_sync_single_customer(session, customer.phone))
     return f"Synced customer {customer_id}"
+
+@celery_app.task(name="app.tasks.customer_tasks.export_customer_to_iiko_task")
+def export_customer_to_iiko_task(customer_id: int):
+    """
+    Экспорт данных клиента из локальной БД в iiko Cloud.
+    """
+    loop = asyncio.get_event_loop()
+    with Session(engine) as session:
+        customer = session.get(Customer, customer_id)
+        if not customer:
+            logger.error(f"Export failed: Customer {customer_id} not found")
+            return
+            
+        # Формируем payload для iiko
+        birthday_str = None
+        if customer.birthday:
+            try:
+                # birthday может быть как date так и datetime в модели
+                from datetime import date, datetime
+                if isinstance(customer.birthday, (date, datetime)):
+                    dt = datetime.combine(customer.birthday, datetime.min.time()) if isinstance(customer.birthday, date) else customer.birthday
+                    birthday_str = dt.strftime("%Y-%m-%d %H:%M:%S.000")
+            except:
+                pass
+            
+        sex = 0 # NotSpecified
+        if customer.gender:
+            g = str(customer.gender).lower()
+            if g in ("male", "муж", "м", "1", "мужской"): sex = 1
+            elif g in ("female", "жен", "ж", "2", "женский"): sex = 2
+            
+        customer_data = {
+            "phone": customer.phone,
+            "name": customer.first_name or customer.name or "",
+            "surName": customer.last_name or customer.surname or "",
+            "middleName": customer.middle_name,
+            "email": customer.email,
+            "birthday": birthday_str,
+            "sex": sex,
+            "shouldBeCheckedForRisk": bool(customer.is_high_risk),
+            "isHighRisk": bool(customer.is_high_risk),
+            "referrerId": customer.referrer,
+            "userData": customer.notes or customer.iiko_notes
+        }
+        
+        # Очищаем от пустых значений и None, но оставляем обязательные
+        customer_data = {k: v for k, v in customer_data.items() if v is not None}
+        
+        # Если есть iiko_id, используем его для однозначной идентификации
+        if customer.iiko_id:
+            customer_data["id"] = customer.iiko_id
+            
+        try:
+            # Вызываем сервис iiko для обновления профиля
+            result = loop.run_until_complete(iiko_service.create_or_update_customer(customer_data))
+            logger.info(f"Customer {customer.phone} successfully exported to iiko. Result ID: {result.get('id')}")
+            
+            # 2. Синхронизация категорий
+            try:
+                # Получаем текущую инфу о госте из iiko
+                iiko_info = loop.run_until_complete(iiko_service.get_customer_info(customer.phone))
+                if iiko_info and iiko_info.get("id"):
+                    iiko_cust_id = iiko_info["id"]
+                    
+                    # Текущие категории в iiko (имена)
+                    current_iiko_cat_names = []
+                    if "categories" in iiko_info:
+                        current_iiko_cat_names = [c["name"] for c in iiko_info["categories"] if isinstance(c, dict) and c.get("name")]
+                    
+                    # Категории, которые должны быть (из нашей БД)
+                    target_cat_names = customer.iiko_categories or []
+                    
+                    # Если есть расхождения - синхронизируем
+                    if set(current_iiko_cat_names) != set(target_cat_names):
+                        logger.info(f"Syncing categories for {customer.phone}. Current: {current_iiko_cat_names}, Target: {target_cat_names}")
+                        
+                        # Нам нужны ID категорий
+                        all_cats_data = loop.run_until_complete(iiko_service.get_customer_categories())
+                        all_cats = all_cats_data.get("guestCategories", [])
+                        name_to_id = {c["name"]: c["id"] for c in all_cats if c.get("name") and c.get("id")}
+                        
+                        # Категории для добавления
+                        for name in target_cat_names:
+                            if name not in current_iiko_cat_names and name in name_to_id:
+                                loop.run_until_complete(iiko_service.add_customer_category(iiko_cust_id, name_to_id[name]))
+                                logger.info(f"Added category '{name}' to {customer.phone}")
+                                
+                        # Категории для удаления
+                        for name in current_iiko_cat_names:
+                            if name not in target_cat_names and name in name_to_id:
+                                loop.run_until_complete(iiko_service.remove_customer_category(iiko_cust_id, name_to_id[name]))
+                                logger.info(f"Removed category '{name}' from {customer.phone}")
+            except Exception as cat_err:
+                logger.error(f"Failed to sync categories for customer {customer.phone}: {cat_err}")
+
+            # После успешного экспорта запускаем синхронизацию обратно, чтобы обновить все поля
+            # (так как iiko может изменить ID или добавить какие-то данные)
+            sync_single_customer_task.delay(customer.phone)
+            
+        except Exception as e:
+            logger.error(f"Failed to export customer {customer.phone} to iiko: {e}")

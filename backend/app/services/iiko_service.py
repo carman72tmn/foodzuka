@@ -214,6 +214,8 @@ class IikoService:
                     json={"apiLogin": login}
                 )
                 response.raise_for_status()
+                if response.encoding is None or response.encoding.lower() == 'iso-8859-1':
+                    response.encoding = 'utf-8'
                 data = response.json()
 
                 token = data["token"]
@@ -331,15 +333,6 @@ class IikoService:
                         logger.warning(f"ОШИБКА ПРАВ IIKO: Для API Login не разрешен доступ к {endpoint}. Проверьте настройки в ЛК iiko Cloud.")
                 response.raise_for_status()
                 
-            if response.encoding is None or response.encoding.lower() == 'iso-8859-1':
-                response.encoding = 'utf-8'
-                
-            return response.json()
-        except Exception as e:
-            if not isinstance(e, httpx.HTTPStatusError):
-                logger.error(f"iiko API unexpected error for {endpoint}: {e}")
-            raise e
-                    
             if response.encoding is None or response.encoding.lower() == 'iso-8859-1':
                 response.encoding = 'utf-8'
                 
@@ -1597,11 +1590,18 @@ class IikoService:
         organization_id: Optional[str] = None,
         comment: str = "Начисление за активность"
     ) -> bool:
-        """Начисление баллов на кошелек клиента"""
+        """Начисление или списание баллов на кошелек клиента"""
         org_id = organization_id or self.organization_id
+        
+        # Определяем эндпоинт в зависимости от знака суммы
+        endpoint = "/api/1/loyalty/iiko/customer/wallet/topup"
+        if amount < 0:
+            endpoint = "/api/1/loyalty/iiko/customer/wallet/chargeoff"
+            amount = abs(amount) # Сумма в запросе должна быть положительной
+            
         try:
             await self._request(
-                "POST", "/api/1/loyalty/iiko/customer/wallet/topup", 
+                "POST", endpoint, 
                 {
                     "organizationId": org_id,
                     "customerId": customer_id,
@@ -1613,9 +1613,19 @@ class IikoService:
                 organization_id=org_id
             )
             return True
+        except httpx.HTTPStatusError as e:
+            # Пытаемся извлечь детальную ошибку из тела ответа iiko
+            try:
+                error_body = e.response.json()
+                error_detail = error_body.get("errorDescription") or error_body.get("message") or e.response.text
+            except Exception:
+                error_detail = e.response.text or str(e)
+            
+            logger.error(f"iiko balance update failed ({endpoint}): {error_detail}")
+            raise ValueError(f"iiko API error: {error_detail}")
         except Exception as e:
-            logger.error(f"Error adding customer balance: {e}")
-            return False
+            logger.error(f"Error adjusting customer balance ({endpoint}): {e}")
+            raise e
             
     async def create_or_update_customer(
         self,
@@ -1629,9 +1639,11 @@ class IikoService:
         # Очищаем данные клиента от None значений
         clean_customer_data = {k: v for k, v in customer_data.items() if v is not None}
         
+        # iiko Cloud expects a FLAT structure for create_or_update_customer
+        # organizationId should be at the top level alongside customer fields
         payload = {
             "organizationId": org_id,
-            "customer": clean_customer_data
+            **clean_customer_data
         }
         
         try:
@@ -1657,6 +1669,42 @@ class IikoService:
             "POST", "/api/1/loyalty/iiko/customer_category",
             {"organizationId": org_id},
             api_login=api_login,
+            organization_id=org_id
+        )
+
+    async def add_customer_category(
+        self,
+        customer_id: str,
+        category_id: str,
+        organization_id: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """Добавление категории гостю"""
+        org_id = organization_id or self.organization_id
+        return await self._request(
+            "POST", "/api/1/loyalty/iiko/customer_category/add",
+            {
+                "customerId": customer_id,
+                "categoryId": category_id,
+                "organizationId": org_id
+            },
+            organization_id=org_id
+        )
+
+    async def remove_customer_category(
+        self,
+        customer_id: str,
+        category_id: str,
+        organization_id: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """Удаление категории у гостя"""
+        org_id = organization_id or self.organization_id
+        return await self._request(
+            "POST", "/api/1/loyalty/iiko/customer_category/remove",
+            {
+                "customerId": customer_id,
+                "categoryId": category_id,
+                "organizationId": org_id
+            },
             organization_id=org_id
         )
 
@@ -2109,13 +2157,8 @@ class IikoService:
         date_from = datetime.now() - timedelta(days=365*5)
         date_to = datetime.now()
 
-        # Поля для фильтрации
-        # В iiko могут использоваться разные имена полей в зависимости от версии. 
-        # Пробуем последовательно самые частые варианты.
         phone_variants = [clean_phone, f"+{clean_phone}", phone]
-        
-        # Расширенный список полей для поиска телефона в разных версиях iiko
-        possible_fields = ["Guest.Phone", "Customer.Phone", "Delivery.CustomerPhone", "Phone"]
+        possible_fields = ["Delivery.CustomerPhone", "Delivery.Phone", "OrderCustomer.Phone", "Customer.Phone", "Phone"]
         
         for field in possible_fields:
             filters = {
@@ -2140,12 +2183,13 @@ class IikoService:
                 try:
                     rows = await self.get_custom_olap_report(
                         report_type="SALES",
-                        group_by_fields=["OpenDate.Typed", "UniqOrderId"],
+                        group_by_fields=["OpenDate.Typed"],
                         aggregate_fields=agg_fields,
                         date_from=date_from,
                         date_to=date_to,
                         organization_id=org_id,
-                        filters=filters
+                        filters=filters,
+                        log_error=False # Не спамим в логи при переборе вариантов
                     )
                     if rows:
                         # Форматируем для фронтенда
@@ -2194,10 +2238,10 @@ class IikoService:
         date_from = datetime.now() - timedelta(days=365*10)
         date_to = datetime.now()
         
-        phone_variants = [clean_phone, f"+{clean_phone}", phone]
-        
         # Расширенный список полей для поиска телефона в разных версиях iiko
-        possible_fields = ["Guest.Phone", "Customer.Phone", "OrderCustomer.Phone", "Delivery.Phone", "Phone"]
+        # ПРИОРИТЕТ: Delivery.CustomerPhone (валидное поле для этой версии iiko)
+        phone_variants = [clean_phone, f"+{clean_phone}", phone]
+        possible_fields = ["Delivery.CustomerPhone", "Delivery.Phone", "OrderCustomer.Phone", "Customer.Phone", "Phone"]
 
         
         # Попробуем получить данные
@@ -2715,7 +2759,12 @@ class IikoService:
                         )
                     
                     if log_error:
+                        # Логируем как ошибку только если это не подавленный запрос (например, не перебор вариантов)
                         logger.error(f"iiko Resto error {response.status_code}: {response.text} | URL: {endpoint}")
+                    elif response.status_code != 400:
+                        # Для 400 при подавленном логе пишем только в debug, так как это штатный перебор полей
+                        logger.debug(f"iiko Resto suppressed 400 error: {response.text}")
+                    
                     response.raise_for_status()
 
                 if response.encoding is None or response.encoding.lower() == 'iso-8859-1':
