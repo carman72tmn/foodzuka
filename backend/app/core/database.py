@@ -35,3 +35,21 @@ def get_session():
         yield session
     finally:
         session.close()
+
+from contextlib import contextmanager
+
+@contextmanager
+def get_session_sync():
+    """
+    Контекстный менеджер для получения сессии базы данных в синхронном коде.
+    Использование: with get_session_sync() as session: ...
+    """
+    session = SessionLocal()
+    try:
+        yield session
+        session.commit()
+    except Exception:
+        session.rollback()
+        raise
+    finally:
+        session.close()
