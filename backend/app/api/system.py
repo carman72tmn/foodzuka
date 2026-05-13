@@ -19,12 +19,12 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/system", tags=["System"])
 
 @router.get("/tasks", response_model=List[SyncStatus])
-async def get_tasks(session: Session = Depends(get_session)):
+def get_tasks(session: Session = Depends(get_session)):
     """Список всех фоновых задач"""
     return session.exec(select(SyncStatus).order_by(SyncStatus.updated_at.desc())).all()
 
 @router.post("/tasks/stop-all")
-async def stop_all_tasks(session: Session = Depends(get_session)):
+def stop_all_tasks(session: Session = Depends(get_session)):
     """Остановить все активные задачи"""
     running_tasks = session.exec(select(SyncStatus).where(SyncStatus.status == "running")).all()
     count = 0
@@ -48,7 +48,7 @@ async def stop_all_tasks(session: Session = Depends(get_session)):
     return {"status": "success", "stopped_count": count}
 
 @router.post("/tasks/cleanup")
-async def cleanup_tasks(session: Session = Depends(get_session)):
+def cleanup_tasks(session: Session = Depends(get_session)):
     """Очистить завершенные и ошибочные задачи"""
     to_delete = session.exec(
         select(SyncStatus).where(SyncStatus.status.in_(["completed", "error", "cancelled"]))
@@ -60,7 +60,7 @@ async def cleanup_tasks(session: Session = Depends(get_session)):
     return {"status": "success", "deleted_count": count}
 
 @router.post("/tasks/run")
-async def run_task(task_type: str, params: dict = {}, session: Session = Depends(get_session)):
+def run_task(task_type: str, params: dict = {}, session: Session = Depends(get_session)):
     """Запуск новой задачи вручную"""
     # Создаем запись в SyncStatus
     new_status = SyncStatus(
@@ -113,7 +113,7 @@ async def run_task(task_type: str, params: dict = {}, session: Session = Depends
 
 
 @router.post("/tasks/{task_id}/pause")
-async def toggle_task_pause(task_id: int, session: Session = Depends(get_session)):
+def toggle_task_pause(task_id: int, session: Session = Depends(get_session)):
     """Переключение паузы задачи"""
     sync_status = session.get(SyncStatus, task_id)
     if not sync_status:
@@ -126,7 +126,7 @@ async def toggle_task_pause(task_id: int, session: Session = Depends(get_session
     return sync_status
 
 @router.post("/tasks/{task_id}/cancel")
-async def cancel_task(task_id: int, session: Session = Depends(get_session)):
+def cancel_task(task_id: int, session: Session = Depends(get_session)):
     """Отмена задачи"""
     sync_status = session.get(SyncStatus, task_id)
     if not sync_status:
@@ -147,7 +147,7 @@ async def cancel_task(task_id: int, session: Session = Depends(get_session)):
     return sync_status
 
 @router.post("/tasks/{task_id}/refresh")
-async def refresh_task_status(task_id: int, session: Session = Depends(get_session)):
+def refresh_task_status(task_id: int, session: Session = Depends(get_session)):
     """Принудительное обновление статуса задачи из Celery"""
     sync_status = session.get(SyncStatus, task_id)
     if not sync_status:
@@ -175,7 +175,7 @@ async def refresh_task_status(task_id: int, session: Session = Depends(get_sessi
     return sync_status
 
 @router.delete("/tasks/{task_id}")
-async def delete_task_record(task_id: int, session: Session = Depends(get_session)):
+def delete_task_record(task_id: int, session: Session = Depends(get_session)):
     """Удаление записи о задаче"""
     sync_status = session.get(SyncStatus, task_id)
     if not sync_status:
@@ -186,7 +186,7 @@ async def delete_task_record(task_id: int, session: Session = Depends(get_sessio
     return {"status": "success"}
 
 @router.get("/files")
-async def list_import_files():
+def list_import_files():
     """Список файлов импорта"""
     temp_dir = "temp_imports"
     if not os.path.exists(temp_dir):
@@ -204,7 +204,7 @@ async def list_import_files():
     return files
 
 @router.delete("/files/{filename}")
-async def delete_import_file(filename: str):
+def delete_import_file(filename: str):
     """Удаление файла импорта"""
     temp_dir = "temp_imports"
     path = os.path.join(temp_dir, filename)
@@ -224,12 +224,12 @@ async def delete_import_file(filename: str):
 # --- Управление запланированными задачами (APScheduler) ---
 
 @router.get("/scheduled-tasks", response_model=List[ScheduledTask])
-async def get_scheduled_tasks(session: Session = Depends(get_session)):
+def get_scheduled_tasks(session: Session = Depends(get_session)):
     """Список всех запланированных задач"""
     return session.exec(select(ScheduledTask).order_by(ScheduledTask.id)).all()
 
 @router.post("/scheduled-tasks", response_model=ScheduledTask)
-async def create_scheduled_task(task: ScheduledTask, session: Session = Depends(get_session)):
+def create_scheduled_task(task: ScheduledTask, session: Session = Depends(get_session)):
     """Создание новой запланированной задачи"""
     session.add(task)
     session.commit()
@@ -241,7 +241,7 @@ async def create_scheduled_task(task: ScheduledTask, session: Session = Depends(
     return task
 
 @router.put("/scheduled-tasks/{task_id}", response_model=ScheduledTask)
-async def update_scheduled_task(task_id: int, updated_task: dict, session: Session = Depends(get_session)):
+def update_scheduled_task(task_id: int, updated_task: dict, session: Session = Depends(get_session)):
     """Обновление запланированной задачи"""
     task = session.get(ScheduledTask, task_id)
     if not task:
@@ -272,7 +272,7 @@ async def update_scheduled_task(task_id: int, updated_task: dict, session: Sessi
     return task
 
 @router.post("/scheduled-tasks/{task_id}/toggle")
-async def toggle_scheduled_task(task_id: int, session: Session = Depends(get_session)):
+def toggle_scheduled_task(task_id: int, session: Session = Depends(get_session)):
     """Включение/выключение задачи"""
     task = session.get(ScheduledTask, task_id)
     if not task:
@@ -295,7 +295,7 @@ async def toggle_scheduled_task(task_id: int, session: Session = Depends(get_ses
     return {"status": "success", "is_active": task.is_active}
 
 @router.post("/scheduled-tasks/{task_id}/run")
-async def run_scheduled_task_now(task_id: int, session: Session = Depends(get_session)):
+def run_scheduled_task_now(task_id: int, session: Session = Depends(get_session)):
     """Мгновенный запуск задачи"""
     task = session.get(ScheduledTask, task_id)
     if not task:
@@ -314,7 +314,7 @@ async def run_scheduled_task_now(task_id: int, session: Session = Depends(get_se
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.delete("/scheduled-tasks/{task_id}")
-async def delete_scheduled_task(task_id: int, session: Session = Depends(get_session)):
+def delete_scheduled_task(task_id: int, session: Session = Depends(get_session)):
     """Удаление запланированной задачи"""
     task = session.get(ScheduledTask, task_id)
     if not task:

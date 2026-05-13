@@ -1,4 +1,5 @@
 import httpx
+import asyncio
 from typing import Optional, Dict, Any, List
 from shapely.geometry import Point, Polygon
 import json
@@ -16,7 +17,7 @@ class YandexService:
         
     async def get_settings(self, session: Session) -> Optional[YandexSettings]:
         """Получение активных настроек Яндекс"""
-        return session.exec(select(YandexSettings).where(YandexSettings.is_active == True)).first()
+        return await asyncio.to_thread(lambda: session.exec(select(YandexSettings).where(YandexSettings.is_active == True)).first())
 
     async def geocode_address(self, address: str, api_key: str) -> Optional[Dict[str, float]]:
         """
@@ -89,12 +90,14 @@ class YandexService:
         """
         Поиск зоны доставки для заданных координат
         """
-        zones = session.exec(select(DeliveryZone).where(DeliveryZone.is_active == True)).all()
+        zones = await asyncio.to_thread(lambda: session.exec(select(DeliveryZone).where(DeliveryZone.is_active == True)).all())
         
         # Сначала проверяем зоны с приоритетом
         sorted_zones = sorted(zones, key=lambda x: x.priority, reverse=True)
         
         for zone in sorted_zones:
+            # is_point_in_zone - синхронная и чисто вычислительная ( shapely ), 
+            # но если зон много, можно тоже вынести. Оставим пока так.
             if self.is_point_in_zone(lat, lng, zone):
                 return zone
         return None

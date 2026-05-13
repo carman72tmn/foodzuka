@@ -59,16 +59,26 @@ class Customer(SQLModel, table=True):
     city: Optional[str] = Field(default=None, max_length=255, description="Город гостя")
     addresses: Optional[str] = Field(default=None, description="Список адресов в формате JSON")
     notes: Optional[str] = Field(default=None, description="Заметки о госте")
-    card_number: Optional[str] = Field(default=None, max_length=50, description="Номер карты лояльности")
-    gender: Optional[str] = Field(default=None, max_length=20, description="Пол")
+    card_number: Optional[str] = Field(default=None, max_length=50, description="Номер карты лояльности (основной)")
+    iiko_card_numbers: Optional[List[str]] = Field(sa_type=JSONB, default=[], description="Все номера карт гостя из iiko")
+    gender: Optional[str] = Field(default="Не указан", max_length=50, description="Пол (Не указан / Мужской / Женский)")
+    middle_name: Optional[str] = Field(default=None, max_length=255, description="Отчество")
+    referrer: Optional[str] = Field(default=None, max_length=255, description="Рекомендатель")
+    
     is_marketing_consented: bool = Field(default=True, description="Согласие на рекламную рассылку")
     is_system_notifications_consented: bool = Field(default=True, description="Согласие на системные уведомления")
+    is_loyalty_messages_consented: bool = Field(default=True, description="Согласие на сообщения системы лояльности")
+    is_synced_to_iiko_cards: bool = Field(default=False, description="Синхронизирован с iiko.cards")
     consent_status: Optional[str] = Field(default=None, max_length=50, description="Статус согласия (NotGiven, Given, Revoked)")
     marketing_consents: Optional[List[dict]] = Field(sa_type=JSONB, default=[], description="Детальные маркетинговые согласия iiko")
     
     # Расширенные данные гостя (дополнения по ТЗ)
     registration_date: Optional[datetime] = Field(default=None, description="Дата регистрации в IIKO")
+    registration_source: Optional[str] = Field(default=None, max_length=255, description="Источник регистрации")
+    registered_organization: Optional[str] = Field(default=None, max_length=255, description="Зарегистрировавшая организация")
+    
     last_order_date: Optional[datetime] = Field(default=None, description="Дата последнего заказа")
+    last_olap_sync_at: Optional[datetime] = Field(default=None, description="Время последней OLAP синхронизации аналитики")
     total_orders_count: int = Field(default=0, description="Общее количество заказов")
     total_orders_amount: Decimal = Field(sa_type=Numeric(12, 2), default=0, description="Общая сумма выкупленных заказов")
     

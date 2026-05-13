@@ -13,8 +13,6 @@ import zoneinfo
 from decimal import Decimal
 from sqlmodel import Session, select, delete, update
 from sqlalchemy import func
-from sqlalchemy.orm.attributes import flag_modified as sql_flag_modified
-
 from app.models.category import Category
 from app.models.product import Product, ProductSize, ProductModifierGroup, ProductModifier
 from app.models.sync_log import SyncLog
@@ -40,186 +38,265 @@ class IikoSyncService:
         self._terminal_groups_cache = {}
         self._last_rev_sync = {} # {org_id: last_time}
 
-    async def _sync_addresses_from_local_orders(self, session: Session, customer_id: int, phone: str, days: int = 30):
+    async def _sync_addresses_from_local_orders(self, session: Session, customer_id: int, phone: str, days: int = 365):
         """Извлечение адресов из локальной таблицы заказов за последние X дней"""
         from app.models.order import Order
         from app.models.customer import GuestAddress, ClientAddressHistory
         
-        date_limit = datetime.now(timezone.utc) - timedelta(days=days)
-        
-        # Ищем заказы по номеру телефона
-        query = select(Order).where(
-            Order.customer_phone == phone,
-            Order.created_at >= date_limit
-        ).order_by(Order.created_at.desc())
-        
-        orders = session.exec(query).all()
-        added_count = 0
-        
-        for order in orders:
-            addr_str = order.delivery_address
-            if not addr_str or addr_str == "Самовывоз" or len(addr_str) < 5:
-                continue
-                
-            # Проверяем наличие в GuestAddress
-            existing = session.exec(
-                select(GuestAddress).where(
-                    GuestAddress.customer_id == customer_id,
-                    GuestAddress.address == addr_str
-                )
-            ).first()
+        def _sync_db_logic():
+            date_limit = datetime.now(timezone.utc) - timedelta(days=days)
             
-            if not existing:
-                new_addr = GuestAddress(
-                    customer_id=customer_id,
-                    address=addr_str,
-                    is_main=False
-                )
-                session.add(new_addr)
-                added_count += 1
-                
-            # Также обновляем историю адресов (Laravel)
-            if order.street or addr_str:
-                city = order.city or "Тюмень"
-                street = order.street
-                house = order.house
-                
-                if street:
-                    existing_history = session.exec(
-                        select(ClientAddressHistory).where(
-                            ClientAddressHistory.client_id == customer_id,
-                            ClientAddressHistory.city == city,
-                            ClientAddressHistory.street == street,
-                            ClientAddressHistory.house == house
-                        )
-                    ).first()
+            # Ищем заказы по номеру телефона
+            query = select(Order).where(
+                Order.customer_phone == phone,
+                Order.created_at >= date_limit
+            ).order_by(Order.created_at.desc())
+            
+            orders = session.exec(query).all()
+            added_count = 0
+            
+            for order in orders:
+                addr_str = order.delivery_address
+                if not addr_str or addr_str == "Самовывоз" or len(addr_str) < 5:
+                    continue
                     
-                    if not existing_history:
-                        new_history = ClientAddressHistory(
-                            client_id=customer_id,
-                            city=city,
-                            street=street,
-                            house=house,
-                            apartment=order.flat,
-                            address=addr_str,
-                            last_used_at=order.created_at.replace(tzinfo=None),
-                            orders_count=1
-                        )
-                        session.add(new_history)
-        
-        if added_count > 0:
-            logger.info(f"Extracted {added_count} new addresses from local orders for customer {customer_id}")
+                # Проверяем наличие в GuestAddress
+                existing = session.exec(
+                    select(GuestAddress).where(
+                        GuestAddress.customer_id == customer_id,
+                        GuestAddress.address == addr_str
+                    )
+                ).first()
+                
+                if not existing:
+                    new_addr = GuestAddress(
+                        customer_id=customer_id,
+                        address=addr_str,
+                        is_main=False
+                    )
+                    session.add(new_addr)
+                    added_count += 1
+                    
+                # Также обновляем историю адресов (Laravel)
+                if order.street or addr_str:
+                    city = order.city or "Тюмень"
+                    street = order.street
+                    house = order.house
+                    
+                    if street:
+                        existing_history = session.exec(
+                            select(ClientAddressHistory).where(
+                                ClientAddressHistory.client_id == customer_id,
+                                ClientAddressHistory.city == city,
+                                ClientAddressHistory.street == street,
+                                ClientAddressHistory.house == house
+                            )
+                        ).first()
+                        
+                        if not existing_history:
+                            new_history = ClientAddressHistory(
+                                client_id=customer_id,
+                                city=city,
+                                street=street,
+                                house=house,
+                                apartment=order.flat,
+                                address=addr_str,
+                                last_used_at=order.created_at.replace(tzinfo=None),
+                                orders_count=1
+                            )
+                            session.add(new_history)
+            
+            if added_count > 0:
+                logger.info(f"Extracted {added_count} new addresses from local orders for customer {customer_id}")
+                
+                # [FIX] Обновляем поле addresses в основной таблице customers для фронтенда
+                # Мы берем все адреса из GuestAddress для этого клиента
+                all_guest_addrs = session.exec(
+                    select(GuestAddress).where(GuestAddress.customer_id == customer_id)
+                ).all()
+                if all_guest_addrs:
+                    addr_strings = [a.address for a in all_guest_addrs if a.address]
+                    # Убираем дубликаты
+                    seen = set()
+                    unique_addrs = [x for x in addr_strings if not (x in seen or seen.add(x))]
+                    
+                    # Обновляем объект Customer
+                    cust = session.get(Customer, customer_id)
+                    if cust:
+                        cust.addresses = json.dumps(unique_addrs, ensure_ascii=False)
+                        session.add(cust)
+            
+            return added_count
 
-    async def sync_single_customer(self, session: Session, phone: str, organization_id: Optional[str] = None) -> bool:
+        return await asyncio.to_thread(_sync_db_logic)
+
+    async def sync_single_customer(self, session: Session, phone: str, organization_id: Optional[str] = None, order_id: Optional[int] = None) -> bool:
         """
-        Полная синхронизация одного клиента.
-        1. Профиль, баланс, категории (Cloud API)
-        2. Аналитика и история (Server API OLAP)
-        3. Адреса из локальных заказов
+        Синхронизация одного клиента из iiko Cloud.
+        Если передан order_id, создается снимок данных клиента в заказе.
         """
-        from app.utils.phone_utils import normalize_phone
-        from app.models.customer import Customer, GuestPhone, BonusTransaction, BonusTransactionType
+        from app.models.order import Order
+        from app.models.customer import Customer
         
         clean_phone = normalize_phone(phone)
         if not clean_phone:
             return False
 
-        customer = session.exec(select(Customer).where(Customer.phone == clean_phone)).first()
-        if not customer:
-            customer = Customer(phone=clean_phone, is_new_guest=True)
-            session.add(customer)
-            session.flush()
-            
-        # 1. Данные из Cloud API
-        iiko_data = await self.iiko.get_customer_info(clean_phone, organization_id=organization_id)
+        logger.info(f"Syncing single customer: {clean_phone} (Order ID: {order_id})")
         
-        if iiko_data.get("id"):
-            customer.iiko_customer_id = iiko_data.get("id")
-            customer.uid = iiko_data.get("id")
-            customer.iiko_id = iiko_data.get("id")
-            
-            if iiko_data.get("name"):
-                customer.name = iiko_data["name"]
-                customer.first_name = iiko_data["name"]
-            if iiko_data.get("surname"):
-                customer.surname = iiko_data["surname"]
-                customer.last_name = iiko_data["surname"]
-            if iiko_data.get("middleName"):
-                customer.middle_name = iiko_data["middleName"]
-            if iiko_data.get("email"):
-                customer.email = iiko_data["email"]
-            
-            # Пол (0: Не указан, 1: Мужской, 2: Женский)
-            sex_val = iiko_data.get("sex", 0)
-            if sex_val == 1:
-                customer.gender = "Мужской"
-            elif sex_val == 2:
-                customer.gender = "Женский"
-            else:
-                customer.gender = "Не указан"
+        def _get_order_and_customer():
+            ord_obj = session.get(Order, order_id) if order_id else None
+            cust_obj = session.exec(select(Customer).where(Customer.phone == clean_phone)).first()
+            return ord_obj, cust_obj
 
-            # Карты
-            if "cards" in iiko_data and iiko_data["cards"]:
-                card_nums = [c.get("number") for c in iiko_data["cards"] if c.get("number")]
-                customer.iiko_card_numbers = card_nums
-                if card_nums:
-                    customer.card_number = card_nums[0]
-            
-            # Данные о регистрации
-            if iiko_data.get("whenRegistered"):
-                try:
-                    # iiko присылает "2022-06-17 00:00:00.000"
-                    reg_str = iiko_data["whenRegistered"].replace(" ", "T")
-                    customer.registration_date = datetime.fromisoformat(reg_str).replace(tzinfo=None)
-                except:
-                    pass
-            
-            customer.registered_organization = iiko_data.get("registrationOrganizationId")
-            customer.referrer = iiko_data.get("referrerId")
-            customer.registration_source = iiko_data.get("registrationSourceId")
-            
-            # Баланс
-            if "walletBalances" in iiko_data:
-                total_bonuses = sum(float(b.get("balance", 0)) for b in iiko_data["walletBalances"])
-                customer.bonus_points = Decimal(str(total_bonuses))
-                customer.wallet_balances = json.dumps(iiko_data["walletBalances"], ensure_ascii=False)
-            
-            # Категории
-            if "categories" in iiko_data:
-                category_names = [c["name"] for c in iiko_data["categories"] if isinstance(c, dict) and c.get("name")]
-                customer.loyalty_categories = json.dumps(category_names, ensure_ascii=False)
-                customer.iiko_categories = category_names
-            
-            # Комментарий iiko (но не история заказов!)
-            customer.iiko_comment = iiko_data.get("comment")
+        order, customer = await asyncio.to_thread(_get_order_and_customer)
 
-            # Флаг риска
-            if "shouldBeCheckedForRisk" in iiko_data:
-                customer.is_high_risk = bool(iiko_data.get("shouldBeCheckedForRisk", False))
-            
-        # 2. Аналитика из OLAP
         try:
-            analytics = await self.iiko.get_customer_analytics_olap(clean_phone, session, organization_id=organization_id)
-            if analytics and not analytics.get("error"):
-                customer.total_orders_count = analytics.get("orders_count", analytics.get("total_count", 0))
-                customer.total_orders_amount = Decimal(str(analytics.get("total_revenue", analytics.get("total_sum", 0))))
-                customer.total_purchases_sum = customer.total_orders_amount
+            # 1. Данные из Cloud API (iiko Card)
+            iiko_data = None
+            
+            # Если у нас есть ID, пробуем сначала по нему
+            if customer and customer.iiko_customer_id:
+                try:
+                    iiko_data = await self.iiko.get_customer_info(customer_id=customer.iiko_customer_id, organization_id=organization_id)
+                except Exception as e:
+                    logger.warning(f"Sync by iiko_id {customer.iiko_customer_id} failed: {e}. Falling back to phone search.")
+            
+            # Если по ID не нашли или его нет - ищем по номеру телефона
+            if not iiko_data or not iiko_data.get("id"):
+                iiko_data = await self.iiko.get_customer_info(phone=clean_phone, organization_id=organization_id)
+            
+            if not customer:
+                def _create_customer():
+                    new_cust = Customer(phone=clean_phone, is_new_guest=True)
+                    session.add(new_cust)
+                    session.flush()
+                    return new_cust
+                customer = await asyncio.to_thread(_create_customer)
+
+            if iiko_data and iiko_data.get("id"):
+                customer.iiko_customer_id = iiko_data.get("id")
+                customer.uid = iiko_data.get("id")
+                customer.iiko_id = iiko_data.get("id")
                 
-                if analytics.get("last_order_date"):
-                    try:
-                        customer.last_order_date = datetime.fromisoformat(analytics["last_order_date"].replace(" ", "T")).replace(tzinfo=None)
-                    except:
-                        pass
+                if iiko_data.get("name"):
+                    customer.name = iiko_data["name"]
+                    customer.first_name = iiko_data["name"]
+                if iiko_data.get("surname"):
+                    customer.surname = iiko_data["surname"]
+                    customer.last_name = iiko_data["surname"]
+                if iiko_data.get("middleName"):
+                    customer.middle_name = iiko_data["middleName"]
+                if iiko_data.get("email"):
+                    customer.email = iiko_data["email"]
+                
+                # Пол (0: Не указан, 1: Мужской, 2: Женский)
+                sex_val = iiko_data.get("sex", 0)
+                if sex_val == 1: customer.gender = "Мужской"
+                elif sex_val == 2: customer.gender = "Женский"
+                else: customer.gender = "Не указан"
+
+                # Бонусы
+                if "walletBalances" in iiko_data:
+                    total_bonuses = sum(float(b.get("balance", 0)) for b in iiko_data["walletBalances"])
+                    customer.bonus_points = Decimal(str(total_bonuses))
+                    customer.wallet_balances = json.dumps(iiko_data["walletBalances"], ensure_ascii=False)
+                
+                # Карты лояльности
+                cards = iiko_data.get("cards", [])
+                if cards:
+                    # Берем первую карту как основную
+                    customer.card_number = cards[0].get("number")
+                    # Сохраняем все номера карт
+                    customer.iiko_card_numbers = [c.get("number") for c in cards if c.get("number")]
+                
+                # Категории
+                if "categories" in iiko_data:
+                    category_names = [c["name"] for c in iiko_data["categories"] if isinstance(c, dict) and c.get("name")]
+                    customer.loyalty_categories = json.dumps(category_names, ensure_ascii=False)
+                    customer.iiko_categories = category_names
+                
+                # Комментарий iiko
+                customer.iiko_comment = iiko_data.get("comment")
+
+                # Флаг риска - обновляем только если поле есть в ответе, чтобы не затереть локальный статус
+                # Проверяем возможные варианты названия поля в iiko
+                risk_keys = ["shouldBeCheckedForRisk", "isHighRisk", "checkedForRisk"]
+                risk_found = False
+                for rk in risk_keys:
+                    if rk in iiko_data:
+                        customer.is_high_risk = bool(iiko_data.get(rk))
+                        risk_found = True
+                        logger.info(f"Customer {clean_phone} risk status updated from iiko field '{rk}': {customer.is_high_risk}")
+                        break
+                
+                if not risk_found:
+                    # Если ни одного поля нет, проверяем категории (иногда риск это категория)
+                    risk_in_categories = any("риск" in str(cat).lower() or "risk" in str(cat).lower() for cat in (customer.iiko_categories or []))
+                    if risk_in_categories:
+                        customer.is_high_risk = True
+                        logger.info(f"Customer {clean_phone} marked as high risk based on categories: {customer.iiko_categories}")
+                    else:
+                        logger.debug(f"Customer {clean_phone} risk status not found in iiko data, keeping local value: {customer.is_high_risk}")
+                
+            # 2. Аналитика из OLAP (количество заказов)
+            try:
+                analytics = await self.iiko.get_customer_analytics_olap(clean_phone, session, organization_id=organization_id)
+                if analytics and not analytics.get("error"):
+                    customer.total_orders_count = analytics.get("orders_count", analytics.get("total_count", 0))
+                    customer.total_orders_amount = Decimal(str(analytics.get("total_revenue", analytics.get("total_sum", 0))))
+                    customer.total_purchases_sum = customer.total_orders_amount
+            except Exception as e:
+                logger.warning(f"OLAP sync failed for {clean_phone}: {e}")
+
+            # 3. Адреса
+            await self._sync_addresses_from_local_orders(session, customer.id, clean_phone)
+
+            customer.updated_at = datetime.now()
+            
+            def _save_customer():
+                session.add(customer)
+                session.flush()
+            
+            await asyncio.to_thread(_save_customer)
+
+            # --- Создание Snapshot для заказа ---
+            if order:
+                # Если у клиента в базе 0 заказов или 1 (этот), считаем его новым
+                is_new_guest_snap = (customer.total_orders_count or 0) <= 1
+                
+                snapshot = {
+                    "name": f"{customer.first_name or ''} {customer.last_name or ''}".strip() or customer.name or "Гость",
+                    "is_new_guest": is_new_guest_snap,
+                    "is_high_risk": bool(customer.is_high_risk),
+                    "total_orders_count": customer.total_orders_count or 0,
+                    "bonus_balance": float(customer.bonus_points or 0),
+                    "iiko_notes": customer.iiko_comment or "",
+                    "sync_date": datetime.now(timezone.utc).isoformat(),
+                    "sync_status": "success"
+                }
+                order.customer_info_details = snapshot
+                from sqlalchemy.orm.attributes import flag_modified
+                flag_modified(order, "customer_info_details")
+                session.add(order)
+                logger.info(f"Created customer snapshot for order {order_id}")
+
+            await asyncio.to_thread(session.commit)
+            return True
+
         except Exception as e:
-            logger.warning(f"OLAP sync failed for {clean_phone}: {e}")
-
-        # 3. Адреса из локальных заказов
-        await self._sync_addresses_from_local_orders(session, customer.id, clean_phone)
-
-        customer.updated_at = datetime.now()
-        session.add(customer)
-        session.commit()
-        return True
+            logger.error(f"Error in sync_single_customer for {phone}: {e}")
+            if order:
+                order.customer_info_details = {
+                    "sync_error": True, 
+                    "error_msg": str(e),
+                    "sync_date": datetime.now(timezone.utc).isoformat()
+                }
+                def _save_err():
+                    session.add(order)
+                    session.commit()
+                await asyncio.to_thread(_save_err)
+            return False
 
     @staticmethod
     def clean_str(val):
@@ -315,23 +392,28 @@ class IikoSyncService:
         return get_tz(session)
 
     async def sync_menu(self, session: Session) -> Dict[str, Any]:
-        """
-        Синхронизация меню (категории и товары) из iiko.
-        Автоматически выбирает API (v2 Cloud или v1 Classic) в зависимости от настроек.
-        Оптимизировано: тяжелые операции с БД вынесены в отдельный поток.
-        """
-        log = SyncLog(
-            sync_type="menu",
-            status="running",
-            details="Запуск синхронизации меню",
-            created_at=datetime.now(timezone.utc).replace(tzinfo=None)
-        )
-        session.add(log)
-        session.commit()
+        """Полная синхронизация меню (Категории + Товары)"""
+        def _init_log():
+            log = SyncLog(
+                sync_type="menu",
+                status="running",
+                details="Запуск синхронизации меню",
+                created_at=datetime.now(timezone.utc).replace(tzinfo=None)
+            )
+            session.add(log)
+            session.commit()
+            session.refresh(log)
+            return log
+
+        log = await asyncio.to_thread(_init_log)
         
         try:
             from app.services.iiko_service import iiko_service
-            settings = session.exec(select(IikoSettings)).first()
+            
+            def _get_settings():
+                return session.exec(select(IikoSettings)).first()
+            
+            settings = await asyncio.to_thread(_get_settings)
             api_login = settings.api_login if settings else None
             org_id = settings.organization_id if settings else None
             
@@ -350,8 +432,16 @@ class IikoSyncService:
                 # 2. Обрабатываем в БД (выносим в поток)
                 res = await asyncio.to_thread(self._sync_from_nomenclature_sync, session, nomenclature, log.id)
             
-            # Обновляем лог после завершения
-            session.refresh(log)
+            def _final_update():
+                session.refresh(log)
+                msg = f"Синхронизация завершена успешно: {res.get('categories', 0)} категорий, {res.get('products', 0)} товаров"
+                log.status = "success"
+                log.details = msg
+                session.add(log)
+                session.commit()
+                return msg
+
+            message = await asyncio.to_thread(_final_update)
             
             response = {
                 "success": True,
@@ -360,23 +450,27 @@ class IikoSyncService:
                 "message": f"Синхронизация завершена успешно: {res.get('categories', 0)} категорий, {res.get('products', 0)} товаров"
             }
             
-            log.status = "success"
-            log.details = response["message"]
-            session.add(log)
-            session.commit()
-            
-            log_audit(action="manual_sync", resource_type="menu", message=response["message"])
+            def _final_success():
+                log.status = "success"
+                log.details = response["message"]
+                session.add(log)
+                session.commit()
+                log_audit(action="manual_sync", resource_type="menu", message=response["message"])
+
+            await asyncio.to_thread(_final_success)
             return response
 
         except Exception as e:
             logger.error(f"Menu sync failed: {e}", exc_info=True)
-            log.status = "error"
-            log.details = str(e)
-            session.add(log)
-            session.commit()
             
-            # Добавляем запись в аудит об ошибке
-            log_audit(action="manual_sync_failed", resource_type="menu", message=str(e))
+            def _final_error():
+                log.status = "error"
+                log.details = str(e)
+                session.add(log)
+                session.commit()
+                log_audit(action="manual_sync_failed", resource_type="menu", message=str(e))
+
+            await asyncio.to_thread(_final_error)
             
             return {
                 "success": False,
@@ -619,7 +713,8 @@ class IikoSyncService:
         street: Optional[str] = None,
         house: Optional[str] = None,
         flat: Optional[str] = None,
-        total_sum: float = 0
+        total_sum: float = 0,
+        order_db_id: Optional[int] = None
     ):
         """
         Проверка существования гостя по номеру телефона и создание/обновление карточки.
@@ -636,15 +731,16 @@ class IikoSyncService:
 
         logger.info(f"==> Customer Sync Trigger: Phone={clean_phone}, Order={order_info}")
 
-        customer = session.exec(select(Customer).where(Customer.phone == clean_phone)).first()
-        
-        # Поиск по дополнительным телефонам если не найден по основному
-        if not customer:
-            from app.models.customer import GuestPhone
-            gp = session.exec(select(GuestPhone).where(GuestPhone.phone == clean_phone)).first()
-            if gp:
-                customer = session.get(Customer, gp.customer_id)
-                logger.info(f"Found customer {customer.id} by additional phone {clean_phone}")
+        def _find_customer():
+            cust = session.exec(select(Customer).where(Customer.phone == clean_phone)).first()
+            if not cust:
+                from app.models.customer import GuestPhone
+                gp = session.exec(select(GuestPhone).where(GuestPhone.phone == clean_phone)).first()
+                if gp:
+                    cust = session.get(Customer, gp.customer_id)
+            return cust
+
+        customer = await asyncio.to_thread(_find_customer)
 
         # Работа с датами (приведение к UTC без TZ для БД)
         current_order_time = order_date or datetime.now(timezone.utc).replace(tzinfo=None)
@@ -695,8 +791,12 @@ class IikoSyncService:
                 total_purchases_sum=Decimal(str(total_sum)) if order_status in (OrderStatus.closed, OrderStatus.delivered) else Decimal("0"),
                 updated_at=datetime.now(timezone.utc).replace(tzinfo=None)
             )
-            session.add(customer)
-            session.flush()
+            def _create_customer():
+                session.add(customer)
+                session.flush()
+                return customer.id
+
+            await asyncio.to_thread(_create_customer)
             logger.info(f"Created new customer card: ID={customer.id}, Phone={clean_phone}")
         else:
             # ОБНОВЛЕНИЕ существующей карточки
@@ -710,81 +810,102 @@ class IikoSyncService:
                 customer.surname = surname
                 customer.last_name = surname
             
-            # Обновляем статистику если это новый заказ
-            is_new_order_data = (customer.last_iiko_order_id != order_id_iiko)
-            
-            if not customer.last_order_date or current_order_time >= customer.last_order_date:
-                if is_new_order_data and order_status in (OrderStatus.closed, OrderStatus.delivered):
-                    customer.total_orders_count = (customer.total_orders_count or 0) + 1
-                    customer.total_orders_amount = (customer.total_orders_amount or Decimal("0")) + Decimal(str(total_sum))
-                    customer.total_purchases_sum = (customer.total_purchases_sum or Decimal("0")) + Decimal(str(total_sum))
+            def _update_stats():
+                # Обновляем статистику если это новый заказ
+                is_new_order_data = (customer.last_iiko_order_id != order_id_iiko)
                 
-                customer.last_order_date = current_order_time
-                customer.last_iiko_order_id = order_id_iiko
+                if not customer.last_order_date or current_order_time >= customer.last_order_date:
+                    if is_new_order_data and order_status in (OrderStatus.closed, OrderStatus.delivered):
+                        customer.total_orders_count = (customer.total_orders_count or 0) + 1
+                        customer.total_orders_amount = (customer.total_orders_amount or Decimal("0")) + Decimal(str(total_sum))
+                        customer.total_purchases_sum = (customer.total_purchases_sum or Decimal("0")) + Decimal(str(total_sum))
+                    
+                    customer.last_order_date = current_order_time
+                    customer.last_iiko_order_id = order_id_iiko
+                
+                # Снимаем флаг нового гостя
+                if order_status in (OrderStatus.closed, OrderStatus.delivered):
+                    customer.is_new_guest = False
             
-            # Снимаем флаг нового гостя
-            if order_status in (OrderStatus.closed, OrderStatus.delivered):
-                customer.is_new_guest = False
-            
-            # Заметки больше не обновляем автоматически информацией о заказах
-            pass
+            await asyncio.to_thread(_update_stats)
 
         # Сохранение адресов (поддержка старой схемы и Laravel)
         if address and address != "Самовывоз":
-            from app.models.customer import GuestAddress, ClientAddressHistory
-            
-            # Legacy GuestAddress
-            existing_addr = session.exec(
-                select(GuestAddress).where(
-                    GuestAddress.customer_id == customer.id,
-                    GuestAddress.address == address
-                )
-            ).first()
-            if not existing_addr:
-                session.add(GuestAddress(customer_id=customer.id, address=address, is_main=False))
-            
-            # Laravel ClientAddressHistory
-            if city or street or house:
-                existing_history = session.exec(
-                    select(ClientAddressHistory).where(
-                        ClientAddressHistory.client_id == customer.id,
-                        ClientAddressHistory.city == city,
-                        ClientAddressHistory.street == street,
-                        ClientAddressHistory.house == house
+            def _save_addresses():
+                from app.models.customer import GuestAddress, ClientAddressHistory
+                
+                # Legacy GuestAddress
+                existing_addr = session.exec(
+                    select(GuestAddress).where(
+                        GuestAddress.customer_id == customer.id,
+                        GuestAddress.address == address
                     )
                 ).first()
+                if not existing_addr:
+                    session.add(GuestAddress(customer_id=customer.id, address=address, is_main=False))
                 
-                if not existing_history:
-                    session.add(ClientAddressHistory(
-                        client_id=customer.id,
-                        city=city,
-                        street=street,
-                        house=house,
-                        apartment=flat,
-                        last_used_at=datetime.now(timezone.utc).replace(tzinfo=None)
-                    ))
-                else:
-                    existing_history.last_used_at = datetime.now(timezone.utc).replace(tzinfo=None)
-                    if flat and not existing_history.apartment:
-                        existing_history.apartment = flat
-                    session.add(existing_history)
+                # Laravel ClientAddressHistory
+                if city or street or house:
+                    existing_history = session.exec(
+                        select(ClientAddressHistory).where(
+                            ClientAddressHistory.client_id == customer.id,
+                            ClientAddressHistory.city == city,
+                            ClientAddressHistory.street == street,
+                            ClientAddressHistory.house == house
+                        )
+                    ).first()
+                    
+                    if not existing_history:
+                        session.add(ClientAddressHistory(
+                            client_id=customer.id,
+                            city=city,
+                            street=street,
+                            house=house,
+                            apartment=flat,
+                            last_used_at=datetime.now(timezone.utc).replace(tzinfo=None)
+                        ))
+                    else:
+                        existing_history.last_used_at = datetime.now(timezone.utc).replace(tzinfo=None)
+                        if flat and not existing_history.apartment:
+                            existing_history.apartment = flat
+                        session.add(existing_history)
 
-        customer.updated_at = datetime.now(timezone.utc).replace(tzinfo=None)
-        session.add(customer)
-        session.flush()
+                customer.updated_at = datetime.now(timezone.utc).replace(tzinfo=None)
+                session.add(customer)
+                session.flush()
+
+            await asyncio.to_thread(_save_addresses)
         
-        # Запуск фоновой синхронизации из iiko Cloud
-        from app.tasks.customer_tasks import sync_single_customer_task
         try:
-            sync_single_customer_task.delay(clean_phone)
-            logger.info(f"Triggered background sync for phone {clean_phone}")
-        except Exception as celery_err:
-            logger.warning(f"Failed to start Celery sync task for {clean_phone}: {celery_err}")
+            # Получаем ID организации для API
+            from app.models.iiko_settings import IikoSettings
+            def _get_settings():
+                return session.exec(select(IikoSettings)).first()
+            settings_db = await asyncio.to_thread(_get_settings)
+            org_id = settings_db.organization_id if settings_db else None
+            
+            # Прямой вызов синхронизации (теперь с поддержкой fallback ID -> Phone)
+            await self.sync_single_customer(
+                session=session,
+                phone=clean_phone,
+                order_id=order_db_id,
+                organization_id=org_id
+            )
+            logger.info(f"Synchronous sync completed for phone {clean_phone} during order creation")
+        except Exception as sync_err:
+            logger.warning(f"Synchronous sync failed for {clean_phone}: {sync_err}. Falling back to background task if possible.")
+            # Если прямой вызов упал, на всякий случай пробуем в фоне
+            try:
+                from app.tasks.customer_tasks import sync_single_customer_task
+                sync_single_customer_task.delay(clean_phone, order_id=order_db_id)
+            except:
+                pass
             
         return customer
 
     async def process_iiko_order(self, session: Session, iiko_order_data: Dict[str, Any], organization_id: str, iiko_card_data: Optional[Dict[str, Any]] = None):
         from app.models.order import Order, OrderStatus # Локальный импорт для предотвращения UnboundLocalError и циклических зависимостей
+        from sqlalchemy.orm.attributes import flag_modified as sql_flag_modified
         """Интегрированный метод обработки заказа: консолидированная и очищенная версия"""
         if not iiko_order_data:
             logger.warning("Received empty order data from iiko")
@@ -811,7 +932,7 @@ class IikoSyncService:
             ext_num = o_data.get("number") or o_data.get("externalNumber")
             logger.info(f"==> Processing Iiko Order: ID={order_id_iiko}, Num={ext_num}, Status={o_data.get('status')}")
             
-            settings_db = session.exec(select(IikoSettings)).first()
+            settings_db = await asyncio.to_thread(lambda: session.exec(select(IikoSettings)).first())
             city_from_settings = settings_db.city_name if settings_db else "Тюмень"
 
             # Очистка строк (используем глобальный метод класса для защиты кодировки)
@@ -824,7 +945,7 @@ class IikoSyncService:
 
             # 3. Таймзона и время
             from app.core.datetime_utils import get_tz_name
-            tz_name = get_tz_name(session)
+            tz_name = await asyncio.to_thread(get_tz_name, session)
             try:
                 import zoneinfo
                 tz = zoneinfo.ZoneInfo(tz_name)
@@ -1095,8 +1216,29 @@ class IikoSyncService:
                 admin_name = self.clean_str((o_data.get("confirmationInfo") or {}).get("confirmedBy"))
 
             # 8. Сохранение
-            order = session.exec(select(Order).where(Order.iiko_order_id == order_id_iiko)).first()
-            
+            def _get_order():
+                return session.exec(select(Order).where(Order.iiko_order_id == order_id_iiko)).first()
+            order = await asyncio.to_thread(_get_order)
+
+            # ЗАПРЕТ ОБНОВЛЕНИЯ ЗАКРЫТЫХ ИЛИ ОТМЕНЕННЫХ ЗАКАЗОВ
+            if order and order.status in (OrderStatus.closed, OrderStatus.cancelled, OrderStatus.delivered):
+                # Обновляем ТОЛЬКО статус, если он изменился (например, из Delivered в Closed)
+                if order.status != mapped_status:
+                    logger.info(f"Order {order.id}: Status update allowed for terminal order ({order.status} -> {mapped_status})")
+                    order.status = mapped_status
+                    # Сохраняем в историю
+                    h = list(order.status_history or [])
+                    h.append({"status": mapped_status, "time": current_time_tz.isoformat(), "comment": f"iiko: {raw_status} (terminal update)"})
+                    order.status_history = h
+                    sql_flag_modified(order, "status_history")
+                    def _save_terminal_update():
+                        session.add(order)
+                        session.commit()
+                    await asyncio.to_thread(_save_terminal_update)
+                else:
+                    logger.debug(f"Order {order.id}: Update skipped (status is terminal: {order.status})")
+                return order # Выходим, сохраняя текущие данные в CRM
+
             # Сохраняем старые значения для уведомлений об изменениях
             old_amount = float(getattr(order, 'total_with_discount', 0)) if order else 0
             old_items_count = len(getattr(order, 'order_items_details', []) or []) if order else 0
@@ -1109,7 +1251,9 @@ class IikoSyncService:
             terminal_group_name = None
             
             if terminal_group_id:
-                branch = session.exec(select(Branch).where(Branch.iiko_terminal_id == terminal_group_id)).first()
+                def _get_branch():
+                    return session.exec(select(Branch).where(Branch.iiko_terminal_id == terminal_group_id)).first()
+                branch = await asyncio.to_thread(_get_branch)
                 if branch:
                     branch_id = branch.id
                     terminal_group_name = branch.name
@@ -1304,7 +1448,9 @@ class IikoSyncService:
                             if not mod.get("productId"): mod["productId"] = mpid
                         
                 # Достаем названия из локальной базы
-                db_products = session.exec(select(Product).where(Product.iiko_id.in_(product_ids))).all()
+                def _get_products():
+                    return session.exec(select(Product).where(Product.iiko_id.in_(product_ids))).all()
+                db_products = await asyncio.to_thread(_get_products)
                 prod_map = {p.iiko_id: p.name for p in db_products}
 
                 # Достаем старые названия из текущего состояния заказа
@@ -1373,6 +1519,21 @@ class IikoSyncService:
                     enriched_item["modifiers"] = enriched_mods
                     enriched_items.append(enriched_item)
 
+                # Расчет честного подытога (сумма всех позиций по базовым ценам)
+                calculated_base_sum = 0
+                for e_item in enriched_items:
+                    # Сумма самой позиции
+                    item_qty = float(e_item.get("amount") or e_item.get("quantity") or 0)
+                    item_price = float(e_item.get("price") or 0)
+                    calculated_base_sum += item_qty * item_price
+                    
+                    # Сумма модификаторов
+                    for e_mod in (e_item.get("modifiers") or []):
+                        mod_qty = float(e_mod.get("amount") or e_mod.get("quantity") or 0)
+                        mod_price = float(e_mod.get("price") or 0)
+                        calculated_base_sum += mod_qty * mod_price
+
+                order.total_amount = Decimal(str(round(calculated_base_sum, 2)))
                 order.order_items_details = enriched_items
                 sql_flag_modified(order, "order_items_details")
             else:
@@ -1387,7 +1548,10 @@ class IikoSyncService:
             sql_flag_modified(order, "order_items_details")
             sql_flag_modified(order, "discounts_details")
             sql_flag_modified(order, "payments_details")
-            session.add(order)
+            def _save_order_intermediate():
+                session.add(order)
+                session.flush() # Получаем ID для последующей синхронизации
+            await asyncio.to_thread(_save_order_intermediate)
 
             # --- АВТО-СОЗДАНИЕ КАРТОЧКИ КЛИЕНТА ---
             if phone:
@@ -1421,7 +1585,7 @@ class IikoSyncService:
                     if loyalty_payload.get("errors"):
                         full_order_info += f"\nОшибки лояльности: {', '.join(loyalty_payload['errors'])}"
 
-                    await self.ensure_customer_from_order(
+                    customer_obj = await self.ensure_customer_from_order(
                         session=session,
                         phone=phone,
                         name=c_first,
@@ -1435,12 +1599,32 @@ class IikoSyncService:
                         street=street_name,
                         house=house,
                         flat=flat,
-                        total_sum=float(total_with_discount)
+                        total_sum=float(total_with_discount),
+                        order_db_id=order.id
                     )
+
+                    # --- ЛОГИКА "ПЕРВЫЙ ЗАКАЗ" ---
+                    if is_new and customer_obj:
+                        # Если iiko говорит что гость новый ИЛИ в нашей базе это единственный заказ
+                        is_iiko_new = getattr(customer_obj, 'is_new_guest', False)
+                        
+                        # Проверяем количество ЛОКАЛЬНЫХ заказов (кроме текущего)
+                        def _get_local_orders_count():
+                            return session.exec(
+                                select(func.count(Order.id)).where(
+                                    Order.customer_phone == phone,
+                                    Order.iiko_order_id != order_id_iiko
+                                )
+                            ).one()
+                        local_orders_count = await asyncio.to_thread(_get_local_orders_count)
+                        
+                        if is_iiko_new or local_orders_count == 0:
+                            order.is_first_order = True
+                            logger.info(f"Order {order_id_iiko}: Marked as IS_FIRST_ORDER (New Guest)")
                 except Exception as cust_err:
                     logger.error(f"Error in auto-creating customer for order {order_id_iiko}: {cust_err}")
 
-            session.commit()
+            await asyncio.to_thread(session.commit)
             logger.info(f"Order {order_id_iiko} ({external_number}) synced. Status={mapped_status}, Paid={is_paid}")
 
             # Проверка изменений для уведомлений (только для существующих заказов)
@@ -1492,7 +1676,7 @@ class IikoSyncService:
             # Мы не делаем rollback полностью, чтобы один кривой заказ не останавливал весь цикл, 
             # но и не коммитим частично сломанные данные.
             try:
-                session.rollback()
+                await asyncio.to_thread(session.rollback)
             except:
                 pass
 
@@ -1641,25 +1825,33 @@ class IikoSyncService:
         Массовая загрузка и синхронизация заказов.
         Используется для первоначальной загрузки (на случай пропуска вебхуков).
         """
-        log = SyncLog(sync_type="orders", status="running")
-        session.add(log)
-        session.commit()
+        def _init_log():
+            l = SyncLog(sync_type="orders", status="running")
+            session.add(l)
+            session.commit()
+            return l
+        log = await asyncio.to_thread(_init_log)
         
         try:
-            settings_db = session.exec(select(IikoSettings)).first()
+            def _get_settings():
+                return session.exec(select(IikoSettings)).first()
+            settings_db = await asyncio.to_thread(_get_settings)
+            
             if not settings_db or not settings_db.organization_id:
                 logger.warning("Iiko settings not found, sync aborted")
-                log.status = "error"
-                log.details = "Настройки Iiko не найдены"
-                session.add(log)
-                session.commit()
+                def _error_log():
+                    log.status = "error"
+                    log.details = "Настройки Iiko не найдены"
+                    session.add(log)
+                    session.commit()
+                await asyncio.to_thread(_error_log)
                 return
                 
             org_id = settings_db.organization_id
         
             # Определяем интервал на основе часового пояса из настроек
             from app.core.datetime_utils import get_tz_name, get_local_now
-            tz_name = get_tz_name(session)
+            tz_name = await asyncio.to_thread(get_tz_name, session)
             now = get_local_now(tz_name)
             
             # Охватываем диапазон: 24 часа назад и 24 часа вперед (итого 48 часов возможного разброса)
@@ -1750,7 +1942,9 @@ class IikoSyncService:
                 active_strings = [s.value for s in active_statuses] + [s.value.upper() for s in active_statuses]
                 
                 query = select(Order).where(Order.status.in_(active_strings))
-                db_active_orders = session.exec(query).all()
+                def _get_active_orders():
+                    return session.exec(query).all()
+                db_active_orders = await asyncio.to_thread(_get_active_orders)
                 
                 if db_active_orders:
                     logger.info(f"Checking {len(db_active_orders)} active orders from local database: {[o.id for o in db_active_orders]}")
@@ -1782,18 +1976,22 @@ class IikoSyncService:
                     logger.error(f"Failed to sync order {order_id}: {e}")
                     
             logger.info(f"Mass sync finished. Total: {len(all_ids)}, Success: {success_count}")
-            log.status = "success"
-            log.processed_count = success_count
-            log.details = f"Успешно синхронизировано {success_count} заказов из {len(all_ids)}"
-            session.add(log)
-            session.commit()
+            def _final_log():
+                log.status = "success"
+                log.processed_count = success_count
+                log.details = f"Успешно синхронизировано {success_count} заказов из {len(all_ids)}"
+                session.add(log)
+                session.commit()
+            await asyncio.to_thread(_final_log)
         
         except Exception as e:
             logger.error(f"Error in mass order sync: {e}", exc_info=True)
-            log.status = "error"
-            log.details = str(e)
-            session.add(log)
-            session.commit()
+            def _error_log_final():
+                log.status = "error"
+                log.details = str(e)
+                session.add(log)
+                session.commit()
+            await asyncio.to_thread(_error_log_final)
 
     async def sync_orders_by_revision(self, session: Session, organization_id: str):
         """
@@ -1808,29 +2006,34 @@ class IikoSyncService:
             return
         self._last_rev_sync[organization_id] = now
 
-        settings_db = session.exec(select(IikoSettings)).first()
+        def _get_settings():
+            return session.exec(
+                select(IikoSettings).where(IikoSettings.organization_id == organization_id)
+            ).first()
+        settings_db = await asyncio.to_thread(_get_settings)
         if not settings_db: return
         
         current_revision = settings_db.last_order_revision or 0
         logger.info(f"Starting revision sync from revision {current_revision} for org {organization_id}")
         
         try:
-            # 1. Если ревизия 0 или пустая - запускаем 'Cold Start' восстановление
+            # 1. Если ревизия 0 или пустая - инициализируем начальную точку (baseline)
             if current_revision == 0:
-                logger.warning(f"Revision 0 detected. Starting 'Cold Start' recovery for org {organization_id}...")
+                logger.info(f"Revision 0 detected for org {organization_id}. Initializing revision baseline...")
                 
-                # а) Принудительная синхронизация за последние 48 часов, чтобы не потерять данные
-                await self.sync_orders(session, hours=48)
-                
-                # б) Получаем актуальную ревизию из Iiko для дальнейших инкрементальных обновлений
+                # Получаем актуальную ревизию из Iiko для дальнейших инкрементальных обновлений
+                # Мы НЕ вызываем sync_orders рекурсивно здесь, так как mass-sync 
+                # (который может быть родителем этого вызова) сам заботится о выгрузке истории по датам.
                 new_max = await self.iiko.get_max_revision(
                     organization_id=organization_id,
                     api_login=settings_db.api_login
                 )
                 if new_max:
-                    settings_db.last_order_revision = new_max
-                    session.add(settings_db)
-                    session.commit()
+                    def _save_baseline():
+                        settings_db.last_order_revision = new_max
+                        session.add(settings_db)
+                        session.commit()
+                    await asyncio.to_thread(_save_baseline)
                     logger.info(f"Cold Start successful. New baseline revision: {new_max}")
                 return
 
@@ -1848,9 +2051,11 @@ class IikoSyncService:
             if not orders:
                 logger.info("No new orders found by revision sync")
                 if max_revision and max_revision > current_revision:
-                    settings_db.last_order_revision = max_revision
-                    session.add(settings_db)
-                    session.commit()
+                    def _update_rev_empty():
+                        settings_db.last_order_revision = max_revision
+                        session.add(settings_db)
+                        session.commit()
+                    await asyncio.to_thread(_update_rev_empty)
                     logger.info(f"Revision updated to {max_revision} even with no orders")
                 return
 
@@ -1867,9 +2072,11 @@ class IikoSyncService:
             
             # Обновляем ревизию в настройках
             if max_revision:
-                settings_db.last_order_revision = max_revision
-                session.add(settings_db)
-                session.commit()
+                def _update_rev_final():
+                    settings_db.last_order_revision = max_revision
+                    session.add(settings_db)
+                    session.commit()
+                await asyncio.to_thread(_update_rev_final)
                 logger.info(f"Revision sync finished. New revision: {max_revision}, Processed: {count}")
                 
         except httpx.HTTPStatusError as e:
@@ -1881,9 +2088,11 @@ class IikoSyncService:
                         logger.warning(f"Revision {current_revision} is too old. Starting 'Cold Start' recovery...")
                         
                         # Сбрасываем ревизию, чтобы при следующем вызове (или рекурсивном) сработал Cold Start
-                        settings_db.last_order_revision = 0
-                        session.add(settings_db)
-                        session.commit()
+                        def _reset_rev():
+                            settings_db.last_order_revision = 0
+                            session.add(settings_db)
+                            session.commit()
+                        await asyncio.to_thread(_reset_rev)
                         
                         # Запускаем Cold Start немедленно
                         await self.sync_orders_by_revision(session, organization_id)
@@ -1897,7 +2106,9 @@ class IikoSyncService:
 
     async def sync_order_by_id(self, session: Session, order_id: str, organization_id: str) -> bool:
         """Синхронизация конкретного заказа по ID (вызывается вебхуками)"""
-        settings_db = session.exec(select(IikoSettings)).first()
+        def _get_settings():
+            return session.exec(select(IikoSettings)).first()
+        settings_db = await asyncio.to_thread(_get_settings)
         api_login = settings_db.api_login if settings_db else None
         try:
             order_data = await self.iiko.get_order_by_id(order_id, organization_id, api_login=api_login)
@@ -1910,7 +2121,9 @@ class IikoSyncService:
 
     async def sync_delivery_restrictions(self, session: Session) -> Dict[str, Any]:
         """Синхронизация зон и условий доставки из iiko Cloud"""
-        settings_db = session.exec(select(IikoSettings)).first()
+        def _get_settings():
+            return session.exec(select(IikoSettings)).first()
+        settings_db = await asyncio.to_thread(_get_settings)
         if not settings_db or not settings_db.organization_id:
             return {"error": "Iiko not configured"}
             
@@ -1940,13 +2153,14 @@ class IikoSyncService:
                 # 1. Находим филиал (терминальную группу)
                 tg_id = restriction_item.get("terminalGroupId")
                 if not tg_id:
-                    # Если terminalGroupId нет, возможно это общие ограничения для всех филиалов организации?
-                    # Но обычно в iiko они привязываются к TG. 
-                    # Пробуем найти первый филиал как fallback, если он один.
-                    branch = session.exec(select(Branch)).first()
+                    def _get_first_branch():
+                        return session.exec(select(Branch)).first()
+                    branch = await asyncio.to_thread(_get_first_branch)
                     logger.warning("restriction_item missing terminalGroupId, using first branch as fallback")
                 else:
-                    branch = session.exec(select(Branch).where(Branch.iiko_terminal_id == tg_id)).first()
+                    def _get_branch_by_tg():
+                        return session.exec(select(Branch).where(Branch.iiko_terminal_id == tg_id)).first()
+                    branch = await asyncio.to_thread(_get_branch_by_tg)
                 
                 if not branch:
                     logger.warning(f"Филиал с iiko_terminal_id {tg_id} не найден в БД, пропускаем ограничения")
@@ -1980,85 +2194,89 @@ class IikoSyncService:
                     iiko_zone_id = res.get("zoneId") or zone_name
                     
                     # Ищем зону для конкретного филиала
-                    zone = session.exec(select(DeliveryZone).where(
-                        (DeliveryZone.branch_id == branch.id) & 
-                        ((DeliveryZone.iiko_id == iiko_zone_id) | (DeliveryZone.name == zone_name))
-                    )).first()
-                    
-                    if not zone:
-                        logger.info(f"Создание новой зоны доставки '{zone_name}' для филиала {branch.name}")
-                        zone = DeliveryZone(
-                            name=zone_name, 
-                            branch_id=branch.id, 
-                            iiko_id=iiko_zone_id
-                        )
-                        session.add(zone)
-                        session.flush() # Получаем ID
-                    
-                    # Обновляем параметры зоны
-                    zone.iiko_id = iiko_zone_id
-                    zone.min_order_amount = min_sum
-                    zone.delivery_cost = delivery_cost
-                    zone.min_delivery_time = res.get("minDeliveryTime")
-                    zone.max_delivery_time = res.get("maxDeliveryTime")
-                    zone.free_delivery_sum = float(res.get("freeDeliverySum") or 0) if res.get("freeDeliverySum") is not None else None
-                    zone.priority = int(res.get("priority") or 0)
-                    zone.is_default = bool(res.get("isDefault"))
-                    zone.updated_at = datetime.now(timezone.utc)
-                    zone.is_active = True
-                    
-                    # 4. Синхронизируем геометрию в CustomPolygon
-                    zone_key = zone_name.lower().strip()
-                    if zone_key in branch_polygons:
-                        coords = branch_polygons[zone_key]
-                        # Ищем существующий полигон для этой зоны
-                        poly = session.exec(select(CustomPolygon).where(
-                            CustomPolygon.delivery_zone_id == zone.id
+                    def _sync_zone_and_poly():
+                        # Используем closure для branch, iiko_zone_id, zone_name, min_sum, delivery_cost, res, branch_polygons, coords
+                        z = session.exec(select(DeliveryZone).where(
+                            (DeliveryZone.branch_id == branch.id) & 
+                            ((DeliveryZone.iiko_id == iiko_zone_id) | (DeliveryZone.name == zone_name))
                         )).first()
                         
-                        if not poly:
-                            poly = CustomPolygon(
-                                name=zone.name,
-                                delivery_zone_id=zone.id,
-                                branch_id=branch.id,
-                                coordinates=coords,
-                                fill_color="#4caf50",
-                                priority=zone.priority,
-                                min_order_amount=zone.min_order_amount,
-                                delivery_cost=zone.delivery_cost,
-                                is_active=True
+                        if not z:
+                            z = DeliveryZone(
+                                name=zone_name, 
+                                branch_id=branch.id, 
+                                iiko_id=iiko_zone_id
                             )
-                            session.add(poly)
-                            logger.info(f"Создан новый полигон для зоны '{zone.name}'")
-                        else:
-                            # Обновляем координаты и параметры
-                            poly.coordinates = coords
-                            poly.priority = zone.priority
-                            poly.min_order_amount = zone.min_order_amount
-                            poly.delivery_cost = zone.delivery_cost
-                            poly.is_active = True
-                            session.add(poly)
-                            logger.info(f"Обновлена геометрия и параметры полигона для зоны '{zone.name}'")
+                            session.add(z)
+                            session.flush() # Получаем ID
                         
-                        # Сохраняем и в текстовое поле зоны (для совместимости)
-                        zone.polygon_coordinates = json.dumps(coords)
+                        # Обновляем параметры зоны
+                        z.iiko_id = iiko_zone_id
+                        z.min_order_amount = min_sum
+                        z.delivery_cost = delivery_cost
+                        z.min_delivery_time = res.get("minDeliveryTime")
+                        z.max_delivery_time = res.get("maxDeliveryTime")
+                        z.free_delivery_sum = float(res.get("freeDeliverySum") or 0) if res.get("freeDeliverySum") is not None else None
+                        z.priority = int(res.get("priority") or 0)
+                        z.is_default = bool(res.get("isDefault"))
+                        z.updated_at = datetime.now(timezone.utc)
+                        z.is_active = True
+                        
+                        # 4. Синхронизируем геометрию в CustomPolygon
+                        z_key = zone_name.lower().strip()
+                        if z_key in branch_polygons:
+                            coords = branch_polygons[z_key]
+                            # Ищем существующий полигон для этой зоны
+                            poly = session.exec(select(CustomPolygon).where(
+                                CustomPolygon.delivery_zone_id == z.id
+                            )).first()
+                            
+                            if not poly:
+                                poly = CustomPolygon(
+                                    name=z.name,
+                                    delivery_zone_id=z.id,
+                                    branch_id=branch.id,
+                                    coordinates=coords,
+                                    fill_color="#4caf50",
+                                    priority=z.priority,
+                                    min_order_amount=z.min_order_amount,
+                                    delivery_cost=z.delivery_cost,
+                                    is_active=True
+                                )
+                                session.add(poly)
+                            else:
+                                # Обновляем координаты и параметры
+                                poly.coordinates = coords
+                                poly.priority = z.priority
+                                poly.min_order_amount = z.min_order_amount
+                                poly.delivery_cost = z.delivery_cost
+                                poly.is_active = True
+                                session.add(poly)
+                            
+                            # Сохраняем и в текстовое поле зоны (для совместимости)
+                            z.polygon_coordinates = json.dumps(coords)
+                        
+                        z.additional_info = res
+                        session.add(z)
+                        return z
                     
-                    zone.additional_info = res
-                    session.add(zone)
+                    zone = await asyncio.to_thread(_sync_zone_and_poly)
                     synced_count += 1
                 
-            session.commit()
+            await asyncio.to_thread(session.commit)
             logger.info(f"Синхронизация ограничений доставки завершена: {synced_count} зон")
             return {"success": True, "synced": synced_count, "message": f"Successfully synced {synced_count} zones"}
             
         except Exception as e:
-            session.rollback()
+            await asyncio.to_thread(session.rollback)
             logger.error(f"Ошибка при синхронизации ограничений доставки iiko: {e}", exc_info=True)
             return {"error": str(e)}
 
     async def get_available_iiko_zones(self, session: Session) -> List[Dict[str, Any]]:
         """Получает список всех доступных зон из iiko Cloud (без сохранения)"""
-        settings_db = session.exec(select(IikoSettings)).first()
+        def _get_settings():
+            return session.exec(select(IikoSettings)).first()
+        settings_db = await asyncio.to_thread(_get_settings)
         if not settings_db or not settings_db.organization_id:
             return []
             
@@ -2088,7 +2306,9 @@ class IikoSyncService:
         """Синхронизация типов оплаты из iiko Cloud"""
         from app.models.payment_type import PaymentType
         
-        settings_db = session.exec(select(IikoSettings)).first()
+        def _get_settings():
+            return session.exec(select(IikoSettings)).first()
+        settings_db = await asyncio.to_thread(_get_settings)
         if not settings_db or not settings_db.organization_id:
             return {"error": "Iiko not configured"}
             
@@ -2101,44 +2321,102 @@ class IikoSyncService:
             
             synced_count = 0
             logger.info(f"Начинаю обработку {len(payment_types)} типов оплаты из iiko")
-            for pt in payment_types:
-                pt_id = pt.get("id")
-                if not pt_id: continue
-                
-                existing = session.exec(select(PaymentType).where(PaymentType.iiko_id == pt_id)).first()
-                if existing:
-                    existing.name = pt.get("name") or existing.name
-                    existing.kind = pt.get("paymentTypeKind") or existing.kind
-                    existing.updated_at = datetime.now(timezone.utc)
-                    session.add(existing)
-                else:
-                    new_pt = PaymentType(
-                        iiko_id=pt_id,
-                        name=pt.get("name"),
-                        kind=pt.get("paymentTypeKind"),
-                        is_active=True # ВАЖНО! Иначе они пропадут при F5
-                    )
-                    session.add(new_pt)
-                synced_count += 1
+            
+            def _process_payment_types():
+                processed = 0
+                for pt in payment_types:
+                    pt_id = pt.get("id")
+                    if not pt_id: continue
+                    
+                    existing = session.exec(select(PaymentType).where(PaymentType.iiko_id == pt_id)).first()
+                    if existing:
+                        existing.name = pt.get("name") or existing.name
+                        existing.kind = pt.get("paymentTypeKind") or existing.kind
+                        existing.updated_at = datetime.now(timezone.utc).replace(tzinfo=None)
+                        session.add(existing)
+                    else:
+                        new_pt = PaymentType(
+                            iiko_id=pt_id,
+                            name=pt.get("name"),
+                            kind=pt.get("paymentTypeKind"),
+                            is_active=True # ВАЖНО! Иначе они пропадут при F5
+                        )
+                        session.add(new_pt)
+                    processed += 1
+                session.commit()
+                return processed
+
+            synced_count = await asyncio.to_thread(_process_payment_types)
             
             logger.info(f"Синхронизация завершена. Всего: {synced_count}")
-            session.commit()
             return {"status": "success", "synced_count": synced_count}
         except Exception as e:
             logger.error(f"Payment types sync failed: {e}")
-            session.rollback()
+            await asyncio.to_thread(session.rollback)
             return {"error": str(e)}
 
 
     async def sync_stop_lists(self, session: Session = None):
         """Синхронизация стоп-листов"""
-        # Логика стоп-листов
-        pass
+        if not session:
+            logger.error("Stop-list sync requires an active DB session")
+            return
+
+        logger.info("Starting stop-list sync...")
+        
+        def _get_settings():
+            return session.exec(select(IikoSettings)).first()
+            
+        settings_db = await asyncio.to_thread(_get_settings)
+        if not settings_db or not settings_db.organization_id:
+            logger.warning("Stop-list sync aborted: Iiko settings or organization_id not found")
+            return
+
+        try:
+            # Запрашиваем стоп-листы из iiko Cloud
+            stop_items = await iiko_service.get_stop_lists(
+                api_login=settings_db.api_login,
+                organization_id=settings_db.organization_id
+            )
+            
+            def _update_db():
+                from sqlalchemy import update
+                # 1. Сбрасываем все флаги (товары по умолчанию считаются доступными)
+                # Важно: это затронет ВСЕ товары. Если нужно точечно - логика усложнится.
+                session.exec(update(Product).values(is_stopped=False, is_available=True))
+                
+                # 2. Выставляем стоп для тех, кто в списке iiko
+                stopped_count = 0
+                for item in (stop_items or []):
+                    p_id = item.get("productId")
+                    balance = item.get("balance", 0)
+                    
+                    # Если баланс <= 0, продукт на стопе
+                    if balance <= 0:
+                        product = session.exec(select(Product).where(Product.iiko_id == p_id)).first()
+                        if product:
+                            product.is_stopped = True
+                            product.is_available = False
+                            product.stopped_at = datetime.now(timezone.utc).replace(tzinfo=None)
+                            session.add(product)
+                            stopped_count += 1
+                
+                session.commit()
+                return stopped_count
+
+            count = await asyncio.to_thread(_update_db)
+            logger.info(f"Stop-list sync finished. {count} products are currently stopped.")
+            
+        except Exception as e:
+            logger.error(f"Error during stop-list sync: {e}")
+            await asyncio.to_thread(session.rollback)
 
     async def sync_roles(self, session: Session) -> Dict[str, Any]:
         """Синхронизация должностей из iiko как ролей в локальной БД"""
         try:
-            settings_db = session.exec(select(IikoSettings)).first()
+            def _get_settings():
+                return session.exec(select(IikoSettings)).first()
+            settings_db = await asyncio.to_thread(_get_settings)
             if not settings_db or not settings_db.resto_url:
                 return {"error": "Настройки iiko Resto не найдены"}
 
@@ -2149,36 +2427,39 @@ class IikoSyncService:
                 resto_password=settings_db.resto_password
             )
 
-            synced_count = 0
-            for r_data in iiko_roles:
-                iiko_id = r_data.get("id")
-                name = r_data.get("name")
-                code = r_data.get("code")
-                if not iiko_id or not name: continue
+            def _process_roles():
+                synced = 0
+                for r_data in iiko_roles:
+                    iiko_id = r_data.get("id")
+                    name = r_data.get("name")
+                    code = r_data.get("code")
+                    if not iiko_id or not name: continue
 
-                role = session.exec(select(Role).where(Role.iiko_id == iiko_id)).first()
-                if not role:
-                    role = Role(iiko_id=iiko_id, name=name, code=code)
-                    session.add(role)
-                else:
-                    role.name = name
-                    role.code = code
-                synced_count += 1
-            
-            session.commit()
+                    role = session.exec(select(Role).where(Role.iiko_id == iiko_id)).first()
+                    if not role:
+                        role = Role(iiko_id=iiko_id, name=name, code=code)
+                        session.add(role)
+                    else:
+                        role.name = name
+                        role.code = code
+                    synced += 1
+                session.commit()
+                return synced
+
+            synced_count = await asyncio.to_thread(_process_roles)
             logger.info(f"Синхронизировано ролей из iiko: {synced_count}")
             return {"status": "success", "synced_count": synced_count}
         except Exception as e:
             logger.error(f"Error syncing roles: {e}")
-            session.rollback()
+            await asyncio.to_thread(session.rollback)
             return {"error": str(e)}
 
     async def ensure_super_admin(self, session: Session) -> None:
         """Создание супер-администратора и базовых разрешений"""
-        try:
-            from app.core.security import get_password_hash
-            from app.models.role import RolePermissionLink
-            
+        from app.core.security import get_password_hash
+        from app.models.role import RolePermissionLink
+
+        def _sync_logic():
             # 1. Создаем базовые разрешения если их нет
             base_perms = [
                 ("admin_access", "Доступ в админ-панель"),
@@ -2230,23 +2511,26 @@ class IikoSyncService:
                 logger.info("Создан супер-пользователь 0001")
             else:
                 user.role_id = super_role.id
-                user.is_superuser = True
             
             session.commit()
-        except Exception as e:
-            logger.error(f"Error ensuring super admin: {e}")
-            session.rollback()
+
+        await asyncio.to_thread(_sync_logic)
 
     async def sync_employees_full(self, session: Session, days: int = 7) -> None:
         """
         Полная синхронизация сотрудников и их смен через iiko RESTO (Office) API.
         """
-        settings_db = session.exec(select(IikoSettings)).first()
+        def _get_initial_data():
+            s = session.exec(select(IikoSettings)).first()
+            tz = self._get_tz(session)
+            return s, tz
+            
+        settings_db, tz = await asyncio.to_thread(_get_initial_data)
+        
         if not settings_db or not settings_db.resto_url:
             logger.error("Настройки iiko Resto (Office) не найдены. Синхронизация отменена.")
             return
 
-        tz = self._get_tz(session)
         now_local = datetime.now(tz)
         date_from = now_local - timedelta(days=days)
 
@@ -2261,83 +2545,87 @@ class IikoSyncService:
                 resto_url=r_url, resto_login=r_login, resto_password=r_password
             )
             
-            for emp in iiko_employees:
-                emp_iiko_id = emp.get("id")
-                if not emp_iiko_id: continue
-                
-                name = emp.get("name") or f"{emp.get('firstName', '')} {emp.get('lastName', '')}".strip()
-                role = emp.get("role")
-                rate = emp.get("salary")
-                
-                # Документы и доп. инфо
-                doc_info = {
-                    "inn": emp.get("inn"),
-                    "snils": emp.get("snils"),
-                    "code": emp.get("code"),
-                    "cardNumber": emp.get("cardNumber"),
-                    "birthday": emp.get("birthday")
-                }
-                
-                existing = session.exec(
-                    select(Employee).where(Employee.iiko_id == emp_iiko_id)
-                ).first()
-                
-                def _flag_courier(r, n=""):
-                    r_l = (r or "").lower()
-                    n_l = (n or "").lower()
-                    return ("курьер" in r_l or "courier" in r_l or r_l in ["cur", "cour"]
-                            or "курьер" in n_l or "courier" in n_l)
-                def _flag_admin(r, n=""):
-                    r_l = (r or "").lower()
-                    return any(k in r_l for k in ["администратор", "оператор", "manager", "старший", "adm", "admin"])
+            def _process_employees():
+                from app.models.role import Role
+                for emp in iiko_employees:
+                    emp_iiko_id = emp.get("id")
+                    if not emp_iiko_id: continue
+                    
+                    name = emp.get("name") or f"{emp.get('firstName', '')} {emp.get('lastName', '')}".strip()
+                    role = emp.get("role")
+                    rate = emp.get("salary")
+                    
+                    # Документы и доп. инфо
+                    doc_info = {
+                        "inn": emp.get("inn"),
+                        "snils": emp.get("snils"),
+                        "code": emp.get("code"),
+                        "cardNumber": emp.get("cardNumber"),
+                        "birthday": emp.get("birthday")
+                    }
+                    
+                    existing = session.exec(
+                        select(Employee).where(Employee.iiko_id == emp_iiko_id)
+                    ).first()
+                    
+                    def _flag_courier(r, n=""):
+                        r_l = (r or "").lower()
+                        n_l = (n or "").lower()
+                        return ("курьер" in r_l or "courier" in r_l or r_l in ["cur", "cour"]
+                                or "курьер" in n_l or "courier" in n_l)
+                    def _flag_admin(r, n=""):
+                        r_l = (r or "").lower()
+                        return any(k in r_l for k in ["администратор", "оператор", "manager", "старший", "adm", "admin"])
 
-                # Поиск роли в локальной БД
-                iiko_role_id = emp.get("mainRoleId")
-                local_role = None
-                if iiko_role_id:
-                    local_role = session.exec(select(Role).where(Role.iiko_id == iiko_role_id)).first()
-                
-                if not local_role and role:
-                    local_role = session.exec(select(Role).where(Role.name == role)).first()
-                
-                role_id = local_role.id if local_role else None
+                    # Поиск роли в локальной БД
+                    iiko_role_id = emp.get("mainRoleId")
+                    local_role = None
+                    if iiko_role_id:
+                        local_role = session.exec(select(Role).where(Role.iiko_id == iiko_role_id)).first()
+                    
+                    if not local_role and role:
+                        local_role = session.exec(select(Role).where(Role.name == role)).first()
+                    
+                    role_id = local_role.id if local_role else None
 
-                if existing:
-                    existing.name = name
-                    existing.role = role or existing.role
-                    existing.phone = emp.get("phone") or existing.phone
-                    existing.email = emp.get("email") or existing.email
-                    existing.address = emp.get("address") or existing.address
-                    existing.rate = rate if rate is not None else existing.rate
-                    existing.document_info = doc_info
-                    existing.status = "Deleted" if emp.get("deleted") else "Active"
-                    existing.is_courier = _flag_courier(existing.role, name)
-                    existing.is_admin = _flag_admin(existing.role)
-                    existing.updated_at = datetime.now(timezone.utc)
-                    session.add(existing)
-                else:
-                    new_emp = Employee(
-                        iiko_id=emp_iiko_id,
-                        name=name,
-                        role=role,
-                        phone=emp.get("phone"),
-                        email=emp.get("email"),
-                        address=emp.get("address"),
-                        rate=rate or 0.0,
-                        document_info=doc_info,
-                        status="Deleted" if emp.get("deleted") else "Active",
-                        is_courier=_flag_courier(role, name),
-                        is_admin=_flag_admin(role),
-                        created_at=datetime.now(timezone.utc),
-                        updated_at=datetime.now(timezone.utc)
-                    )
-                    session.add(new_emp)
-            
-            session.commit()
+                    if existing:
+                        existing.name = name
+                        existing.role = role or existing.role
+                        existing.phone = emp.get("phone") or existing.phone
+                        existing.email = emp.get("email") or existing.email
+                        existing.address = emp.get("address") or existing.address
+                        existing.rate = rate if rate is not None else existing.rate
+                        existing.document_info = doc_info
+                        existing.status = "Deleted" if emp.get("deleted") else "Active"
+                        existing.is_courier = _flag_courier(existing.role, name)
+                        existing.is_admin = _flag_admin(existing.role)
+                        existing.updated_at = datetime.now(timezone.utc).replace(tzinfo=None)
+                        session.add(existing)
+                    else:
+                        new_emp = Employee(
+                            iiko_id=emp_iiko_id,
+                            name=name,
+                            role=role,
+                            phone=emp.get("phone"),
+                            email=emp.get("email"),
+                            address=emp.get("address"),
+                            rate=rate or 0.0,
+                            document_info=doc_info,
+                            status="Deleted" if emp.get("deleted") else "Active",
+                            is_courier=_flag_courier(role, name),
+                            is_admin=_flag_admin(role),
+                            created_at=datetime.now(timezone.utc).replace(tzinfo=None),
+                            updated_at=datetime.now(timezone.utc).replace(tzinfo=None)
+                        )
+                        session.add(new_emp)
+                
+                session.commit()
+
+            await asyncio.to_thread(_process_employees)
             logger.info(f"Успешно синхронизировано {len(iiko_employees)} профилей сотрудников из iiko Resto")
         except Exception as e:
             logger.error(f"Ошибка синхронизации профилей: {e}")
-            session.rollback()
+            await asyncio.to_thread(session.rollback)
 
         # --- Шаг 1.5: Дополнение данными из iiko Cloud (ОТКЛЮЧЕНО по требованию пользователя - старого Server API) ---
         # try:
@@ -2387,100 +2675,107 @@ class IikoSyncService:
                 log_error=False
             )
 
-            def _parse_to_utc(s):
-                if not s: return None
-                try:
-                    # Формат ISO 8601 с таймзоной (например 2026-04-11T10:17:00+05:00)
-                    return datetime.fromisoformat(str(s)).astimezone(timezone.utc)
-                except Exception:
-                    return None
+            def _process_shifts():
+                from sqlalchemy import func
+                from app.models.employee import Shift
+                from app.models.olap_revenue import OlapRevenueRecord
 
-            created_c, updated_c = 0, 0
-            for row in attendance_records:
-                emp_iiko_id = row.get("employeeId")
-                if not emp_iiko_id:
-                    continue
+                def _parse_to_utc_sync(s):
+                    if not s: return None
+                    try:
+                        return datetime.fromisoformat(str(s)).astimezone(timezone.utc)
+                    except Exception:
+                        return None
 
-                employee = session.exec(select(Employee).where(Employee.iiko_id == emp_iiko_id)).first()
-                if not employee:
-                    # logger.debug(f"Attendance: Сотрудник с ID '{emp_iiko_id}' не найден в БД")
-                    continue
+                created_c, updated_c = 0, 0
+                notifications = [] # (shift_id, employee_id, type)
+                
+                for row in attendance_records:
+                    emp_iiko_id = row.get("employeeId")
+                    if not emp_iiko_id: continue
 
-                date_open = _parse_to_utc(row.get("dateOpen"))
-                date_close = _parse_to_utc(row.get("dateClose"))
-                if not date_open:
-                    continue
+                    employee = session.exec(select(Employee).where(Employee.iiko_id == emp_iiko_id)).first()
+                    if not employee: continue
 
-                if not date_close:
-                    now_utc = datetime.now(timezone.utc)
-                    work_hours = (now_utc - date_open).total_seconds() / 3600.0
-                else:
-                    work_hours = (date_close - date_open).total_seconds() / 3600.0
+                    date_open = _parse_to_utc_sync(row.get("dateOpen"))
+                    date_close = _parse_to_utc_sync(row.get("dateClose"))
+                    if not date_open: continue
 
-                # Ограничиваем максимальную длительность смены (макс 24 часа)
-                work_hours = min(work_hours, 24.0)
+                    if not date_close:
+                        now_utc = datetime.now(timezone.utc)
+                        work_hours = (now_utc - date_open).total_seconds() / 3600.0
+                    else:
+                        work_hours = (date_close - date_open).total_seconds() / 3600.0
 
-                # Уникальный ключ
-                shift_iiko_id = row.get("id")
-                if not shift_iiko_id:
-                     shift_iiko_id = f"att_{employee.id}_{date_open.strftime('%Y%m%d%H%M')}"
+                    work_hours = min(work_hours, 24.0)
+                    shift_iiko_id = row.get("id") or f"att_{employee.id}_{date_open.strftime('%Y%m%d%H%M')}"
 
-                # Поиск выручки при закрытии (из загруженных отчетов OLAP)
-                revenue_at_close = 0.0
-                if date_close:
-                    biz_date_str = date_open.astimezone(tz).strftime("%Y-%m-%d")
-                    # Берем выручку за бизнес-день открытия смены
-                    # Агрегируем выручку по всем терминалам за бизнес-день
-                    revenue_at_close = session.exec(
-                        select(func.sum(OlapRevenueRecord.revenue))
-                        .where(OlapRevenueRecord.business_date == biz_date_str)
-                    ).first() or 0.0
+                    revenue_at_close = 0.0
+                    if date_close:
+                        biz_date_str = date_open.astimezone(tz).strftime("%Y-%m-%d")
+                        revenue_at_close = session.exec(
+                            select(func.sum(OlapRevenueRecord.revenue))
+                            .where(OlapRevenueRecord.business_date == biz_date_str)
+                        ).first() or 0.0
 
-                existing_shift = session.exec(
-                    select(Shift).where(Shift.iiko_id == shift_iiko_id)
-                ).first()
+                    existing_shift = session.exec(
+                        select(Shift).where(Shift.iiko_id == shift_iiko_id)
+                    ).first()
 
-                if existing_shift:
-                    old_status = existing_shift.status
-                    existing_shift.date_close = date_close
-                    existing_shift.status = "CLOSED" if date_close else "OPEN"
-                    existing_shift.work_hours = round(work_hours, 2)
-                    # Обновляем выручку только если она еще не была установлена
-                    # Обновляем выручку всегда, если она отличается от данных OLAP
-                    if date_close and existing_shift.revenue_at_close != revenue_at_close:
-                        existing_shift.revenue_at_close = revenue_at_close
-                    existing_shift.updated_at = datetime.now(timezone.utc)
-                    session.add(existing_shift)
-                    updated_c += 1
-                    
-                    # Триггер на закрытие смены
-                    if old_status == "OPEN" and existing_shift.status == "CLOSED":
-                        await self._send_shift_vk_notification(existing_shift, employee, "shift_close")
-                else:
-                    new_shift = Shift(
-                        iiko_id=shift_iiko_id,
-                        employee_id=employee.id,
-                        date_open=date_open,
-                        date_close=date_close,
-                        status="CLOSED" if date_close else "OPEN",
-                        work_hours=round(work_hours, 2),
-                        cancelled_orders_count=0,
-                        revenue_at_close=revenue_at_close,
-                        created_at=datetime.now(timezone.utc),
-                        updated_at=datetime.now(timezone.utc)
-                    )
-                    session.add(new_shift)
-                    created_c += 1
-                    
-                    # Триггер на открытие смены
-                    if new_shift.status == "OPEN":
-                        await self._send_shift_vk_notification(new_shift, employee, "shift_open")
+                    if existing_shift:
+                        old_status = existing_shift.status
+                        existing_shift.date_close = date_close
+                        existing_shift.status = "CLOSED" if date_close else "OPEN"
+                        existing_shift.work_hours = round(work_hours, 2)
+                        if date_close and existing_shift.revenue_at_close != revenue_at_close:
+                            existing_shift.revenue_at_close = revenue_at_close
+                        existing_shift.updated_at = datetime.now(timezone.utc).replace(tzinfo=None)
+                        session.add(existing_shift)
+                        updated_c += 1
+                        
+                        if old_status == "OPEN" and existing_shift.status == "CLOSED":
+                            notifications.append((existing_shift.id, employee.id, "shift_close"))
+                    else:
+                        new_shift = Shift(
+                            iiko_id=shift_iiko_id,
+                            employee_id=employee.id,
+                            date_open=date_open,
+                            date_close=date_close,
+                            status="CLOSED" if date_close else "OPEN",
+                            work_hours=round(work_hours, 2),
+                            cancelled_orders_count=0,
+                            revenue_at_close=revenue_at_close,
+                            created_at=datetime.now(timezone.utc).replace(tzinfo=None),
+                            updated_at=datetime.now(timezone.utc).replace(tzinfo=None)
+                        )
+                        session.add(new_shift)
+                        session.flush() # Ensure we have new_shift.id
+                        created_c += 1
+                        
+                        if new_shift.status == "OPEN":
+                            notifications.append((new_shift.id, employee.id, "shift_open"))
 
-            session.commit()
-            logger.info(f"Успешно: Attendance смены: создано {created_c}, обновлено {updated_c} из {len(attendance_records)} записей")
+                session.commit()
+                return created_c, updated_c, notifications
+
+            res_created, res_updated, pending_notifications = await asyncio.to_thread(_process_shifts)
+            
+            # Send notifications outside of thread
+            for shift_id, emp_id, n_type in pending_notifications:
+                # Need objects for the notification method, but session is still open
+                def _get_objs():
+                    s = session.get(Shift, shift_id)
+                    e = session.get(Employee, emp_id)
+                    return s, e
+                
+                s_obj, e_obj = await asyncio.to_thread(_get_objs)
+                if s_obj and e_obj:
+                    await self._send_shift_vk_notification(s_obj, e_obj, n_type)
+
+            logger.info(f"Успешно: Attendance смены: создано {res_created}, обновлено {res_updated} из {len(attendance_records)} записей")
         except Exception as e:
             logger.error(f"Ошибка синхронизации Attendance смен: {e}", exc_info=True)
-            session.rollback()
+            await asyncio.to_thread(session.rollback)
 
         # --- Шаг 3 (Удален): Синхронизация через personalSessions взамен Attendance ---
         # Личные смены обрабатываются в Шаге 2 через Attendance API,
@@ -2492,7 +2787,10 @@ class IikoSyncService:
         Получение статистики сотрудника за период.
         mode: 'calendar' (текущая неделя) или 'sliding' (последние 7 дней)
         """
-        tz = self._get_tz(session)
+        def _get_tz_sync():
+            return self._get_tz(session)
+        
+        tz = await asyncio.to_thread(_get_tz_sync)
         now_local = datetime.now(tz)
         
         if mode == "calendar":
@@ -2504,66 +2802,79 @@ class IikoSyncService:
             start_date = (now_local - timedelta(days=7)).replace(hour=0, minute=0, second=0, microsecond=0)
             end_date = now_local
             
-        # Загружаем смены из БД
-        shifts = session.exec(
-            select(Shift)
-            .where(Shift.employee_id == employee_id)
-            .where(Shift.date_open >= start_date.astimezone(timezone.utc))
-            .order_by(Shift.date_open.desc())
-        ).all()
-        
-        total_hours = sum(s.work_hours for s in shifts if s.work_hours)
-        total_revenue = sum(float(s.revenue_at_close or 0) for s in shifts)
-        
-        # Группировка по дням
-        daily_stats = {}
-        for s in shifts:
-            # Переводим время открытия в локальное для группировки по датам
-            s_open_local = s.date_open.astimezone(tz)
-            day_key = s_open_local.date().isoformat()
+        def _process():
+            # Загружаем смены из БД
+            shifts = session.exec(
+                select(Shift)
+                .where(Shift.employee_id == employee_id)
+                .where(Shift.date_open >= start_date.astimezone(timezone.utc).replace(tzinfo=None))
+                .order_by(Shift.date_open.desc())
+            ).all()
             
-            if day_key not in daily_stats:
-                daily_stats[day_key] = {
-                    "date": day_key,
-                    "total_hours": 0.0,
-                    "shifts_count": 0,
-                    "revenue": 0.0,
-                    "shifts": []
+            total_hours = sum(s.work_hours for s in shifts if s.work_hours)
+            total_revenue = sum(float(s.revenue_at_close or 0) for s in shifts)
+            
+            # Группировка по дням
+            daily_stats = {}
+            for s in shifts:
+                # Переводим время открытия в локальное для группировки по датам
+                s_open_utc = s.date_open.replace(tzinfo=timezone.utc)
+                s_open_local = s_open_utc.astimezone(tz)
+                day_key = s_open_local.date().isoformat()
+                
+                if day_key not in daily_stats:
+                    daily_stats[day_key] = {
+                        "date": day_key,
+                        "total_hours": 0.0,
+                        "shifts_count": 0,
+                        "revenue": 0.0,
+                        "shifts": []
+                    }
+                daily_stats[day_key]["total_hours"] += float(s.work_hours or 0)
+                daily_stats[day_key]["shifts_count"] += 1
+                daily_stats[day_key]["revenue"] += float(s.revenue_at_close or 0)
+                
+                # Формируем объект смены для фронтенда
+                shift_info = {
+                    "id": s.id,
+                    "open": s_open_local.isoformat(),
+                    "close": s.date_close.replace(tzinfo=timezone.utc).astimezone(tz).isoformat() if s.date_close else None,
+                    "status": s.status,
+                    "hours": round(s.work_hours, 2) if s.work_hours else 0,
+                    "revenue": float(s.revenue_at_close or 0)
                 }
-            daily_stats[day_key]["total_hours"] += float(s.work_hours or 0)
-            daily_stats[day_key]["shifts_count"] += 1
-            daily_stats[day_key]["revenue"] += float(s.revenue_at_close or 0)
-            
-            # Формируем объект смены для фронтенда
-            shift_info = {
-                "id": s.id,
-                "open": s_open_local.isoformat(),
-                "close": s.date_close.astimezone(tz).isoformat() if s.date_close else None,
-                "status": s.status,
-                "hours": round(s.work_hours, 2) if s.work_hours else 0,
-                "revenue": float(s.revenue_at_close or 0)
+                daily_stats[day_key]["shifts"].append(shift_info)
+                
+            return {
+                "total_hours_period": round(total_hours, 2),
+                "total_shifts": len(shifts),
+                "total_revenue": round(total_revenue, 2),
+                "daily_stats": sorted(daily_stats.values(), key=lambda x: x["date"], reverse=True)
             }
-            daily_stats[day_key]["shifts"].append(shift_info)
-            
-        return {
-            "total_hours_period": round(total_hours, 2),
-            "total_shifts": len(shifts),
-            "total_revenue": round(total_revenue, 2),
-            "daily_stats": sorted(daily_stats.values(), key=lambda x: x["date"], reverse=True)
-        }
+
+        return await asyncio.to_thread(_process)
 
     async def sync_courier_deliveries(self, session: Session, days: int = 14, date_from: Optional[datetime] = None, date_to: Optional[datetime] = None) -> None:
         from app.models.order import Order
+        from app.models.employee import CourierOrder
         """
         Синхронизация детальных доставок курьеров из iiko Resto OLAP.
         Заполняет таблицу courier_orders: зоны, суммы, временные метки, задержки.
         """
-        settings_db = session.exec(select(IikoSettings)).first()
+        def _get_initial_data():
+            s = session.exec(select(IikoSettings)).first()
+            e = session.exec(select(Employee)).all()
+            return s, e
+        
+        settings_db, all_employees = await asyncio.to_thread(_get_initial_data)
+        
         if not settings_db or not settings_db.resto_url:
             logger.warning("Resto не настроен, синхронизация доставок пропущена")
             return
 
-        tz = self._get_tz(session)
+        def _get_tz_sync():
+            return self._get_tz(session)
+        tz = await asyncio.to_thread(_get_tz_sync)
         now_local = datetime.now(tz)
         
         if not date_from:
@@ -2589,18 +2900,16 @@ class IikoSyncService:
             return
 
         # Кэш курьеров по имени и по ID
-        all_employees = session.exec(select(Employee)).all()
         courier_by_name: Dict[str, Employee] = {}
         courier_by_id: Dict[str, Employee] = {}
         for emp in all_employees:
-            # Учитываем флаг is_courier и различные написания ролей
             is_c = emp.is_courier or any(k in (emp.role or "").lower() for k in ["курьер", "courier", "cur"])
             if is_c:
                 courier_by_name[(emp.name or "").lower().strip()] = emp
                 if emp.iiko_id:
                     courier_by_id[emp.iiko_id] = emp
 
-        def _parse_dt(s):
+        def _parse_dt_sync(s):
             if not s: return None
             try:
                 s_str = str(s)
@@ -2613,13 +2922,11 @@ class IikoSyncService:
             except Exception:
                 return None
 
-        created_count, updated_count = 0, 0
-        for d in deliveries:
+        async def _process_delivery(d):
             order_num = str(d.get("Delivery.Number") or "").strip()
-            if not order_num:
-                continue
+            if not order_num: return None
 
-            # Ищем курьера по ID или по имени
+            # Ищем курьера
             courier_emp = None
             courier_iiko_id = d.get("Delivery.Courier.Id")
             if courier_iiko_id:
@@ -2643,9 +2950,10 @@ class IikoSyncService:
                             break
 
             if not courier_emp:
-                db_order = session.exec(
+                # Ищем заказ в БД чтобы вытянуть имя курьера оттуда
+                db_order = await asyncio.to_thread(lambda: session.exec(
                     select(Order).where(Order.external_number == order_num)
-                ).first()
+                ).first())
                 if db_order and db_order.courier_name and db_order.courier_name != "Не назначен":
                     c_name_raw = db_order.courier_name
                     c_name_key = (c_name_raw or "").lower().strip()
@@ -2658,15 +2966,11 @@ class IikoSyncService:
                                 courier_emp = emp
                                 break
 
-            if not courier_emp:
-                continue
+            if not courier_emp: return None
 
-            # Повторно берем номер (уже проверен выше)
-            order_num = str(d.get("Delivery.Number") or "")
-            
-            cooking_done = _parse_dt(d.get("Delivery.CookingFinishTime"))
-            expected_dt = _parse_dt(d.get("Delivery.ExpectedTime"))
-            actual_dt = _parse_dt(d.get("Delivery.ActualTime") or d.get("Delivery.SendTime"))
+            cooking_done = _parse_dt_sync(d.get("Delivery.CookingFinishTime"))
+            expected_dt = _parse_dt_sync(d.get("Delivery.ExpectedTime"))
+            actual_dt = _parse_dt_sync(d.get("Delivery.ActualTime") or d.get("Delivery.SendTime"))
 
             delay_min = None
             is_late = False
@@ -2675,7 +2979,6 @@ class IikoSyncService:
                 delay_min = int(diff)
                 is_late = diff > 0
 
-            # Сборка компонентов адреса из полей OLAP
             addr_parts = {
                 "city": d.get("Delivery.City"),
                 "street": d.get("Delivery.Street"),
@@ -2688,7 +2991,6 @@ class IikoSyncService:
             }
             raw_address_str = addr_parts["line1"] or ""
             
-            # Интеллектуальный допарсинг, если поля пустые
             if raw_address_str and (not addr_parts.get("house") or not addr_parts.get("flat")):
                 import re
                 def find_comp(regex, text):
@@ -2706,9 +3008,10 @@ class IikoSyncService:
                 if not addr_parts.get("doorphone"):
                     addr_parts["doorphone"] = find_comp(r'(?:код|домофон)[\.\s]*([^\,\s]+)', raw_address_str)
 
-            db_order = session.exec(select(Order).where(Order.external_number == order_num)).first()
-            if db_order and db_order.address_parts:
-                for key, val in db_order.address_parts.items():
+            # Дополняем из БД
+            db_order_addr = await asyncio.to_thread(lambda: session.exec(select(Order).where(Order.external_number == order_num)).first())
+            if db_order_addr and db_order_addr.address_parts:
+                for key, val in db_order_addr.address_parts.items():
                     if not addr_parts.get(key) and val:
                         addr_parts[key] = val
             
@@ -2730,64 +3033,87 @@ class IikoSyncService:
                         street=geo_street,
                         house=geo_house
                     )
-                    if zone_info and zone_info.get("zone"):
-                        zone_name = zone_info["zone"]
-                    else:
-                        zone_name = "Вне зоны"
+                    zone_name = zone_info.get("zone") if zone_info else "Вне зоны"
                 except Exception as e:
                     logger.error(f"Error checking zone for {address_str}: {e}")
                     zone_name = "Ошибка определения"
 
             ref_date = actual_dt or cooking_done or datetime.now(timezone.utc)
             iiko_uid = f"olap_{order_num}_{ref_date.strftime('%Y%m%d')}"
-
-            existing = session.exec(select(CourierOrder).where(CourierOrder.iiko_id == iiko_uid)).first()
             amount_val = float(d.get("fullSum") or 0)
 
-            if existing:
-                existing.delivery_zone = zone_name or existing.delivery_zone
-                existing.amount = amount_val or existing.amount
-                existing.cooking_completed_at = cooking_done or existing.cooking_completed_at
-                existing.expected_delivery_time = expected_dt or existing.expected_delivery_time
-                existing.actual_delivery_time = actual_dt or existing.actual_delivery_time
-                existing.delay_minutes = delay_min
-                existing.is_late = is_late
-                existing.address = address_str or existing.address
-                existing.address_parts = addr_parts
-                existing.customer_name = d.get("Delivery.CustomerName") or existing.customer_name
-                existing.customer_phone = normalize_phone(d.get("Delivery.Phone")) or existing.customer_phone
-                existing.close_time = actual_dt
-                existing.updated_at = datetime.now(timezone.utc).replace(tzinfo=None)
-                session.add(existing)
-                updated_count += 1
-            else:
-                new_order = CourierOrder(
-                    iiko_id=iiko_uid,
-                    order_num=order_num,
-                    employee_id=courier_emp.id,
-                    address=address_str,
-                    address_parts=addr_parts,
-                    delivery_zone=zone_name,
-                    amount=amount_val,
-                    created_at_iiko=cooking_done,
-                    cooking_completed_at=cooking_done,
-                    expected_delivery_time=expected_dt,
-                    actual_delivery_time=actual_dt,
-                    close_time=actual_dt,
-                    delay_minutes=delay_min,
-                    is_late=is_late,
-                    customer_name=d.get("Delivery.CustomerName"),
-                    customer_phone=normalize_phone(d.get("Delivery.Phone")),
-                    updated_at=datetime.now(timezone.utc).replace(tzinfo=None)
-                )
-                session.add(new_order)
-                created_count += 1
-        
-        try:
+            return {
+                "iiko_id": iiko_uid,
+                "order_num": order_num,
+                "employee_id": courier_emp.id,
+                "address": address_str,
+                "address_parts": addr_parts,
+                "delivery_zone": zone_name,
+                "amount": amount_val,
+                "cooking_completed_at": cooking_done,
+                "expected_delivery_time": expected_dt,
+                "actual_delivery_time": actual_dt,
+                "delay_minutes": delay_min,
+                "is_late": is_late,
+                "customer_name": d.get("Delivery.CustomerName"),
+                "customer_phone": normalize_phone(d.get("Delivery.Phone"))
+            }
+
+        processed_data = []
+        for d in deliveries:
+            res = await _process_delivery(d)
+            if res: processed_data.append(res)
+
+        def _save_to_db():
+            created_count, updated_count = 0, 0
+            for item in processed_data:
+                existing = session.exec(select(CourierOrder).where(CourierOrder.iiko_id == item["iiko_id"])).first()
+                if existing:
+                    existing.delivery_zone = item["delivery_zone"] or existing.delivery_zone
+                    existing.amount = item["amount"] or existing.amount
+                    existing.cooking_completed_at = item["cooking_completed_at"] or existing.cooking_completed_at
+                    existing.expected_delivery_time = item["expected_delivery_time"] or existing.expected_delivery_time
+                    existing.actual_delivery_time = item["actual_delivery_time"] or existing.actual_delivery_time
+                    existing.delay_minutes = item["delay_minutes"]
+                    existing.is_late = item["is_late"]
+                    existing.address = item["address"] or existing.address
+                    existing.address_parts = item["address_parts"]
+                    existing.customer_name = item["customer_name"] or existing.customer_name
+                    existing.customer_phone = item["customer_phone"] or existing.customer_phone
+                    existing.close_time = item["actual_delivery_time"]
+                    existing.updated_at = datetime.now(timezone.utc).replace(tzinfo=None)
+                    session.add(existing)
+                    updated_count += 1
+                else:
+                    new_order = CourierOrder(
+                        iiko_id=item["iiko_id"],
+                        order_num=item["order_num"],
+                        employee_id=item["employee_id"],
+                        address=item["address"],
+                        address_parts=item["address_parts"],
+                        delivery_zone=item["delivery_zone"],
+                        amount=item["amount"],
+                        created_at_iiko=item["cooking_completed_at"],
+                        cooking_completed_at=item["cooking_completed_at"],
+                        expected_delivery_time=item["expected_delivery_time"],
+                        actual_delivery_time=item["actual_delivery_time"],
+                        close_time=item["actual_delivery_time"],
+                        delay_minutes=item["delay_minutes"],
+                        is_late=item["is_late"],
+                        customer_name=item["customer_name"],
+                        customer_phone=item["customer_phone"],
+                        updated_at=datetime.now(timezone.utc).replace(tzinfo=None)
+                    )
+                    session.add(new_order)
+                    created_count += 1
             session.commit()
-            logger.info(f"Синхронизация доставок курьеров завершена: {created_count} создано, {updated_count} обновлено")
+            return created_count, updated_count
+
+        try:
+            created_c, updated_c = await asyncio.to_thread(_save_to_db)
+            logger.info(f"Синхронизация доставок курьеров завершена: {created_c} создано, {updated_c} обновлено")
         except Exception as e:
-            session.rollback()
+            await asyncio.to_thread(session.rollback)
             logger.error(f"Ошибка сохранения синхронизации доставок: {e}")
 
     async def sync_courier_deliveries_bg(self, date_from: datetime, date_to: datetime):
@@ -2802,11 +3128,17 @@ class IikoSyncService:
 
     async def sync_zones_from_external_map(self, session: Session, url: Optional[str] = None) -> Dict[str, Any]:
         """Синхронизация внешних полигонов зон из облачного хранилища"""
-        settings_rec = session.exec(select(IikoSettings)).first()
+        def _get_settings():
+            return session.exec(select(IikoSettings)).first()
+        
+        settings_rec = await asyncio.to_thread(_get_settings)
         if url and settings_rec:
-            settings_rec.delivery_zones_map_url = url
-            session.add(settings_rec)
-            session.commit()
+            def _update_url():
+                settings_rec.delivery_zones_map_url = url
+                session.add(settings_rec)
+                session.commit()
+            await asyncio.to_thread(_update_url)
+            
         map_url = url or (settings_rec.delivery_zones_map_url if settings_rec else None)
 
         if not map_url:
@@ -2819,19 +3151,22 @@ class IikoSyncService:
         except Exception as e:
             return {"success": False, "error": f"Ошибка при загрузке: {str(e)}"}
             
-        updated_count = 0
-        all_zones = session.exec(select(DeliveryZone)).all()
-        for kz in kml_zones:
-            name = kz["name"].strip()
-            matched_zone = next((z for z in all_zones if (z.name or "").lower() == name.lower()), None)
-            if matched_zone:
-                matched_zone.polygon_coordinates = json.dumps(kz["points"])
-                matched_zone.updated_at = datetime.now(timezone.utc).replace(tzinfo=None)
-                session.add(matched_zone)
-                updated_count += 1
+        def _process_zones():
+            updated_count = 0
+            all_zones = session.exec(select(DeliveryZone)).all()
+            for kz in kml_zones:
+                name = kz["name"].strip()
+                matched_zone = next((z for z in all_zones if (z.name or "").lower() == name.lower()), None)
+                if matched_zone:
+                    matched_zone.polygon_coordinates = json.dumps(kz["points"])
+                    matched_zone.updated_at = datetime.now(timezone.utc).replace(tzinfo=None)
+                    session.add(matched_zone)
+                    updated_count += 1
+            session.commit()
+            return updated_count
                 
-        session.commit()
-        return {"success": True, "updated_count": updated_count}
+        count = await asyncio.to_thread(_process_zones)
+        return {"success": True, "updated_count": count}
 
     async def sync_zones_from_kml_file(self, session: Session, kml_content: str) -> Dict[str, Any]:
         """Синхронизация из загруженного KML файла"""
@@ -2842,32 +3177,31 @@ class IikoSyncService:
         except Exception as e:
             return {"success": False, "error": f"Ошибка парсинга: {str(e)}"}
             
-        updated_count = 0
-        for kz in kml_zones:
-            name = kz["name"].strip()
-            matched_zone = session.exec(select(DeliveryZone).where(func.lower(DeliveryZone.name) == name.lower())).first()
-            if matched_zone:
-                matched_zone.polygon_coordinates = json.dumps(kz["points"])
-                matched_zone.is_manual_override = True
-                matched_zone.updated_at = datetime.now(timezone.utc).replace(tzinfo=None)
-                session.add(matched_zone)
-                updated_count += 1
-        
-        try:
+        def _process():
+            updated_count = 0
+            for kz in kml_zones:
+                name = kz["name"].strip()
+                matched_zone = session.exec(select(DeliveryZone).where(func.lower(DeliveryZone.name) == name.lower())).first()
+                if matched_zone:
+                    matched_zone.polygon_coordinates = json.dumps(kz["points"])
+                    matched_zone.is_manual_override = True
+                    matched_zone.updated_at = datetime.now(timezone.utc).replace(tzinfo=None)
+                    session.add(matched_zone)
+                    updated_count += 1
             session.commit()
+            return updated_count
+
+        try:
+            count = await asyncio.to_thread(_process)
             try:
                 from app.core.redis import redis_client
                 await redis_client.delete("delivery_zones_all")
             except Exception: pass
-            return {"success": True, "updated_count": updated_count, "total_from_file": len(kml_zones)}
+            return {"success": True, "updated_count": count, "total_from_file": len(kml_zones)}
         except Exception as e:
-            session.rollback()
+            await asyncio.to_thread(session.rollback)
             logger.error(f"Ошибка сохранения геометрии зон из файла: {e}")
             return {"success": False, "error": str(e)}
-
-    # =========================================================================
-    # Управление клиентской базой (Очистка и объединение)
-    # =========================================================================
 
     # =========================================================================
     # Управление клиентской базой (Очистка и объединение)
@@ -2876,15 +3210,18 @@ class IikoSyncService:
     async def find_customers_missing_iiko_data(self, session: Session) -> List[Customer]:
         """Поиск клиентов, у которых отсутствует iiko_id или uid."""
         from sqlalchemy import or_
-        statement = select(Customer).where(
-            or_(
-                Customer.iiko_id == None,
-                Customer.uid == None,
-                Customer.iiko_id == "",
-                Customer.uid == ""
+        def _query():
+            statement = select(Customer).where(
+                or_(
+                    Customer.iiko_id == None,
+                    Customer.uid == None,
+                    Customer.iiko_id == "",
+                    Customer.uid == ""
+                )
             )
-        )
-        customers = session.exec(statement).all()
+            return session.exec(statement).all()
+        
+        customers = await asyncio.to_thread(_query)
         logger.info(f"Найдено {len(customers)} клиентов с отсутствующими ID iiko")
         return customers
 

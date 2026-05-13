@@ -54,11 +54,26 @@ class ImportService:
                 'phone': ['№ телефона', 'номер телефона', 'телефон', 'phone', 'контактный'],
                 'address': ['адрес'],
                 'card_number': ['номер карты', 'карта', 'номер дисконтной'],
+                'registration_source': ['источник регистрации'],
+                'registration_date': ['дата регистрации'],
+                'is_high_risk': ['высокий риск', 'статус риск'],
+                'is_synced_to_iiko_cards': ['синхронизирован с iiko', 'iiko.cards'],
+                'is_system_notifications_consented': ['уведомления о статусах', 'статусы доставки'],
+                'is_loyalty_messages_consented': ['сообщения системы лояльности'],
                 'is_marketing_consented': ['реклама', 'рекламная рассылка', 'смс'],
-                'is_system_notifications_consented': ['уведомления системы'],
                 'birthday': ['дата рождения', 'день рождения', 'родился'],
-                'gender': ['пол']
+                'gender': ['пол'],
+                'last_order_date': ['дата последнего заказа', 'последний заказ']
             }
+            
+            # Порядок столбцов из ТЗ (если заголовки не распознаются или для принудительного маппинга)
+            tz_column_order = [
+                'name', 'surname', 'email', 'phone', 'address', 'card_number',
+                'registration_source', 'registration_date', 'is_high_risk',
+                'is_synced_to_iiko_cards', 'is_system_notifications_consented',
+                'is_loyalty_messages_consented', 'is_marketing_consented',
+                'birthday', 'gender', 'last_order_date'
+            ]
             
             col_map = {}
             for field, keywords in mapping_rules.items():
@@ -75,7 +90,15 @@ class ImportService:
                 item = {}
                 additional_phones = []
                 additional_addresses = []
-                
+
+                # Если колонок много и заголовки не совпали идеально, используем маппинг по позиции
+                if len(df.columns) >= 4 and len(col_map) < 4:
+                    if i == 0:
+                        logger.info("Using positional mapping as fallback for XLSX")
+                        for idx, field in enumerate(tz_column_order):
+                            if idx < len(df.columns):
+                                col_map[df.columns[idx]] = field
+
                 for col_name, row_val in row.items():
                     field_name = col_map.get(col_name)
                     if not field_name or pd.isna(row_val):
@@ -83,46 +106,52 @@ class ImportService:
                     
                     val_str = str(row_val).strip()
                     
-                    # Специальная обработка для колонки телефона (может содержать адреса и несколько номеров)
+                    # Обработка телефона (может быть несколько через ;)
                     if field_name == 'phone':
-                        # Разделяем по ; , или переводу строки
+                        # Разделяем по ;
                         parts = re.split(r'[;;\n]', val_str)
+                        phones_in_row = []
                         for p in parts:
                             p = p.strip()
                             if not p: continue
-                            
-                            # Пытаемся понять, это телефон или адрес
-                            # Если много цифр - скорее телефон. Если много букв - скорее адрес.
                             digits = re.sub(r'\D', '', p)
-                            if len(digits) >= 6 and (p.startswith('+') or p.startswith('7') or p.startswith('8') or re.match(r'^\d', p)):
-                                clean_phone = digits
-                                if clean_phone.startswith('8'):
-                                    clean_phone = '7' + clean_phone[1:]
-                                if not item.get('phone'):
-                                    item['phone'] = clean_phone
-                                else:
-                                    additional_phones.append(clean_phone)
+                            if len(digits) >= 6:
+                                if digits.startswith('8'):
+                                    digits = '7' + digits[1:]
+                                phones_in_row.append(digits)
                             else:
                                 additional_addresses.append(p)
+                        
+                        if phones_in_row:
+                            item['phone'] = phones_in_row[0]
+                            if len(phones_in_row) > 1:
+                                additional_phones.extend(phones_in_row[1:])
+                    
+                    # Обработка адреса (может быть несколько через ;)
+                    elif field_name == 'address':
+                        parts = val_str.split(';')
+                        addresses_in_row = [p.strip() for p in parts if p.strip()]
+                        if addresses_in_row:
+                            item['address'] = addresses_in_row[0]
+                            if len(addresses_in_row) > 1:
+                                additional_addresses.extend(addresses_in_row[1:])
+                    
+                    # Обработка булевых значений
+                    elif field_name.startswith('is_'):
+                        low_val = val_str.lower()
+                        item[field_name] = low_val in ['true', 'yes', '1', 'да', '+', 'v', 'x', 'checked']
+                    
+                    # Все остальные поля
                     else:
                         item[field_name] = row_val
                 
                 if item.get('phone'):
-                    # Сохраняем дополнительные телефоны и адреса в заметки, если они есть
-                    notes_parts = []
+                    # Сохраняем списки для последующей обработки в задаче
                     if additional_phones:
-                        notes_parts.append(f"Доп. телефоны: {', '.join(additional_phones)}")
+                        item['additional_phones'] = additional_phones
                     if additional_addresses:
-                        notes_parts.append(f"Доп. адреса: {', '.join(additional_addresses)}")
+                        item['additional_addresses'] = additional_addresses
                     
-                    if notes_parts:
-                        existing_notes = str(item.get('notes', '')) if item.get('notes') else ""
-                        item['notes'] = (existing_notes + "\n" + "\n".join(notes_parts)).strip()
-                    
-                    # Если есть основной адрес из колонки Адрес, объединяем его
-                    if additional_addresses and not item.get('address'):
-                        item['address'] = additional_addresses[0]
-                        
                     result.append(item)
             
             logger.info(f"Successfully parsed {len(result)} customers")

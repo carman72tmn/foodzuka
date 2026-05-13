@@ -11,7 +11,7 @@ from app.models.audit_log import AuditLog
 router = APIRouter(prefix="/logs", tags=["Logs & History"])
 
 @router.get("/system/")
-async def get_system_logs(
+def get_system_logs(
     limit: int = Query(50, le=500),
     level: Optional[str] = None,
     session: Session = Depends(get_session)
@@ -24,7 +24,7 @@ async def get_system_logs(
     return session.exec(query.limit(limit)).all()
 
 @router.get("/audit/")
-async def get_audit_logs(
+def get_audit_logs(
     limit: int = Query(50, le=500),
     resource_type: Optional[str] = None,
     session: Session = Depends(get_session)
@@ -37,7 +37,7 @@ async def get_audit_logs(
     return session.exec(query.limit(limit)).all()
 
 @router.get("/code-history/")
-async def get_code_history(limit: int = Query(20, le=100)):
+def get_code_history(limit: int = Query(20, le=100)):
     """Получить историю коммитов из Git"""
     try:
         # Пытаемся получить git log

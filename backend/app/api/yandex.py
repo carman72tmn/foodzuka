@@ -17,7 +17,7 @@ class YandexSettingsUpdate(BaseModel):
     is_active: bool = True
 
 @router.get("/settings", response_model=YandexSettings)
-async def get_yandex_settings(session: Session = Depends(get_session)):
+def get_yandex_settings(session: Session = Depends(get_session)):
     settings = session.exec(select(YandexSettings)).first()
     if not settings:
         # Создаем пустые настройки если их нет
@@ -28,7 +28,7 @@ async def get_yandex_settings(session: Session = Depends(get_session)):
     return settings
 
 @router.post("/settings", response_model=YandexSettings)
-async def update_yandex_settings(data: YandexSettingsUpdate, session: Session = Depends(get_session)):
+def update_yandex_settings(data: YandexSettingsUpdate, session: Session = Depends(get_session)):
     settings = session.exec(select(YandexSettings)).first()
     if not settings:
         settings = YandexSettings()

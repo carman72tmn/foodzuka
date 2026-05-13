@@ -65,7 +65,7 @@ class LoyaltyTransactionResponse(LoyaltyTransactionCreate):
 # ============= Статусы =============
 
 @router.get("/statuses", response_model=List[LoyaltyStatusResponse])
-async def list_statuses(session: Session = Depends(get_session)):
+def list_statuses(session: Session = Depends(get_session)):
     """Получить все статусы лояльности"""
     return session.exec(
         select(LoyaltyStatus).order_by(LoyaltyStatus.sort_order)
@@ -73,7 +73,7 @@ async def list_statuses(session: Session = Depends(get_session)):
 
 
 @router.post("/statuses", response_model=LoyaltyStatusResponse)
-async def create_status(
+def create_status(
     data: LoyaltyStatusCreate,
     session: Session = Depends(get_session)
 ):
@@ -86,7 +86,7 @@ async def create_status(
 
 
 @router.put("/statuses/{status_id}", response_model=LoyaltyStatusResponse)
-async def update_status(
+def update_status(
     status_id: int,
     data: LoyaltyStatusCreate,
     session: Session = Depends(get_session)
@@ -104,7 +104,7 @@ async def update_status(
 
 
 @router.delete("/statuses/{status_id}")
-async def delete_status(
+def delete_status(
     status_id: int,
     session: Session = Depends(get_session)
 ):
@@ -120,13 +120,13 @@ async def delete_status(
 # ============= Правила =============
 
 @router.get("/rules", response_model=List[LoyaltyRuleResponse])
-async def list_rules(session: Session = Depends(get_session)):
+def list_rules(session: Session = Depends(get_session)):
     """Получить все правила"""
     return session.exec(select(LoyaltyRule)).all()
 
 
 @router.post("/rules", response_model=LoyaltyRuleResponse)
-async def create_rule(
+def create_rule(
     data: LoyaltyRuleCreate,
     session: Session = Depends(get_session)
 ):
@@ -139,7 +139,7 @@ async def create_rule(
 
 
 @router.put("/rules/{rule_id}", response_model=LoyaltyRuleResponse)
-async def update_rule(
+def update_rule(
     rule_id: int,
     data: LoyaltyRuleCreate,
     session: Session = Depends(get_session)
@@ -157,7 +157,7 @@ async def update_rule(
 
 
 @router.delete("/rules/{rule_id}")
-async def delete_rule(
+def delete_rule(
     rule_id: int,
     session: Session = Depends(get_session)
 ):
@@ -173,7 +173,7 @@ async def delete_rule(
 # ============= Транзакции =============
 
 @router.get("/transactions", response_model=List[LoyaltyTransactionResponse])
-async def list_transactions(
+def list_transactions(
     phone: Optional[str] = None,
     limit: int = 100,
     session: Session = Depends(get_session)
@@ -193,7 +193,7 @@ import logging
 logger = logging.getLogger(__name__)
 
 @router.post("/transactions", response_model=LoyaltyTransactionResponse)
-async def create_transaction(
+def create_transaction(
     data: LoyaltyTransactionCreate,
     session: Session = Depends(get_session)
 ):
@@ -213,7 +213,7 @@ async def create_transaction(
 
 
 @router.get("/balance/{phone}")
-async def get_balance(phone: str, session: Session = Depends(get_session)):
+def get_balance(phone: str, session: Session = Depends(get_session)):
     """Получить баланс бонусов клиента по телефону"""
     transactions = session.exec(
         select(LoyaltyTransaction).where(

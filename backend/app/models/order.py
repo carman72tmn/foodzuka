@@ -76,6 +76,7 @@ class Order(SQLModel, table=True):
     resolved_delivery_zone_id: Optional[int] = Field(default=None, foreign_key="delivery_zones.id", description="ID локально определенной зоны доставки")
     
     is_paid: bool = Field(default=False, description="Заказ оплачен")
+    is_first_order: bool = Field(default=False, description="Первый заказ клиента (статус Новый гость на момент заказа)")
 
     discounts_details: Optional[Dict[str, Any]] = Field(
         default=None, sa_column=Column(JSON), 

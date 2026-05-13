@@ -10,13 +10,21 @@ files_to_sync = [
     ('backend/app/core/logging_utils.py', '/root/foodzuka/backend/app/core/logging_utils.py'),
     ('backend/app/tasks/customer_tasks.py', '/root/foodzuka/backend/app/tasks/customer_tasks.py'),
     ('backend/app/api/webhooks.py', '/root/foodzuka/backend/app/api/webhooks.py'),
-    ('backend/app/api/customers.py', '/root/foodzuka/backend/app/api/customers.py'),
-    ('backend/app/api/loyalty.py', '/root/foodzuka/backend/app/api/loyalty.py'),
-    ('backend/app/api/vk_bot_admin.py', '/root/foodzuka/backend/app/api/vk_bot_admin.py'),
-    ('backend/main.py', '/root/foodzuka/backend/main.py'),
-    ('backend/trigger_sync_vps.py', '/root/foodzuka/backend/trigger_sync_vps.py'),
-    ('backend/test_customer_sync_vps.py', '/root/foodzuka/backend/test_customer_sync_vps.py'),
-    ('cleanup_phones.py', '/root/foodzuka/backend/cleanup_phones.py'),
+    ('backend/app/api/orders.py', '/root/foodzuka/backend/app/api/orders.py'),
+    ('backend/app/models/order.py', '/root/foodzuka/backend/app/models/order.py'),
+    ('admin/resources/js/components/CustomerDetailModal.vue', '/root/foodzuka/admin/resources/js/components/CustomerDetailModal.vue'),
+    ('admin/resources/js/components/OrderDetailModal.vue', '/root/foodzuka/admin/resources/js/components/OrderDetailModal.vue'),
+    ('admin/resources/js/pages/orders/index.vue', '/root/foodzuka/admin/resources/js/pages/orders/index.vue'),
+    ('admin/resources/styles/order-detail-soft.css', '/root/foodzuka/admin/resources/styles/order-detail-soft.css'),
+    ('Service_info/system_faq.md', '/root/foodzuka/Service_info/system_faq.md'),
+    ('Service_info/sql_faq.md', '/root/foodzuka/Service_info/sql_faq.md'),
+    ('Service_info/sitenav.md', '/root/foodzuka/Service_info/sitenav.md'),
+    ('backend/app/schemas/__init__.py', '/root/foodzuka/backend/app/schemas/__init__.py'),
+    ('bot/handlers/__init__.py', '/root/foodzuka/bot/handlers/__init__.py'),
+    ('bot/utils/date_utils.py', '/root/foodzuka/bot/utils/date_utils.py'),
+    ('bot/requirements.txt', '/root/foodzuka/bot/requirements.txt'),
+    ('docker-compose.prod.yml', '/root/foodzuka/docker-compose.prod.yml'),
+    ('configs/nginx/default.conf', '/root/foodzuka/configs/nginx/default.conf'),
 ]
 
 def sync_file(local_path, remote_path):
@@ -55,8 +63,8 @@ if __name__ == "__main__":
     print(f"\nSynced {success_count}/{len(files_to_sync)} files.")
     
     if success_count == len(files_to_sync):
-        print("Restarting backend service...")
-        subprocess.run(["ssh", "foodtech", "cd /root/foodzuka && docker-compose restart backend"], check=True)
+        print("Restarting services...")
+        subprocess.run(["ssh", "foodtech", "cd /root/foodzuka && docker compose -f docker-compose.prod.yml up -d --build"], check=True)
         print("Done!")
     else:
         print("Some files failed to sync. Not restarting.")

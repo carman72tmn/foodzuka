@@ -124,7 +124,7 @@ async def sync_iiko_branches(session: Session = Depends(get_session)):
 # ============= Филиалы =============
 
 @router.get("/", response_model=List[BranchResponse])
-async def get_branches(
+def get_branches(
     company_id: int = None,
     skip: int = 0,
     limit: int = 100,
@@ -140,7 +140,7 @@ async def get_branches(
 
 
 @router.get("/{branch_id}", response_model=BranchResponse)
-async def get_branch(branch_id: int, session: Session = Depends(get_session)):
+def get_branch(branch_id: int, session: Session = Depends(get_session)):
     """Детали одного филиала"""
     branch = session.get(Branch, branch_id)
     if not branch:
@@ -152,7 +152,7 @@ async def get_branch(branch_id: int, session: Session = Depends(get_session)):
 
 
 @router.post("/", response_model=BranchResponse, status_code=status.HTTP_201_CREATED)
-async def create_branch(
+def create_branch(
     branch_data: BranchCreate,
     session: Session = Depends(get_session)
 ):
@@ -165,7 +165,7 @@ async def create_branch(
 
 
 @router.patch("/{branch_id}", response_model=BranchResponse)
-async def update_branch(
+def update_branch(
     branch_id: int,
     branch_data: BranchUpdate,
     session: Session = Depends(get_session)
@@ -189,7 +189,7 @@ async def update_branch(
 
 
 @router.delete("/{branch_id}", status_code=status.HTTP_204_NO_CONTENT)
-async def delete_branch(branch_id: int, session: Session = Depends(get_session)):
+def delete_branch(branch_id: int, session: Session = Depends(get_session)):
     """Удаление филиала"""
     branch = session.get(Branch, branch_id)
     if not branch:
@@ -214,7 +214,7 @@ async def sync_delivery_zones(session: Session = Depends(get_session)):
     return result
 
 @router.get("/{branch_id}/zones", response_model=List[DeliveryZoneResponse])
-async def get_delivery_zones(
+def get_delivery_zones(
     branch_id: int,
     session: Session = Depends(get_session)
 ):
@@ -225,7 +225,7 @@ async def get_delivery_zones(
 
 
 @router.post("/{branch_id}/zones", response_model=DeliveryZoneResponse, status_code=status.HTTP_201_CREATED)
-async def create_delivery_zone(
+def create_delivery_zone(
     branch_id: int,
     zone_data: DeliveryZoneCreate,
     session: Session = Depends(get_session)
@@ -241,7 +241,7 @@ async def create_delivery_zone(
     return zone
 
 @router.patch("/zones/{zone_id}", response_model=DeliveryZoneResponse)
-async def update_delivery_zone(
+def update_delivery_zone(
     zone_id: int,
     zone_data: DeliveryZoneUpdate,
     session: Session = Depends(get_session)
@@ -261,7 +261,7 @@ async def update_delivery_zone(
     return zone
 
 @router.delete("/zones/{zone_id}", status_code=status.HTTP_204_NO_CONTENT)
-async def delete_delivery_zone(zone_id: int, session: Session = Depends(get_session)):
+def delete_delivery_zone(zone_id: int, session: Session = Depends(get_session)):
     """Удаление зоны доставки"""
     zone = session.get(DeliveryZone, zone_id)
     if not zone:
@@ -311,13 +311,13 @@ async def upload_branch_polygons(
     return new_polygons
 
 @router.get("/{branch_id}/polygons", response_model=List[CustomPolygonResponse])
-async def get_branch_polygons(branch_id: int, session: Session = Depends(get_session)):
+def get_branch_polygons(branch_id: int, session: Session = Depends(get_session)):
     """Получение списка загруженных полигонов для филиала"""
     statement = select(CustomPolygon).where(CustomPolygon.branch_id == branch_id)
     return session.exec(statement).all()
 
 @router.patch("/polygons/{polygon_id}", response_model=CustomPolygonResponse)
-async def update_polygon(
+def update_polygon(
     polygon_id: int,
     polygon_data: CustomPolygonUpdate,
     session: Session = Depends(get_session)
@@ -337,7 +337,7 @@ async def update_polygon(
     return poly
 
 @router.delete("/polygons/{polygon_id}", status_code=status.HTTP_204_NO_CONTENT)
-async def delete_polygon(polygon_id: int, session: Session = Depends(get_session)):
+def delete_polygon(polygon_id: int, session: Session = Depends(get_session)):
     """Удаление загруженного полигона"""
     poly = session.get(CustomPolygon, polygon_id)
     if not poly:

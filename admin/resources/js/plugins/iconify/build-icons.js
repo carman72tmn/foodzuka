@@ -43,21 +43,8 @@ const sources = {
         require.resolve('@iconify-json/bx/icons.json'),
         require.resolve('@iconify-json/bxl/icons.json'),
         require.resolve('@iconify-json/bxs/icons.json'),
-        {
-            filename: require.resolve('@iconify-json/mdi/icons.json'),
-            icons: [
-                'close-circle',
-                'language-javascript',
-                'language-typescript',
-                'translate',
-                'arrow-bottom-left',
-                'arrow-bottom-right',
-                'arrow-top-left',
-                'arrow-top-right',
-                'arrow-collapse-all',
-                'arrow-down-left',
-            ],
-        },
+        require.resolve('@iconify-json/mdi/icons.json'),
+        require.resolve('@iconify-json/ri/icons.json'),
         {
             filename: require.resolve('@iconify-json/fa/icons.json'),
             icons: [

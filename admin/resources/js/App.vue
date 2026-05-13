@@ -1,3 +1,4 @@
+<script setup>
 import { onMounted } from 'vue'
 import { appTimezone, appOffset } from '@/utils/date'
 import UpgradeToPro from '@/components/UpgradeToPro.vue'
@@ -35,6 +36,7 @@ onMounted(async () => {
     console.error('Failed to load iiko settings for timezone:', error)
   }
 })
+</script>
 
 <template>
   <VApp>

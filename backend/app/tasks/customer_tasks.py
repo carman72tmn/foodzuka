@@ -204,10 +204,10 @@ async def _sync_bonus_history(session: Session, customer_id: int, iiko_customer_
     except Exception as e:
         logger.error(f"Error syncing bonus history for {iiko_customer_id}: {e}")
 
-async def _sync_single_customer(session: Session, phone: str, organization_id: Optional[str] = None) -> bool:
+async def _sync_single_customer(session: Session, phone: str, organization_id: Optional[str] = None, order_id: Optional[int] = None) -> bool:
     """Прокси для вызова синхронизации из iiko_sync_service"""
     from app.services.iiko_sync_service import iiko_sync_service
-    return await iiko_sync_service.sync_single_customer(session, phone, organization_id)
+    return await iiko_sync_service.sync_single_customer(session, phone, organization_id, order_id)
 
 
 
@@ -415,20 +415,40 @@ def import_customers_from_file_task(self, file_path: str, status_id: int):
                     
                     if not customer:
                         customer = Customer(phone=clean_phone)
+                        session.add(customer)
+                        session.flush() # Получаем ID
                         added += 1
                     else:
                         updated += 1
                     
-                    # Обновление полей
-                    if c_data.get('name'): customer.name = c_data['name']
-                    if c_data.get('surname'): customer.surname = c_data['surname']
+                    # Обновление основных полей
+                    if c_data.get('name'):
+                        customer.name = c_data['name']
+                        customer.first_name = c_data['name']
+                    if c_data.get('surname'):
+                        customer.surname = c_data['surname']
+                        customer.last_name = c_data['surname']
                     if c_data.get('email'): customer.email = c_data['email']
                     if c_data.get('card_number'): customer.card_number = str(c_data['card_number'])
                     if c_data.get('gender'): customer.gender = c_data['gender']
                     
-                    if 'is_marketing_consented' in c_data:
-                        val = str(c_data['is_marketing_consented']).lower()
-                        customer.is_marketing_consented = val in ['true', 'yes', '1', 'да', '+']
+                    # Новые поля из ТЗ
+                    if c_data.get('registration_source'): customer.registration_source = c_data['registration_source']
+                    if c_data.get('registration_date'):
+                        try:
+                            if isinstance(c_data['registration_date'], datetime):
+                                customer.registration_date = c_data['registration_date']
+                            else:
+                                customer.registration_date = datetime.fromisoformat(str(c_data['registration_date']))
+                        except: pass
+                    
+                    if 'is_high_risk' in c_data: customer.is_high_risk = bool(c_data['is_high_risk'])
+                    if 'is_synced_to_iiko_cards' in c_data: customer.is_synced_to_iiko_cards = bool(c_data['is_synced_to_iiko_cards'])
+                    
+                    # Согласия на уведомления
+                    if 'is_system_notifications_consented' in c_data: customer.is_system_notifications_consented = bool(c_data['is_system_notifications_consented'])
+                    if 'is_loyalty_messages_consented' in c_data: customer.is_loyalty_messages_consented = bool(c_data['is_loyalty_messages_consented'])
+                    if 'is_marketing_consented' in c_data: customer.is_marketing_consented = bool(c_data['is_marketing_consented'])
                     
                     if 'birthday' in c_data and c_data['birthday']:
                         try:
@@ -436,11 +456,75 @@ def import_customers_from_file_task(self, file_path: str, status_id: int):
                                 customer.birthday = c_data['birthday'].date()
                             else:
                                 customer.birthday = datetime.fromisoformat(str(c_data['birthday'])).date()
-                        except:
-                            pass
+                        except: pass
+
+                    if c_data.get('last_order_date'):
+                        try:
+                            if isinstance(c_data['last_order_date'], datetime):
+                                customer.last_order_date = c_data['last_order_date']
+                            else:
+                                customer.last_order_date = datetime.fromisoformat(str(c_data['last_order_date']))
+                        except: pass
                     
                     customer.updated_at = datetime.now(timezone.utc)
                     session.add(customer)
+                    
+                    # Обработка дополнительных телефонов
+                    if c_data.get('additional_phones'):
+                        from app.models.customer import GuestPhone
+                        for p_num in c_data['additional_phones']:
+                            existing_p = session.exec(select(GuestPhone).where(
+                                GuestPhone.customer_id == customer.id,
+                                GuestPhone.phone == p_num
+                            )).first()
+                            if not existing_p:
+                                session.add(GuestPhone(customer_id=customer.id, phone=p_num, comment="Импорт"))
+                    
+                    # Обработка адресов
+                    all_addr = []
+                    if c_data.get('address'): all_addr.append(c_data['address'])
+                    if c_data.get('additional_addresses'): all_addr.extend(c_data['additional_addresses'])
+                    
+                    if all_addr:
+                        from app.models.customer import GuestAddress, ClientAddressHistory
+                        for addr_str in all_addr:
+                            # GuestAddress
+                            existing_ga = session.exec(select(GuestAddress).where(
+                                GuestAddress.customer_id == customer.id,
+                                GuestAddress.address == addr_str
+                            )).first()
+                            if not existing_ga:
+                                session.add(GuestAddress(customer_id=customer.id, address=addr_str, is_main=(addr_str == all_addr[0])))
+                            
+                            # ClientAddressHistory (Laravel)
+                            existing_cah = session.exec(select(ClientAddressHistory).where(
+                                ClientAddressHistory.client_id == customer.id,
+                                ClientAddressHistory.address == addr_str
+                            )).first()
+                            if not existing_cah:
+                                # Простой парсинг адреса для заполнения обязательных полей Laravel
+                                city, street, house, apartment = "Не указан", "Не указана", "-", ""
+                                try:
+                                    parts = [p.strip() for p in addr_str.split(',')]
+                                    if len(parts) > 0: city = parts[0]
+                                    if len(parts) > 1: street = parts[1]
+                                    if len(parts) > 2: house = parts[2]
+                                    for p in parts[3:]:
+                                        if any(k in p.lower() for k in ['кв', 'офис', 'ап']):
+                                            apartment = p
+                                            break
+                                except: pass
+
+                                session.add(ClientAddressHistory(
+                                    client_id=customer.id,
+                                    city=city,
+                                    street=street,
+                                    house=house,
+                                    apartment=apartment,
+                                    address=addr_str,
+                                    last_used_at=datetime.now(),
+                                    orders_count=1
+                                ))
                 
                 # Обновление статуса после чанка
                 status = session.get(SyncStatus, status_id)
@@ -500,12 +584,12 @@ def import_customers_from_file_task(self, file_path: str, status_id: int):
         raise e
 
 @celery_app.task(name="app.tasks.customer_tasks.sync_single_customer_task")
-def sync_single_customer_task(phone: str):
+def sync_single_customer_task(phone: str, order_id: Optional[int] = None):
     """Задача для синхронизации одного клиента (вызывается при новом заказе)"""
     loop = asyncio.get_event_loop()
     with Session(engine) as session:
-        loop.run_until_complete(_sync_single_customer(session, phone))
-    return f"Synced {phone}"
+        loop.run_until_complete(_sync_single_customer(session, phone, order_id=order_id))
+    return f"Synced {phone} (Order: {order_id})"
 
 @celery_app.task(name="app.tasks.customer_tasks.sync_guest_data_task")
 def sync_guest_data_task(customer_id: int):
@@ -557,6 +641,7 @@ def export_customer_to_iiko_task(customer_id: int):
             "sex": sex,
             "shouldBeCheckedForRisk": bool(customer.is_high_risk),
             "isHighRisk": bool(customer.is_high_risk),
+            "checkedForRisk": bool(customer.is_high_risk),
             "referrerId": customer.referrer,
             "userData": customer.notes or customer.iiko_notes
         }

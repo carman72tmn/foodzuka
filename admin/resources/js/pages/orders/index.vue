@@ -1,5 +1,5 @@
 <script setup>
-import { ref, onMounted, onUnmounted } from "vue"
+import { ref, computed, onMounted, onUnmounted } from "vue"
 import { formatDateTime } from "@/utils/date"
 import OrderDetailModal from "../../components/OrderDetailModal.vue"
 
@@ -14,7 +14,7 @@ const orders = ref([])
 // Для модального окна деталей заказа
 const isModalOpen = ref(false)
 const selectedOrder = ref(null)
-const addressFormat = ref('line1')
+const addressFormat = ref("line1")
 
 const API_BASE = "/api/v1/orders"
 
@@ -23,7 +23,7 @@ const search = ref("")
 const headers = [
   { title: "ID", key: "id", sortable: true, width: 30 },
   { title: "iiko #", key: "external_number", sortable: true, width: 90 },
-  { title: "ОПЛ.", key: "is_paid", sortable: true, width: 40, align: 'center', cellProps: { class: 'column-narrow' }, headerProps: { class: 'column-narrow' } },
+  { title: "ОПЛ.", key: "is_paid", sortable: true, width: 40, align: "center", cellProps: { class: "column-narrow" }, headerProps: { class: "column-narrow" } },
   { title: "Город", key: "city", sortable: true, width: 50 },
   { title: "Клиент", key: "customer_name", sortable: true },
   { title: "Телефон", key: "customer_phone", sortable: false, width: 130 },
@@ -38,18 +38,18 @@ const headers = [
 ]
 
 /* eslint-disable camelcase */
-const statusColors = {
-  new: "grey",
-  unconfirmed: "error",
-  confirmed: "primary", // синий
-  preparing: "warning", // желтый
-  cooking: "warning",   // желтый
-  ready: "orange",      // оранжевый
-  ready_for_pickup: "orange",
-  delivering: "info",    // голубой
-  delivered: "purple",   // фиолетовый
-  closed: "success",    // зеленый
-  cancelled: "red"      // красный
+const statusColorsMap = {
+  new: "#E3F2FD",
+  unconfirmed: "#FFF3E0",
+  confirmed: "#E1F5FE",
+  preparing: "#E0F2F1",
+  cooking: "#FFF8E1",
+  ready: "#E8F5E9",
+  readyForPickup: "#E8F5E9",
+  delivering: "#E8EAF6",
+  delivered: "#F1F8E9",
+  closed: "#F5F5F5",
+  cancelled: "#FFEBEE",
 }
 /* eslint-enable camelcase */
 
@@ -64,7 +64,7 @@ const statusNames = {
   delivering: "У курьера",
   delivered: "Доставлен",
   closed: "Закрыт",
-  cancelled: "Отменен"
+  cancelled: "Отменен",
 }
 
 let updateInterval = null
@@ -77,14 +77,16 @@ const showMessage = (text, color = "success") => {
 
 const loadOrders = async (silent = false) => {
   if (!silent) loading.value = true
+
   try {
     const res = await fetch(`${API_BASE}/`)
     if (res.ok) {
       const data = await res.json()
+
       // Добавляем вычисляемые поля для таблицы
       orders.value = data.map(o => ({
         ...o,
-        orderItemsCount: o.order_items_details?.length || o.items?.length || 0
+        orderItemsCount: o.order_items_details?.length || o.items?.length || 0,
       }))
     }
   } catch (e) {
@@ -94,12 +96,30 @@ const loadOrders = async (silent = false) => {
   }
 }
 
+const sortedOrders = computed(() => {
+  return [...orders.value].sort((a, b) => {
+    // Статусы, которые считаются активными
+    const activeStatuses = ["new", "unconfirmed", "confirmed", "preparing", "cooking", "ready", "ready_for_pickup", "delivering", "delivered"]
+
+    const isAActive = activeStatuses.includes(a.status)
+    const isBActive = activeStatuses.includes(b.status)
+
+    // Приоритет 1: Активные сверху
+    if (isAActive && !isBActive) return -1
+    if (!isAActive && isBActive) return 1
+
+    // Приоритет 2: Внутри групп по ID (новые выше)
+    return b.id - a.id
+  })
+})
+
 const syncRecentOrders = async () => {
   syncing.value = true
   try {
-    const res = await fetch(`${API_BASE}/sync`, { method: 'POST' })
+    const res = await fetch(`${API_BASE}/sync`, { method: "POST" })
     if (res.ok) {
       showMessage("Синхронизация запущена в фоновом режиме", "info")
+
       // Перезагрузим список через пару секунд чтобы увидеть первые результаты
       setTimeout(() => loadOrders(false), 3000)
     } else {
@@ -112,21 +132,22 @@ const syncRecentOrders = async () => {
   }
 }
 
-const openOrderDetails = (order) => {
+const openOrderDetails = order => {
   selectedOrder.value = order
   isModalOpen.value = true
 }
 
-const cancelOrder = async (id) => {
+const cancelOrder = async id => {
   if (!confirm("Вы уверены, что хотите отменить этот заказ?")) return
-  
+
   try {
     const res = await fetch(`${API_BASE}/${id}/cancel`, {
-      method: 'POST'
+      method: "POST",
     })
     if (res.ok) {
       showMessage("Заказ успешно отменен")
       loadOrders(false)
+
       // Если отменяем из открытого модального окна, обновим и его данные
       if (selectedOrder.value && selectedOrder.value.id === id) {
         const updatedOrd = await res.json()
@@ -143,44 +164,44 @@ const cancelOrder = async (id) => {
 
 const loadSettings = async () => {
   try {
-    const res = await fetch('/api/v1/settings/iiko')
+    const res = await fetch("/api/v1/settings/iiko")
     if (res.ok) {
       const data = await res.json()
-      addressFormat.value = data.address_format || 'line1'
+      addressFormat.value = data.address_format || "line1"
     }
   } catch (e) {
-    console.error('Error loading iiko settings:', e)
+    console.error("Error loading iiko settings:", e)
   }
 }
 
-const formatAddress = (order) => {
-  if (!order) return '—'
-  if (order.order_type === 'Самовывоз' || !order.delivery_address) return '🙍 Самовывоз'
-  
+const formatAddress = order => {
+  if (!order) return "—"
+  if (order.order_type === "Самовывоз" || !order.delivery_address) return "🙍 Самовывоз"
+
   // Условие для предупреждения ❗
   // Только для доставочных заказов, пока статус не закрыт или не отменен
-  const status = (order.status || '').toLowerCase()
-  const isPending = !['closed', 'cancelled'].includes(status)
-  
-  // Проверяем квартиру/офис. Если поле отсутствует, равно 0, - или пусто
-  const flat = (order.flat || '').toString().trim()
-  const noFlat = !flat || flat === '0' || flat === '-'
-  
-  const showWarning = isPending && noFlat && order.order_type !== 'Самовывоз'
-  const warningPrefix = showWarning ? '❗ ' : ''
+  const status = (order.status || "").toLowerCase()
+  const isPending = !["closed", "cancelled"].includes(status)
 
-  if (addressFormat.value === 'line1') {
+  // Проверяем квартиру/офис. Если поле отсутствует, равно 0, - или пусто
+  const flat = (order.flat || "").toString().trim()
+  const noFlat = !flat || flat === "0" || flat === "-"
+
+  const showWarning = isPending && noFlat && order.order_type !== "Самовывоз"
+  const warningPrefix = showWarning ? "❗ " : ""
+
+  if (addressFormat.value === "line1") {
     return warningPrefix + order.delivery_address
   }
-  
+
   const parts = []
   const o = order
-  
+
   if (o.city) {
-    const cityPref = o.city.toLowerCase().startsWith('г.') ? o.city : `г. ${o.city}`
+    const cityPref = o.city.toLowerCase().startsWith("г.") ? o.city : `г. ${o.city}`
     parts.push(cityPref)
   }
-  
+
   if (o.street) {
     if (!/ул\.|пр\.|пер\.|б-р/.test(o.street.toLowerCase())) {
       parts.push(`ул. ${o.street}`)
@@ -188,21 +209,22 @@ const formatAddress = (order) => {
       parts.push(o.street)
     }
   }
-  
-  if (o.house && o.house !== '0') parts.push(`д. ${o.house}`)
+
+  if (o.house && o.house !== "0") parts.push(`д. ${o.house}`)
   if (o.flat) parts.push(`кв. ${o.flat}`)
   if (o.entrance) parts.push(`под. ${o.entrance}`)
   if (o.floor) parts.push(`эт. ${o.floor}`)
   if (o.doorphone) parts.push(`домофон: ${o.doorphone}`)
-  
+
   if (parts.length <= 1 && o.delivery_address) return warningPrefix + o.delivery_address
-  
-  return warningPrefix + parts.join(', ')
+
+  return warningPrefix + parts.join(", ")
 }
 
 onMounted(() => {
   loadSettings()
   loadOrders()
+
   // Автообновление каждые 30 секунд
   updateInterval = setInterval(() => {
     loadOrders(true)
@@ -215,29 +237,36 @@ onUnmounted(() => {
   }
 })
 
-const formatPrice = (val) => {
-  if (val === null || val === undefined) return '0.00'
+const formatPrice = val => {
+  if (val === null || val === undefined) return "0.00"
   const num = parseFloat(val)
-  return isNaN(num) ? '0.00' : num.toFixed(2)
+
+  return isNaN(num) ? "0.00" : num.toFixed(2)
 }
 
-
 const getRowProps = ({ item }) => {
-  const status = (item.status || '').toLowerCase()
-  const isClosed = status === 'closed'
-  
+  const status = (item.status || "").toLowerCase()
+  const isClosed = status === "closed"
+
   // Определяем цвет фона в зависимости от статуса
-  let bgColor = 'rgba(245, 245, 245, 1)' // по умолчанию
-  if (status === 'unconfirmed') bgColor = 'rgba(255, 243, 224, 1)'
-  else if (['preparing', 'cooking'].includes(status)) bgColor = 'rgba(255, 253, 231, 1)'
-  else if (isClosed || status.includes('cancel')) bgColor = '#FFFFFF'
+  let bgColor = "rgba(245, 245, 245, 1)" // по умолчанию
+  if (status === "unconfirmed") bgColor = "rgba(255, 243, 224, 1)"
+  else if (["preparing", "cooking"].includes(status)) bgColor = "rgba(255, 253, 231, 1)"
+  else if (isClosed || status.includes("cancel")) bgColor = "#FFFFFF"
 
   return {
     style: {
-      opacity: '1',
-      backgroundColor: bgColor
-    }
+      opacity: "1",
+      backgroundColor: bgColor,
+    },
   }
+}
+
+const getStatusColor = status => {
+  if (!status) return "#F5F5F5"
+  const key = status.replace(/_([a-z])/g, g => g[1].toUpperCase())
+
+  return statusColorsMap[key] || "#F5F5F5"
 }
 </script>
 
@@ -246,7 +275,10 @@ const getRowProps = ({ item }) => {
     <VCol cols="12">
       <VCard>
         <VCardTitle class="d-flex align-center flex-wrap ga-2 py-4">
-          <VIcon icon="bx-cart" class="me-2" />
+          <VIcon
+            icon="bx-cart"
+            class="me-2"
+          />
           Управление заказами
           <VSpacer />
           <VTextField
@@ -260,17 +292,35 @@ const getRowProps = ({ item }) => {
             style="max-width: 300px"
             class="me-4"
           />
-          <VBtn color="warning" @click="syncRecentOrders" :loading="syncing" variant="tonal" size="small">
-            <VIcon icon="bx-cloud-download" class="me-1" /> Синхронизировать iiko
+          <VBtn
+            color="warning"
+            variant="tonal"
+            size="small"
+            :loading="syncing"
+            @click="syncRecentOrders"
+          >
+            <VIcon
+              icon="bx-cloud-download"
+              class="me-1"
+            /> Синхронизировать iiko
           </VBtn>
-          <VBtn color="primary" @click="loadOrders(false)" :loading="loading" variant="tonal" size="small">
-            <VIcon icon="bx-refresh" class="me-1" /> Обновить
+          <VBtn
+            color="primary"
+            variant="tonal"
+            size="small"
+            :loading="loading"
+            @click="loadOrders(false)"
+          >
+            <VIcon
+              icon="bx-refresh"
+              class="me-1"
+            /> Обновить
           </VBtn>
         </VCardTitle>
         <VCardText>
           <VDataTable
             :headers="headers"
-            :items="orders"
+            :items="sortedOrders"
             :loading="loading"
             :search="search"
             :items-per-page="15"
@@ -279,14 +329,46 @@ const getRowProps = ({ item }) => {
             density="compact"
             hover
             :row-props="getRowProps"
-            @click:row="(_, { item }) => openOrderDetails(item)"
             style="cursor: pointer"
+            @click:row="(_, { item }) => openOrderDetails(item)"
           >
+            <template #item.customer_name="{ item }">
+              <div class="d-flex align-center flex-wrap ga-1">
+                <span class="font-weight-medium">{{ item.customer_name }}</span>
+
+                <!-- Индикатор нового клиента -->
+                <VTooltip
+                  v-if="item.customer_is_new"
+                  text="Новый клиент"
+                >
+                  <template #activator="{ props: ttProps }">
+                    <VIcon
+                      v-bind="ttProps"
+                      icon="bx-star"
+                      color="#ffb74d"
+                      size="16"
+                    />
+                  </template>
+                </VTooltip>
+
+                <VTooltip :text="item.customer_is_risk ? 'Высокий риск!' : 'Клиент проверен'">
+                  <template #activator="{ props: ttProps }">
+                    <VIcon
+                      v-bind="ttProps"
+                      :icon="item.customer_is_risk ? 'bx-shield-x' : 'bx-shield-quarter'"
+                      :color="item.customer_is_risk ? '#e57373' : '#81c784'"
+                      size="16"
+                    />
+                  </template>
+                </VTooltip>
+              </div>
+            </template>
+
             <template #item.is_paid="{ item }">
               <VTooltip location="top">
-                <template #activator="{ props }">
+                <template #activator="{ props: ttProps }">
                   <VIcon
-                    v-bind="props"
+                    v-bind="ttProps"
                     :icon="item.is_paid ? 'bx-check-circle' : 'bx-x-circle'"
                     :color="item.is_paid ? 'success' : 'error'"
                     size="24"
@@ -299,10 +381,13 @@ const getRowProps = ({ item }) => {
             <template #item.customer_phone="{ item }">
               <div class="d-flex align-center">
                 <span>{{ item.customer_phone || '—' }}</span>
-                <VTooltip v-if="item.is_spam || item.spam_score > 0" location="top">
-                  <template #activator="{ props }">
+                <VTooltip
+                  v-if="item.is_spam || item.spam_score > 0"
+                  location="top"
+                >
+                  <template #activator="{ props: ttProps }">
                     <VIcon
-                      v-bind="props"
+                      v-bind="ttProps"
                       :icon="item.spam_score >= 80 ? 'bx-error-circle' : 'bx-info-circle'"
                       :color="item.spam_score >= 80 ? 'error' : 'warning'"
                       size="small"
@@ -319,11 +404,11 @@ const getRowProps = ({ item }) => {
             </template>
 
             <template #item.total_amount="{ item }">
-              <span 
+              <span
                 :class="(item.status === 'closed' || item.status.toLowerCase().includes('cancel')) ? 'font-weight-regular' : 'font-weight-bold'"
                 :style="{ color: (item.status === 'closed' || item.status.toLowerCase().includes('cancel')) ? '#000000' : 'inherit' }"
               >
-                {{ formatPrice ? formatPrice(item.total_amount) : item.total_amount }} ₽
+                {{ formatPrice(item.total_amount) }} ₽
               </span>
             </template>
 
@@ -334,26 +419,42 @@ const getRowProps = ({ item }) => {
               <span v-else-if="item.delivery_zone">
                 {{ item.delivery_zone }}
               </span>
-              <span v-else class="text-caption text-grey">
+              <span
+                v-else
+                class="text-caption text-grey"
+              >
                 Не опред.
               </span>
             </template>
 
             <template #item.courier_name="{ item }">
-              <span v-if="!item.courier_name || item.courier_name.toLowerCase().includes('none none') || item.courier_name.toLowerCase().trim() === 'не назначен'" class="text-grey text-caption">
+              <span
+                v-if="!item.courier_name || item.courier_name.toLowerCase().includes('none none') || item.courier_name.toLowerCase().trim() === 'не назначен'"
+                class="text-grey text-caption"
+              >
                 Не назначен
               </span>
-              <span v-else class="font-weight-medium">
+              <span
+                v-else
+                class="font-weight-medium"
+              >
                 {{ item.courier_name.replace(/(\s+None)+$/i, '').replace(/None\s+None/i, '') }}
               </span>
             </template>
 
-
             <template #item.total_discount="{ item }">
-              <VChip v-if="item.total_discount > 0" size="x-small" variant="tonal" color="error">
+              <VChip
+                v-if="item.total_discount > 0"
+                size="x-small"
+                variant="tonal"
+                color="error"
+              >
                 -{{ item.total_discount }} ₽
               </VChip>
-              <span v-else class="text-caption text-grey">—</span>
+              <span
+                v-else
+                class="text-caption text-grey"
+              >—</span>
             </template>
 
             <template #item.external_number="{ item }">
@@ -361,21 +462,23 @@ const getRowProps = ({ item }) => {
             </template>
 
             <template #item.delivery_address="{ item }">
-              <span class="text-body-2 font-weight-medium" style="opacity: 1 !important; color: #000 !important;">
+              <span
+                class="text-body-2 font-weight-medium"
+                style="opacity: 1 !important; color: #000 !important;"
+              >
                 {{ formatAddress(item) }}
               </span>
             </template>
 
-
             <template #item.status="{ item }">
               <div class="d-flex align-center">
                 <VChip
-                  :color="statusColors[item.status] || 'grey'"
+                  :color="getStatusColor(item.status)"
                   size="small"
                   class="text-uppercase"
                   :class="(item.status === 'closed' || item.status.toLowerCase().includes('cancel')) ? 'font-weight-regular' : 'font-weight-bold'"
                   :variant="(item.status === 'closed' || item.status.toLowerCase().includes('cancel')) ? 'flat' : 'tonal'"
-                  :style="{ 
+                  :style="{
                     color: (item.status === 'closed' || item.status.toLowerCase().includes('cancel')) ? '#000000 !important' : 'inherit',
                     backgroundColor: (item.status === 'closed' || item.status.toLowerCase().includes('cancel')) ? 'transparent !important' : ''
                   }"
@@ -385,12 +488,11 @@ const getRowProps = ({ item }) => {
               </div>
             </template>
 
-
             <template #item.expected_time="{ item }">
               <VTooltip location="top">
-                <template #activator="{ props }">
-                  <div 
-                    v-bind="props"
+                <template #activator="{ props: ttProps }">
+                  <div
+                    v-bind="ttProps"
                     class="d-flex flex-column align-center justify-center pa-1 rounded-lg"
                     :class="(item.status === 'closed' || item.status.toLowerCase().includes('cancel')) ? '' : 'elevation-1'"
                     :style="{
@@ -402,13 +504,28 @@ const getRowProps = ({ item }) => {
                       color: (item.status === 'closed' || item.status.toLowerCase().includes('cancel')) ? '#000000' : 'inherit'
                     }"
                   >
-                    <div class="text-h6 mb-0" style="opacity: 1">
+                    <div
+                      class="text-h6 mb-0"
+                      style="opacity: 1"
+                    >
                       {{ item.is_asap ? '⚡' : '⏰' }}
                     </div>
-                    
+
                     <div class="text-center">
-                      <div class="text-caption font-weight-black" :style="{ color: (item.status === 'closed' || item.status.toLowerCase().includes('cancel')) ? '#000000' : (item.is_asap ? '#F57F17' : '#01579B') }">
+                      <div
+                        class="text-caption font-weight-black"
+                        :style="{ color: (item.status === 'closed' || item.status.toLowerCase().includes('cancel')) ? '#000000' : (item.is_asap ? '#F57F17' : '#01579B') }"
+                      >
                         {{ formatDateTime(item.expected_time || item.iiko_creation_time || item.created_at, { day: undefined, month: undefined, year: undefined }) }}
+                      </div>
+
+                      <!-- НОВОЕ: Дата для предзаказов на будущие дни -->
+                      <div
+                        v-if="!item.is_asap && item.expected_time && new Date(item.expected_time).toDateString() !== new Date().toDateString()"
+                        class="text-caption font-weight-bold mt-n1"
+                        :style="{ color: (item.status === 'closed' || item.status.toLowerCase().includes('cancel')) ? '#666' : '#1565C0', fontSize: '0.65rem' }"
+                      >
+                        {{ formatDateTime(item.expected_time, { hour: undefined, minute: undefined, second: undefined }) }}
                       </div>
                     </div>
                   </div>
@@ -422,16 +539,24 @@ const getRowProps = ({ item }) => {
                 {{ formatDateTime(item.iiko_creation_time || item.created_at) }}
               </span>
             </template>
-            
           </VDataTable>
         </VCardText>
       </VCard>
     </VCol>
   </VRow>
 
-  <OrderDetailModal v-model="isModalOpen" :order="selectedOrder" :address-format="addressFormat" />
+  <OrderDetailModal
+    v-model="isModalOpen"
+    :order="selectedOrder"
+    :address-format="addressFormat"
+  />
 
-  <VSnackbar v-model="snackbar" :color="snackbarColor" :timeout="3000" location="top">
+  <VSnackbar
+    v-model="snackbar"
+    :color="snackbarColor"
+    :timeout="3000"
+    location="top"
+  >
     {{ snackbarText }}
   </VSnackbar>
 </template>

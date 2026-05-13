@@ -13,7 +13,7 @@ router = APIRouter(prefix="/products", tags=["Products"])
 
 
 @router.get("/", response_model=List[ProductResponse])
-async def get_products(
+def get_products(
     skip: int = 0,
     limit: int = 100,
     category_id: Optional[int] = None,
@@ -52,7 +52,7 @@ async def sync_stop_list_products(session: Session = Depends(get_session)):
 
 
 @router.get("/modifiers/all")
-async def get_all_modifiers(session: Session = Depends(get_session)):
+def get_all_modifiers(session: Session = Depends(get_session)):
     """Получить все группы модификаторов со вложенными модификаторами"""
     from app.models.product import ProductModifierGroup
     from sqlalchemy.orm import selectinload
@@ -91,7 +91,7 @@ async def get_all_modifiers(session: Session = Depends(get_session)):
 
 
 @router.get("/{product_id}", response_model=ProductResponse)
-async def get_product(product_id: int, session: Session = Depends(get_session)):
+def get_product(product_id: int, session: Session = Depends(get_session)):
     """Получить товар по ID"""
     query = select(Product).options(
         selectinload(Product.sizes),
@@ -133,7 +133,7 @@ async def get_product_iiko_details(product_id: int, session: Session = Depends(g
 
 
 @router.post("/", response_model=ProductResponse, status_code=status.HTTP_201_CREATED)
-async def create_product(
+def create_product(
     product_data: ProductCreate,
     session: Session = Depends(get_session)
 ):
@@ -146,7 +146,7 @@ async def create_product(
 
 
 @router.patch("/{product_id}", response_model=ProductResponse)
-async def update_product(
+def update_product(
     product_id: int,
     product_data: ProductUpdate,
     session: Session = Depends(get_session)
@@ -171,7 +171,7 @@ async def update_product(
 
 
 @router.delete("/{product_id}", status_code=status.HTTP_204_NO_CONTENT)
-async def delete_product(product_id: int, session: Session = Depends(get_session)):
+def delete_product(product_id: int, session: Session = Depends(get_session)):
     """Удалить товар"""
     product = session.get(Product, product_id)
     if not product:
@@ -185,7 +185,7 @@ async def delete_product(product_id: int, session: Session = Depends(get_session
 
 
 @router.delete("/all", status_code=status.HTTP_204_NO_CONTENT)
-async def delete_all_products(session: Session = Depends(get_session)):
+def delete_all_products(session: Session = Depends(get_session)):
     """Безвозвратно удаляет все товары (Полезно для чистой синхронизации)"""
     from sqlmodel import delete as sql_delete
     session.exec(sql_delete(Product))
@@ -193,7 +193,7 @@ async def delete_all_products(session: Session = Depends(get_session)):
 
 
 @router.delete("/modifiers/all", status_code=status.HTTP_204_NO_CONTENT)
-async def delete_all_modifiers(session: Session = Depends(get_session)):
+def delete_all_modifiers(session: Session = Depends(get_session)):
     """Удаляет все размеры и группы модификаторов"""
     from sqlmodel import delete as sql_delete
     from app.models.product import ProductSize, ProductModifierGroup, ProductModifier

@@ -12,7 +12,7 @@ from app.schemas import NpsReviewCreate, NpsReviewUpdate, NpsReviewResponse
 router = APIRouter(prefix="/nps", tags=["NPS Reviews"])
 
 @router.get("/", response_model=List[NpsReviewResponse])
-async def get_reviews(
+def get_reviews(
     skip: int = 0,
     limit: int = 100,
     is_processed: Optional[bool] = None,
@@ -36,7 +36,7 @@ async def get_reviews(
     return reviews
 
 @router.get("/{review_id}", response_model=NpsReviewResponse)
-async def get_review(review_id: int, session: Session = Depends(get_session)):
+def get_review(review_id: int, session: Session = Depends(get_session)):
     """Получение деталей конкретного отзыва"""
     review = session.get(NpsReview, review_id)
     if not review:
@@ -44,7 +44,7 @@ async def get_review(review_id: int, session: Session = Depends(get_session)):
     return review
 
 @router.post("/", response_model=NpsReviewResponse, status_code=status.HTTP_201_CREATED)
-async def create_review(
+def create_review(
     review_data: NpsReviewCreate,
     session: Session = Depends(get_session)
 ):
@@ -56,7 +56,7 @@ async def create_review(
     return review
 
 @router.patch("/{review_id}", response_model=NpsReviewResponse)
-async def process_review(
+def process_review(
     review_id: int,
     review_data: NpsReviewUpdate,
     session: Session = Depends(get_session)

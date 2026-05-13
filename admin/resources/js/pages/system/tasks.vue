@@ -264,11 +264,37 @@ const getTaskTypeName = (type) => {
   return map[type] || type
 }
 
+const formatTriggerValue = (type, value) => {
+  if (!value) return '---'
+  try {
+    const data = typeof value === 'string' ? JSON.parse(value) : value
+    if (type === 'interval') {
+      const parts = []
+      if (data.weeks) parts.push(`${data.weeks} нед.`)
+      if (data.days) parts.push(`${data.days} дн.`)
+      if (data.hours) parts.push(`${data.hours} ч.`)
+      if (data.minutes) parts.push(`${data.minutes} мин.`)
+      if (data.seconds) parts.push(`${data.seconds} сек.`)
+      return parts.join(' ') || value
+    }
+    if (type === 'cron') {
+      const parts = []
+      if (data.day_of_week) parts.push(`день: ${data.day_of_week}`)
+      if (data.hour !== undefined) parts.push(`час: ${data.hour}`)
+      if (data.minute !== undefined) parts.push(`мин: ${data.minute}`)
+    }
+    return value
+  } catch (e) {
+    return value
+  }
+}
+
 const formatSize = (bytes) => {
   if (!bytes) return '0 B'
   const k = 1024
   const sizes = ['B', 'KB', 'MB', 'GB']
   const i = Math.floor(Math.log(bytes) / Math.log(k))
+
   return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i]
 }
 </script>
@@ -465,7 +491,7 @@ const formatSize = (bytes) => {
                   <VChip size="x-small" :color="item.trigger_type === 'cron' ? 'purple' : 'info'" class="me-1">
                     {{ item.trigger_type.toUpperCase() }}
                   </VChip>
-                  <span class="text-caption">{{ item.trigger_value }}</span>
+                  <span class="text-caption font-weight-bold">{{ formatTriggerValue(item.trigger_type, item.trigger_value) }}</span>
                 </template>
 
                 <template #item.is_active="{ item }">

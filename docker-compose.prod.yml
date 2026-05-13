@@ -50,6 +50,27 @@ services:
         max-size: "10m"
         max-file: "3"
 
+  worker:
+    build:
+      context: ./backend
+    container_name: foodtech-worker
+    restart: always
+    env_file: .env
+    command: celery -A app.core.celery_app worker --loglevel=info
+    environment:
+      - DATABASE_URL=postgresql://${DB_USERNAME:-foodtech_user}:${DB_PASSWORD:-postgres}@db:5432/${DB_DATABASE:-foodtech_db}
+      - REDIS_URL=redis://redis:6379/0
+    volumes:
+      - ./backend:/app
+    depends_on:
+      - db
+      - redis
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
   bot:
     build:
       context: ./bot

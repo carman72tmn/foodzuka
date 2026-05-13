@@ -1,7 +1,7 @@
 /* eslint-disable camelcase */
 <script setup>
 import { ref, onMounted, watch } from 'vue'
-import { formatDateTime, formatDate } from '@/utils/date'
+import { formatDateTime, formatDate, isLongTimeAgo } from '@/utils/date'
 import CustomerDetailModal from '@/components/CustomerDetailModal.vue'
 
 const clients = ref([])
@@ -642,12 +642,31 @@ onMounted(() => {
         
         <template #item.loyalty_summary="{ item }">
           <div class="d-flex flex-column align-start">
-            <VChip v-if="item.is_new_guest" size="x-small" color="success" class="mb-1 font-weight-bold">НОВЫЙ ГОСТЬ</VChip>
-            <div v-else-if="item.bonus_points" class="d-flex align-center">
+            <div class="d-flex flex-wrap gap-1 mb-1">
+              <VChip 
+                v-if="item.is_new_guest && (item.total_orders_count || 0) <= 1" 
+                size="x-small" 
+                color="success" 
+                class="font-weight-bold"
+              >
+                НОВЫЙ ГОСТЬ
+              </VChip>
+              
+              <VChip 
+                v-if="isLongTimeAgo(item.last_order_date)" 
+                size="x-small" 
+                color="warning" 
+                class="font-weight-bold"
+                prepend-icon="ri-history-line"
+              >
+                ВЕРНУЛСЯ
+              </VChip>
+            </div>
+            <div v-if="item.bonus_points" class="d-flex align-center">
               <VIcon icon="bx-coin" size="14" color="primary" class="me-1" />
               <span class="text-body-2 font-weight-medium">{{ item.bonus_points }} баллов</span>
             </div>
-            <span v-else class="text-caption text-disabled">Активен</span>
+            <span v-else-if="!item.is_new_guest && !isLongTimeAgo(item.last_order_date)" class="text-caption text-disabled">Активен</span>
           </div>
         </template>
 

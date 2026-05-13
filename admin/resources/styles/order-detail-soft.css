@@ -1,0 +1,229 @@
+/*
+ * Soft Premium Order Detail Styling
+ * Path: /admin/resources/styles/order-detail-soft.css
+ */
+
+:root {
+    --soft-bg: #fdfdfd;
+    --soft-border: rgba(226, 232, 240, 0.5);
+    --soft-glass: rgba(255, 255, 255, 0.6);
+    --soft-shadow: 0 4px 20px -5px rgba(0, 0, 0, 0.03);
+    
+    /* Restrained Soft Palette */
+    --muted-blue: #94a3b8;
+    --muted-green: #a3b18a;
+    --muted-orange: #e9c46a;
+    --muted-red: #e07a5f;
+    --muted-indigo: #818cf8;
+    --muted-teal: #99d98c;
+    
+    /* Specific Status Shades (Restrained) */
+    --status-new: #94a3b8;
+    --status-pending: #f1b44c;
+    --status-active: #50a5f1;
+    --status-process: #34c38f;
+    --status-ready: #63d594;
+    --status-cancel: #f46a6a;
+    
+    --text-dark: #475569;
+    --text-muted: #94a3b8;
+    --text-light: #cbd5e1;
+}
+
+.order-detail-card-soft {
+    background-color: var(--soft-bg) !important;
+    border-radius: 20px !important;
+}
+
+.info-section-soft {
+    margin-bottom: 20px;
+}
+
+.section-label-soft {
+    font-size: 0.65rem;
+    font-weight: 700;
+    letter-spacing: 0.04rem;
+    color: var(--text-muted);
+    margin-bottom: 6px;
+    display: flex;
+    align-items: center;
+    text-transform: uppercase;
+}
+
+.glass-block-soft {
+    background: var(--soft-glass);
+    backdrop-filter: blur(10px);
+    border: 1px solid var(--soft-border);
+    border-radius: 12px;
+    padding: 10px 14px;
+    box-shadow: var(--soft-shadow);
+    transition: all 0.25s ease-out;
+}
+
+.glass-block-soft:hover {
+    border-color: rgba(148, 163, 184, 0.2);
+    transform: translateY(-1px);
+    box-shadow: 0 6px 15px -5px rgba(0, 0, 0, 0.05);
+}
+
+/* Time Block Variants */
+.time-asap-soft {
+    background: linear-gradient(135deg, #fffdf5 0%, #fff9e6 100%);
+    border-color: #fef3c7;
+}
+
+.time-preorder-soft {
+    background: linear-gradient(135deg, #f8fafc 0%, #f1f5f9 100%);
+    border-color: #e2e8f0;
+}
+
+/* Пастельная палитра для статусов и кнопок */
+.status-indicator {
+    padding: 4px 12px;
+    border-radius: 20px;
+    font-size: 0.85rem;
+    font-weight: 500;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+}
+
+/* Мягкие пастельные цвета для состояний */
+.status-success {
+    background: rgba(232, 245, 233, 0.7) !important;
+    color: #2e7d32 !important;
+    border: 1px solid rgba(46, 125, 50, 0.2);
+}
+
+.status-warning {
+    background: rgba(255, 243, 224, 0.7) !important;
+    color: #ef6c00 !important;
+    border: 1px solid rgba(239, 108, 0, 0.2);
+}
+
+.status-error {
+    background: rgba(255, 235, 238, 0.7) !important;
+    color: #c62828 !important;
+    border: 1px solid rgba(198, 40, 40, 0.2);
+}
+
+.status-info {
+    background: rgba(227, 242, 253, 0.7) !important;
+    color: #1565c0 !important;
+    border: 1px solid rgba(21, 101, 192, 0.2);
+}
+
+/* Стили для кнопок в модальном окне */
+.soft-btn {
+    text-transform: none !important;
+    letter-spacing: 0.3px !important;
+    border-radius: 12px !important;
+    font-weight: 500 !important;
+    transition: all 0.2s ease;
+}
+
+.soft-btn-primary {
+    background: linear-gradient(135deg, #e3f2fd 0%, #bbdefb 100%) !important;
+    color: #1976d2 !important;
+    box-shadow: 0 4px 12px rgba(25, 118, 210, 0.1) !important;
+}
+
+.soft-btn-primary:hover {
+    transform: translateY(-1px);
+    box-shadow: 0 6px 16px rgba(25, 118, 210, 0.15) !important;
+}
+
+/* Индикаторы лояльности */
+.loyalty-indicator {
+    padding: 2px 8px;
+    border-radius: 6px;
+    font-size: 0.75rem;
+    font-weight: 600;
+    text-transform: uppercase;
+}
+
+.loyalty-new {
+    background: #fff8e1 !important;
+    color: #ffa000 !important;
+}
+
+.loyalty-risk {
+    background: #fbe9e7 !important;
+    color: #d84315 !important;
+}
+
+/* Иконки с мягким цветом */
+.soft-icon-blue { color: #64b5f6 !important; }
+.soft-icon-green { color: #81c784 !important; }
+.soft-icon-orange { color: #ffb74d !important; }
+.soft-icon-red { color: #e57373 !important; }
+.soft-icon-purple { color: #9575cd !important; }
+.soft-icon-cyan { color: #4dd0e1 !important; }
+
+/* Financials Block Soft */
+.financial-panel-glass-soft {
+    background: #ffffff;
+    border: 1px solid var(--soft-border);
+    border-radius: 16px;
+    padding: 16px;
+    box-shadow: var(--soft-shadow);
+}
+
+.order-items-table-soft {
+    border: 1px solid var(--soft-border) !important;
+    border-radius: 12px !important;
+    overflow: hidden;
+}
+
+.order-items-table-soft thead tr {
+    background-color: #f8fafc !important;
+}
+
+.order-items-table-soft th {
+    color: var(--text-muted) !important;
+    font-weight: 600 !important;
+    font-size: 0.7rem !important;
+    text-transform: uppercase;
+    padding: 12px 16px !important;
+}
+
+.order-items-table-soft td {
+    padding: 10px 16px !important;
+    border-bottom: 1px solid #f1f5f9 !important;
+}
+
+.modifier-soft {
+    font-size: 0.75rem;
+    color: var(--text-muted);
+    background-color: #fafafa;
+}
+
+/* Timeline Customization */
+.modern-timeline-soft :deep(.v-timeline-item__body) {
+    padding-bottom: 20px !important;
+}
+
+.modern-timeline-soft :deep(.v-timeline-divider__dot) {
+    background: white !important;
+    border: 1.5px solid currentColor !important;
+    box-shadow: 0 2px 4px rgba(0,0,0,0.05);
+}
+
+.timeline-time-soft {
+    font-size: 0.65rem;
+    color: var(--text-muted);
+    font-weight: 500;
+}
+
+/* Buttons and UI elements */
+.soft-btn {
+    border-radius: 8px !important;
+    text-transform: none !important;
+    font-weight: 600 !important;
+    letter-spacing: 0 !important;
+}
+
+.soft-icon {
+    opacity: 0.7;
+}
+

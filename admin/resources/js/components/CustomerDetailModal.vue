@@ -36,26 +36,39 @@
 
         <VSpacer />
 
-        <VChip
-          v-if="customer?.is_new_guest"
-          color="success"
-          size="small"
-          class="me-4 font-weight-bold"
-          variant="elevated"
-        >
-          НОВЫЙ ГОСТЬ
-        </VChip>
+        <div class="d-flex ga-2">
+          <VChip
+            v-if="customer?.is_new_guest && (customer?.total_orders_count || 0) <= 1"
+            color="success"
+            size="small"
+            class="font-weight-bold"
+            variant="elevated"
+          >
+            НОВЫЙ ГОСТЬ
+          </VChip>
 
-        <VChip
-          v-if="customer?.is_high_risk"
-          color="white"
-          size="small"
-          class="me-4 font-weight-bold pulse-animation"
-          variant="elevated"
-          prepend-icon="ri-error-warning-fill"
-        >
-          ВЫСОКИЙ РИСК
-        </VChip>
+          <VChip
+            v-if="isLongTimeAgo(customer?.last_order_date)"
+            color="warning"
+            size="small"
+            class="font-weight-bold"
+            variant="elevated"
+            prepend-icon="ri-history-line"
+          >
+            ВЕРНУЛСЯ
+          </VChip>
+
+          <VChip
+            v-if="customer?.is_high_risk"
+            color="white"
+            size="small"
+            class="font-weight-bold pulse-animation"
+            variant="elevated"
+            prepend-icon="ri-error-warning-fill"
+          >
+            ВЫСОКИЙ РИСК
+          </VChip>
+        </div>
 
         <VBtn
           icon="ri-close-line"
@@ -596,6 +609,81 @@
                   <pre class="bg-grey-darken-4 text-white pa-4 rounded text-caption overflow-x-auto">{{ JSON.stringify(customer, null, 2) }}</pre>
                 </VContainer>
               </VWindowItem>
+
+              <!-- 9. Локальные заказы -->
+              <VWindowItem value="local-orders">
+                <VContainer class="pa-6">
+                  <div class="d-flex justify-space-between align-center mb-4">
+                    <h3 class="text-subtitle-1 font-weight-bold mb-0">История локальных заказов (База)</h3>
+                    <div class="d-flex align-center ga-2">
+                      <VBtn
+                        icon="ri-arrow-left-s-line"
+                        variant="tonal"
+                        size="small"
+                        :disabled="localOrdersPage === 0 || localOrdersLoading"
+                        @click="prevLocalPage"
+                      />
+                      <span class="text-caption font-weight-bold">Стр. {{ localOrdersPage + 1 }}</span>
+                      <VBtn
+                        icon="ri-arrow-right-s-line"
+                        variant="tonal"
+                        size="small"
+                        :disabled="localOrders.length <= 7 || localOrdersLoading"
+                        @click="nextLocalPage"
+                      />
+                    </div>
+                  </div>
+
+                  <VProgressLinear
+                    v-if="localOrdersLoading"
+                    indeterminate
+                    color="primary"
+                    height="2"
+                    class="mb-4"
+                  />
+
+                  <VTable density="compact" class="border rounded-lg overflow-hidden">
+                    <thead>
+                      <tr>
+                        <th class="text-left py-3">Дата / ID</th>
+                        <th class="text-left py-3">Позиции</th>
+                        <th class="text-right py-3">Сумма</th>
+                        <th class="text-center py-3">Статус</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      <tr v-for="order in localOrders.slice(0, 7)" :key="order.id">
+                        <td class="py-2">
+                          <div class="font-weight-bold">{{ formatDate(order.created_at) }}</div>
+                          <div class="text-caption text-disabled">#{{ order.id }}</div>
+                        </td>
+                        <td class="py-2">
+                          <div class="text-caption line-height-1" v-for="item in order.items" :key="item.id">
+                            {{ item.name }} x{{ item.amount }}
+                          </div>
+                        </td>
+                        <td class="text-right py-2 font-weight-bold">
+                          {{ formatPrice(order.total_sum) }}
+                        </td>
+                        <td class="text-center py-2">
+                          <VChip
+                            size="x-small"
+                            :color="order.status === 'cancelled' ? 'error' : (order.status === 'delivered' ? 'success' : 'info')"
+                            variant="tonal"
+                          >
+                            {{ order.status }}
+                          </VChip>
+                        </td>
+                      </tr>
+                      <tr v-if="!localOrders.length && !localOrdersLoading">
+                        <td colspan="4" class="text-center py-10 text-disabled">
+                          Заказы не найдены
+                        </td>
+                      </tr>
+                    </tbody>
+                  </VTable>
+                </VContainer>
+              </VWindowItem>
             </VWindow>
           </VCol>
         </VRow>
@@ -615,6 +703,7 @@ import {
 import axios from 'axios'
 import { useToast } from 'vue-toastification'
 import JsBarcode from 'jsbarcode'
+import { isLongTimeAgo } from '@/utils/date'
 
 const props = defineProps({
   modelValue: Boolean,
@@ -633,6 +722,39 @@ const isSyncing = ref(false)
 const olapLoading = ref(false)
 const olapError = ref(null)
 const analytics = ref({})
+const localOrders = ref([])
+const localOrdersLoading = ref(false)
+const localOrdersPage = ref(0)
+
+const loadLocalOrders = async () => {
+  if (!props.customer?.phone) return
+  localOrdersLoading.value = true
+  try {
+    const skip = localOrdersPage.value * 7
+    const response = await fetch(`/api/v1/orders/by-phone/${props.customer.phone}?limit=8&skip=${skip}`)
+    if (!response.ok) throw new Error('Failed to fetch local orders')
+    localOrders.value = await response.json()
+  } catch (e) {
+    console.warn('Local orders fetch failed', e)
+  } finally {
+    localOrdersLoading.value = false
+  }
+}
+
+const prevLocalPage = () => {
+  if (localOrdersPage.value > 0) {
+    localOrdersPage.value--
+    loadLocalOrders()
+  }
+}
+
+const nextLocalPage = () => {
+  if (localOrders.value.length > 7) {
+    localOrdersPage.value++
+    loadLocalOrders()
+  }
+}
+
 const bonusHistory = ref([])
 const ordersHistory = ref([])
 const guestAddresses = ref([])
@@ -682,6 +804,7 @@ const tabs = [
   },
   { id: 'addresses', title: 'Адреса', icon: 'ri-map-pin-line' },
   { id: 'notifications', title: 'Инфо', icon: 'ri-notification-line' },
+  { id: 'local-orders', title: 'Локальные заказы', icon: 'ri-history-line' },
   { id: 'extra', title: 'Лог', icon: 'ri-code-line' },
 ]
 
@@ -894,6 +1017,7 @@ const initData = async () => {
   await Promise.all([
     loadOlapStats(),
     loadOrderHistory(),
+    loadLocalOrders(),
     loadBonusHistory(),
     loadAllCategories(),
     loadLocalPhones(),

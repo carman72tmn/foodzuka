@@ -7,7 +7,7 @@ import string
 from typing import List, Optional
 from datetime import datetime, date, timezone
 from decimal import Decimal
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field, ConfigDict
 from sqlmodel import Session, select
 from app.core.database import get_session
@@ -69,7 +69,7 @@ class MassGenerateRequest(BaseModel):
 # ============= CRUD =============
 
 @router.get("/", response_model=List[PromoCodeResponse])
-async def list_promo_codes(
+def get_promo_codes(
     promo_type: Optional[str] = None,
     is_active: Optional[bool] = None,
     search: Optional[str] = None,
@@ -89,20 +89,17 @@ async def list_promo_codes(
     return session.exec(query).all()
 
 
-@router.get("/{promo_id}", response_model=PromoCodeResponse)
-async def get_promo_code(
-    promo_id: int,
-    session: Session = Depends(get_session)
-):
+@router.get("/{code_id}", response_model=PromoCodeResponse)
+def get_promo_code(code_id: int, session: Session = Depends(get_session)):
     """Получить промокод по ID"""
-    promo = session.get(PromoCode, promo_id)
+    promo = session.get(PromoCode, code_id)
     if not promo:
         raise HTTPException(status_code=404, detail="Promo code not found")
     return promo
 
 
-@router.post("/", response_model=PromoCodeResponse)
-async def create_promo_code(
+@router.post("/", response_model=PromoCodeResponse, status_code=status.HTTP_201_CREATED)
+def create_promo_code(
     data: PromoCodeCreate,
     session: Session = Depends(get_session)
 ):
@@ -121,14 +118,14 @@ async def create_promo_code(
     return promo
 
 
-@router.put("/{promo_id}", response_model=PromoCodeResponse)
-async def update_promo_code(
-    promo_id: int,
+@router.patch("/{code_id}", response_model=PromoCodeResponse)
+def update_promo_code(
+    code_id: int,
     data: PromoCodeCreate,
     session: Session = Depends(get_session)
 ):
     """Обновить промокод"""
-    promo = session.get(PromoCode, promo_id)
+    promo = session.get(PromoCode, code_id)
     if not promo:
         raise HTTPException(status_code=404, detail="Promo code not found")
     for key, value in data.model_dump().items():
@@ -139,13 +136,10 @@ async def update_promo_code(
     return promo
 
 
-@router.delete("/{promo_id}")
-async def delete_promo_code(
-    promo_id: int,
-    session: Session = Depends(get_session)
-):
+@router.delete("/{code_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_promo_code(code_id: int, session: Session = Depends(get_session)):
     """Удалить промокод"""
-    promo = session.get(PromoCode, promo_id)
+    promo = session.get(PromoCode, code_id)
     if not promo:
         raise HTTPException(status_code=404, detail="Promo code not found")
     session.delete(promo)
@@ -155,8 +149,20 @@ async def delete_promo_code(
 
 # ============= Действия =============
 
+@router.get("/validate/{code}")
+def validate_promo_code(
+    code: str,
+    session: Session = Depends(get_session)
+):
+    """Проверка промокода"""
+    promo = session.exec(select(PromoCode).where(PromoCode.code == code)).first()
+    if not promo:
+        raise HTTPException(status_code=404, detail="Promo code not found")
+    return promo
+
+
 @router.post("/{promo_id}/toggle")
-async def toggle_promo_code(
+def toggle_promo_code(
     promo_id: int,
     session: Session = Depends(get_session)
 ):
@@ -171,7 +177,7 @@ async def toggle_promo_code(
 
 
 @router.post("/{promo_id}/duplicate", response_model=PromoCodeResponse)
-async def duplicate_promo_code(
+def duplicate_promo_code(
     promo_id: int,
     session: Session = Depends(get_session)
 ):
@@ -217,7 +223,7 @@ async def duplicate_promo_code(
 # ============= Массовая генерация =============
 
 @router.post("/mass-generate", response_model=List[PromoCodeResponse])
-async def mass_generate(
+def mass_generate_promo_codes(
     data: MassGenerateRequest,
     session: Session = Depends(get_session)
 ):

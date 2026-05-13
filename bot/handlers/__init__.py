@@ -6,7 +6,6 @@ from aiogram.types import Message, CallbackQuery
 from aiogram.filters import Command, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from ..utils.date_utils import format_datetime
 from keyboards import (
     get_main_menu_keyboard,
     get_categories_keyboard,

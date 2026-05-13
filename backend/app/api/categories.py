@@ -12,7 +12,7 @@ router = APIRouter(prefix="/categories", tags=["Categories"])
 
 
 @router.get("/", response_model=List[CategoryResponse])
-async def get_categories(
+def get_categories(
     skip: int = 0,
     limit: int = 100,
     is_active: bool = None,
@@ -35,7 +35,7 @@ async def get_categories(
 
 
 @router.get("/tree", response_model=List[CategoryResponse])
-async def get_categories_tree(session: Session = Depends(get_session)):
+def get_categories_tree(session: Session = Depends(get_session)):
     """Получить все категории с данными для дерева"""
     query = select(Category).order_by(Category.sort_order, Category.name)
     categories = session.exec(query).all()
@@ -51,7 +51,7 @@ async def sync_categories_from_iiko(session: Session = Depends(get_session)):
 
 
 @router.get("/{category_id}", response_model=CategoryResponse)
-async def get_category(category_id: int, session: Session = Depends(get_session)):
+def get_category(category_id: int, session: Session = Depends(get_session)):
     """Получить категорию по ID"""
     category = session.get(Category, category_id)
     if not category:
@@ -63,7 +63,7 @@ async def get_category(category_id: int, session: Session = Depends(get_session)
 
 
 @router.post("/", response_model=CategoryResponse, status_code=status.HTTP_201_CREATED)
-async def create_category(
+def create_category(
     category_data: CategoryCreate,
     session: Session = Depends(get_session)
 ):
@@ -76,7 +76,7 @@ async def create_category(
 
 
 @router.patch("/{category_id}", response_model=CategoryResponse)
-async def update_category(
+def update_category(
     category_id: int,
     category_data: CategoryUpdate,
     session: Session = Depends(get_session)
@@ -101,7 +101,7 @@ async def update_category(
 
 
 @router.delete("/all", status_code=status.HTTP_204_NO_CONTENT)
-async def delete_all_categories(session: Session = Depends(get_session)):
+def delete_all_categories(session: Session = Depends(get_session)):
     """
     Удалить абсолютно все категории.
     Сначала обнуляет ссылки на категории в товарах, чтобы не нарушить целостность.
@@ -122,7 +122,7 @@ async def delete_all_categories(session: Session = Depends(get_session)):
 
 
 @router.delete("/{category_id}", status_code=status.HTTP_204_NO_CONTENT)
-async def delete_category(category_id: int, session: Session = Depends(get_session)):
+def delete_category(category_id: int, session: Session = Depends(get_session)):
     """Удалить конкретную категорию"""
     category = session.get(Category, category_id)
     if not category:

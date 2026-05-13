@@ -1,8 +1,8 @@
 """
 Pydantic схемы для валидации данных API
 """
-from typing import Any, Dict, List, Optional, Sequence, Union
-from datetime import datetime
+from typing import List, Optional, Dict, Any, Union
+from datetime import datetime, date
 from decimal import Decimal
 from pydantic import BaseModel, Field, ConfigDict, model_validator
 from app.models.order import OrderStatus
@@ -412,6 +412,10 @@ class OrderResponse(BaseModel):
     resolved_delivery_zone_id: Optional[int] = None
     resolved_delivery_zone_name: Optional[str] = Field(None, alias="resolved_zone_name")
 
+    # Индикаторы клиента
+    customer_is_new: bool = False
+    customer_is_risk: bool = False
+
     
     # Расширенные данные
     source: Optional[str] = None
@@ -661,18 +665,32 @@ class CustomerCreate(CustomerBase):
 
 class CustomerUpdate(BaseModel):
     phone: Optional[str] = None
-    telegram_id: Optional[int] = None
     name: Optional[str] = None
+    surname: Optional[str] = None
+    first_name: Optional[str] = None
+    last_name: Optional[str] = None
     email: Optional[str] = None
-    birthday: Optional[datetime] = None
+    birthday: Optional[Union[datetime, date, str]] = None
+    gender: Optional[str] = None
     city: Optional[str] = None
     addresses: Optional[str] = None
     notes: Optional[str] = None
+    iiko_notes: Optional[str] = Field(None, alias="iikoNotes")
+    is_high_risk: Optional[bool] = Field(None, alias="isHighRisk")
+    risk_reason: Optional[str] = Field(None, alias="riskReason")
     is_risk: Optional[bool] = None
-    risk_reason: Optional[str] = None
     categories: Optional[str] = None
+    iiko_categories: Optional[List[str]] = Field(None, alias="iikoCategories")
     wallet_balances: Optional[str] = None
     is_blocked: Optional[bool] = None
+    
+    # Новые поля анкеты
+    middle_name: Optional[str] = None
+    referrer: Optional[str] = None
+    registration_source: Optional[str] = None
+    registered_organization: Optional[str] = None
+
+    model_config = ConfigDict(populate_by_name=True)
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 import json
@@ -718,8 +736,15 @@ class CustomerResponse(CustomerBase):
     
     created_at: datetime
     updated_at: datetime
+    
+    # Новые поля анкеты
+    middle_name: Optional[str] = None
+    referrer: Optional[str] = None
+    registration_source: Optional[str] = None
+    registered_organization: Optional[str] = None
+    iiko_card_numbers: Optional[List[str]] = []
 
-    @field_validator('orders_history', 'iiko_categories', 'additional_phones', 'marketing_consents', 'loyalty_categories', mode='before')
+    @field_validator('orders_history', 'iiko_categories', 'additional_phones', 'marketing_consents', 'loyalty_categories', 'iiko_card_numbers', mode='before')
     @classmethod
     def parse_json_string(cls, v):
         if isinstance(v, str) and v.strip():

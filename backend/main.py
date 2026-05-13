@@ -60,7 +60,7 @@ async def startup_event():
     # Инициализация ролей и супер-админа
     try:
         with Session(engine) as session:
-            await iiko_sync_service.ensure_super_admin(session)
+            iiko_sync_service.ensure_super_admin(session)
             logger.info("Системные роли и супер-админ проверены.")
     except Exception as e:
         logger.error(f"Ошибка при инициализации супер-админа: {e}")
@@ -113,15 +113,15 @@ app.include_router(system.router, prefix="/api/v1")
 
 # Алиас для настроек iiko (совместимость с фронтендом)
 @app.get("/api/v1/settings/iiko")
-async def get_iiko_settings_legacy(session: Session = Depends(get_session)):
+def get_iiko_settings_legacy(session: Session = Depends(get_session)):
     """Алиас для /api/v1/iiko/settings"""
     from app.api.iiko import get_settings
-    return await get_settings(session)
+    return get_settings(session)
 
 
 
 @app.get("/")
-async def root():
+def root():
     """Корневой эндпоинт"""
     return {
         "сообщение": "FoodTech API",
@@ -132,7 +132,7 @@ async def root():
 
 
 @app.get("/health")
-async def health_check():
+def health_check():
     """Проверка здоровья приложения"""
     return {
         "статус": "здоров",

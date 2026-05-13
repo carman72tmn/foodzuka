@@ -3,6 +3,7 @@ API эндпоинты для OLAP-отчётов по выручке из iiko
 """
 from fastapi import APIRouter, Depends, Query, HTTPException
 from typing import Optional, List
+import asyncio
 from datetime import datetime, date, timedelta
 from app.core.datetime_utils import utc_now
 from sqlmodel import Session, select
@@ -66,14 +67,16 @@ async def get_revenue_report(
 
     # Для прошлых периодов проверяем кэш в БД
     if not is_today and not refresh:
-        cached = db.exec(
-            select(OlapRevenueRecord).where(
-                OlapRevenueRecord.date_from >= date_from_dt,
-                OlapRevenueRecord.date_to <= date_to_dt,
-                OlapRevenueRecord.period_type == period,
-                OlapRevenueRecord.include_deleted == include_deleted,
-            )
-        ).all()
+        cached = await asyncio.to_thread(
+            lambda: db.exec(
+                select(OlapRevenueRecord).where(
+                    OlapRevenueRecord.date_from >= date_from_dt,
+                    OlapRevenueRecord.date_to <= date_to_dt,
+                    OlapRevenueRecord.period_type == period,
+                    OlapRevenueRecord.include_deleted == include_deleted,
+                )
+            ).all()
+        )
         if cached:
             return {
                 "success": True,
@@ -85,7 +88,7 @@ async def get_revenue_report(
             }
 
     # Получаем настройки iiko
-    settings = db.exec(select(IikoSettings)).first()
+    settings = await asyncio.to_thread(lambda: db.exec(select(IikoSettings)).first())
     if not settings:
         raise HTTPException(status_code=400, detail="iiko settings not configured")
 
@@ -105,42 +108,45 @@ async def get_revenue_report(
 
     # Сохраняем в БД (только для не текущего дня)
     if not is_today and rows:
-        # Удаляем старые записи за этот период
-        old_records = db.exec(
-            select(OlapRevenueRecord).where(
-                OlapRevenueRecord.period_type == period,
-                OlapRevenueRecord.date_from >= date_from_dt,
-                OlapRevenueRecord.date_to <= date_to_dt,
-                OlapRevenueRecord.include_deleted == include_deleted,
-            )
-        ).all()
-        for old in old_records:
-            db.delete(old)
-        db.commit()
+        def save_to_db():
+            # Удаляем старые записи за этот период
+            old_records = db.exec(
+                select(OlapRevenueRecord).where(
+                    OlapRevenueRecord.period_type == period,
+                    OlapRevenueRecord.date_from >= date_from_dt,
+                    OlapRevenueRecord.date_to <= date_to_dt,
+                    OlapRevenueRecord.include_deleted == include_deleted,
+                )
+            ).all()
+            for old in old_records:
+                db.delete(old)
+            db.commit()
 
-        # Сохраняем новые
-        for row in rows:
-            record = OlapRevenueRecord(
-                organization_id=settings.organization_id,
-                organization_name=row.get("department", settings.organization_id),
-                terminal_name=row.get("terminal", ""),
-                date_from=date_from_dt,
-                date_to=date_to_dt,
-                business_date=row.get("date"),
-                period_type=period,
-                average_check=row.get("average_check", 0.0),
-                markup=row.get("markup", 0.0),
-                markup_percent=row.get("markup_percent", 0.0),
-                cost_price=row.get("cost_price", 0.0),
-                cost_price_percent=row.get("cost_price_percent", 0.0),
-                discount_sum=row.get("discount_sum", 0.0),
-                revenue=row.get("revenue", 0.0),
-                orders_count=row.get("orders_count", 0),
-                include_deleted=include_deleted,
-                updated_at=utc_now(),
-            )
-            db.add(record)
-        db.commit()
+            # Сохраняем новые
+            for row in rows:
+                record = OlapRevenueRecord(
+                    organization_id=settings.organization_id,
+                    organization_name=row.get("department", settings.organization_id),
+                    terminal_name=row.get("terminal", ""),
+                    date_from=date_from_dt,
+                    date_to=date_to_dt,
+                    business_date=row.get("date"),
+                    period_type=period,
+                    average_check=row.get("average_check", 0.0),
+                    markup=row.get("markup", 0.0),
+                    markup_percent=row.get("markup_percent", 0.0),
+                    cost_price=row.get("cost_price", 0.0),
+                    cost_price_percent=row.get("cost_price_percent", 0.0),
+                    discount_sum=row.get("discount_sum", 0.0),
+                    revenue=row.get("revenue", 0.0),
+                    orders_count=row.get("orders_count", 0),
+                    include_deleted=include_deleted,
+                    updated_at=utc_now(),
+                )
+                db.add(record)
+            db.commit()
+            
+        await asyncio.to_thread(save_to_db)
 
     return {
         "success": True,
@@ -175,7 +181,7 @@ async def get_sales_report(
     db: Session = Depends(get_session),
 ):
     df, dt = _get_period_dates(period, date_from, date_to)
-    settings = db.exec(select(IikoSettings)).first()
+    settings = await asyncio.to_thread(lambda: db.exec(select(IikoSettings)).first())
     rows = await iiko_service.get_custom_olap_report(
         "SALES",
         ["Department", "OpenDate.Typed"],
@@ -193,7 +199,7 @@ async def get_products_report(
     db: Session = Depends(get_session),
 ):
     df, dt = _get_period_dates(period, date_from, date_to)
-    settings = db.exec(select(IikoSettings)).first()
+    settings = await asyncio.to_thread(lambda: db.exec(select(IikoSettings)).first())
     rows = await iiko_service.get_custom_olap_report(
         "SALES",
         ["DishName", "DishCategory"],
@@ -211,7 +217,7 @@ async def get_days_report(
     db: Session = Depends(get_session),
 ):
     df, dt = _get_period_dates(period, date_from, date_to)
-    settings = db.exec(select(IikoSettings)).first()
+    settings = await asyncio.to_thread(lambda: db.exec(select(IikoSettings)).first())
     rows = await iiko_service.get_custom_olap_report(
         "SALES",
         ["OpenDate.Typed"],
@@ -229,7 +235,7 @@ async def get_clients_report(
     db: Session = Depends(get_session),
 ):
     df, dt = _get_period_dates(period, date_from, date_to)
-    settings = db.exec(select(IikoSettings)).first()
+    settings = await asyncio.to_thread(lambda: db.exec(select(IikoSettings)).first())
     rows = await iiko_service.get_custom_olap_report(
         "SALES",
         ["Customer.Name", "Customer.Phone"],
@@ -247,7 +253,7 @@ async def get_orders_olap_report(
     db: Session = Depends(get_session),
 ):
     df, dt = _get_period_dates(period, date_from, date_to)
-    settings = db.exec(select(IikoSettings)).first()
+    settings = await asyncio.to_thread(lambda: db.exec(select(IikoSettings)).first())
     rows = await iiko_service.get_custom_olap_report(
         "SALES",
         ["OrderNum", "OpenTime", "Customer.Name", "Delivery.Courier"],
@@ -265,7 +271,7 @@ async def get_payments_report(
     db: Session = Depends(get_session),
 ):
     df, dt = _get_period_dates(period, date_from, date_to)
-    settings = db.exec(select(IikoSettings)).first()
+    settings = await asyncio.to_thread(lambda: db.exec(select(IikoSettings)).first())
     rows = await iiko_service.get_custom_olap_report(
         "SALES",
         ["PayTypes"],

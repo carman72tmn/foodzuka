@@ -43,7 +43,7 @@ router = APIRouter(prefix="/iiko", tags=["iiko Integration"])
 # =============================================================================
 
 @router.get("/settings", response_model=IikoSettingsResponse)
-async def get_settings(session: Session = Depends(get_session)):
+def get_settings(session: Session = Depends(get_session)):
     """Получить текущие настройки iiko"""
     settings = session.exec(select(IikoSettings)).first()
     if not settings:
@@ -52,7 +52,7 @@ async def get_settings(session: Session = Depends(get_session)):
 
 
 @router.post("/settings", response_model=IikoSettingsResponse)
-async def save_settings(
+def save_settings(
     data: IikoSettingsCreate,
     background_tasks: BackgroundTasks,
     session: Session = Depends(get_session)
@@ -113,7 +113,7 @@ async def save_settings(
 # =============================================================================
 
 @router.post("/settings/resto")
-async def save_resto_settings(
+def save_resto_settings(
     data: Dict[str, Any],
     session: Session = Depends(get_session)
 ):
@@ -322,7 +322,7 @@ async def get_terminal_groups(session: Session = Depends(get_session)):
 
 
 @router.get("/payment-types")
-async def get_payment_types(session: Session = Depends(get_session)):
+def get_payment_types(session: Session = Depends(get_session)):
     """Получить типы оплаты из локальной БД"""
     types = session.exec(select(PaymentType).where(PaymentType.is_active == True)).all()
     return [{
@@ -335,7 +335,7 @@ async def get_payment_types(session: Session = Depends(get_session)):
 
 
 @router.post("/save-payment-types-mapping")
-async def save_payment_types_mapping(data: List[Dict[str, Any]], session: Session = Depends(get_session)):
+def save_payment_types_mapping(data: List[Dict[str, Any]], session: Session = Depends(get_session)):
     """Сохранить сопоставление типов оплаты"""
     try:
         logger.info(f"Получен запрос на сохранение маппинга для {len(data)} типов оплаты")
@@ -474,7 +474,7 @@ async def sync_payment_types(session: Session = Depends(get_session)):
 
 
 @router.post("/save-delivery-zones")
-async def save_delivery_zones(data: List[Dict[str, Any]], session: Session = Depends(get_session)):
+def save_delivery_zones(data: List[Dict[str, Any]], session: Session = Depends(get_session)):
     """Сохранить параметры зон доставки"""
     logger.info(f"Получен запрос на сохранение {len(data)} зон доставки")
     try:
@@ -619,7 +619,7 @@ def _decode_kml(content: bytes) -> str:
 
 
 @router.get("/delivery-zones")
-async def get_delivery_zones(session: Session = Depends(get_session)):
+def get_delivery_zones(session: Session = Depends(get_session)):
     """Получить список зон доставки из локальной БД"""
     zones = session.exec(select(DeliveryZone)).all()
     return [
@@ -666,7 +666,7 @@ async def sync_vk_loyalty(session: Session = Depends(get_session)):
 # =============================================================================
 
 @router.get("/sync-logs", response_model=List[SyncLogResponse])
-async def get_sync_logs(
+def get_sync_logs(
     limit: int = 50,
     sync_type: str = None,
     session: Session = Depends(get_session)
@@ -908,7 +908,7 @@ async def sync_webhook_token(
 
 
 @router.get("/webhooks/logs", response_model=List[IikoWebhookEventResponse])
-async def get_webhook_logs(
+def get_webhook_logs(
     limit: int = 50,
     session: Session = Depends(get_session)
 ):

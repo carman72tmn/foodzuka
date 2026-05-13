@@ -25,7 +25,7 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/customers", tags=["Customers"])
 
 @router.get("/", response_model=CustomerPaginationResponse)
-async def get_customers(
+def get_customers(
     page: int = Query(1, ge=1),
     limit: int = Query(20, ge=1, le=100000),
     search: Optional[str] = None,
@@ -87,7 +87,7 @@ async def get_customers(
     }
 
 @router.get("/categories-list")
-async def get_categories_list(session: Session = Depends(get_session)):
+def get_categories_list(session: Session = Depends(get_session)):
     """Получить список всех уникальных категорий из БД"""
     # Получаем все непустые loyalty_categories
     results = session.exec(
@@ -126,7 +126,7 @@ async def get_all_iiko_categories():
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.get("/{customer_id}", response_model=CustomerResponse)
-async def get_customer(customer_id: int, session: Session = Depends(get_session)):
+def get_customer(customer_id: int, session: Session = Depends(get_session)):
     """Детали одного клиента (и запуск фонового обновления)"""
     customer = session.get(Customer, customer_id)
     if not customer:
@@ -137,11 +137,62 @@ async def get_customer(customer_id: int, session: Session = Depends(get_session)
         sync_single_customer_task.delay(customer.phone)
     except Exception as e:
         logger.warning(f"Failed to trigger auto-sync for customer {customer.phone}: {e}")
+    
+    # [FIX] Если поле addresses пустое, наполняем его из истории (для фронтенда)
+    if not customer.addresses:
+        try:
+            addr_list = []
+            if customer.addresses_history:
+                addr_list = [a.address for a in customer.addresses_history if a.address]
+            elif customer.guest_addresses:
+                addr_list = [a.address for a in customer.guest_addresses if a.address]
+            
+            if addr_list:
+                # Убираем дубликаты сохраняя порядок
+                seen = set()
+                unique_addrs = [x for x in addr_list if not (x in seen or seen.add(x))]
+                customer.addresses = json.dumps(unique_addrs, ensure_ascii=False)
+                # Мы не коммитим это в БД здесь, чтобы не замедлять GET запрос, 
+                # но возвращаем наполненный объект фронтенду.
+        except Exception as e:
+            logger.error(f"Error auto-populating addresses for customer {customer_id}: {e}")
+
+    return customer
+    
+@router.get("/by-phone/{phone}", response_model=CustomerResponse)
+async def get_customer_by_phone(phone: str, session: Session = Depends(get_session)):
+    """Получить данные клиента по номеру телефона (с нормализацией)"""
+    normalized = normalize_phone(phone)
+    customer = session.exec(select(Customer).where(Customer.phone == normalized)).first()
+    if not customer:
+        # Если клиент не найден локально, пытаемся синхронизировать его из iiko
+        from app.services.iiko_sync_service import iiko_sync_service
+        try:
+            # Используем нормализованный телефон или исходный
+            search_phone = normalized if normalized else phone
+            await iiko_sync_service.sync_single_customer(session, search_phone)
+            
+            # Повторный поиск после синхронизации
+            customer = session.exec(select(Customer).where(Customer.phone == search_phone)).first()
+            if not customer and normalized:
+                # Если нормализация iiko отличается от нашей, пробуем поискать еще раз
+                customer = session.exec(select(Customer).where(Customer.phone == search_phone)).first()
+        except Exception as e:
+            logger.warning(f"Auto-sync failed for phone {phone} during lookup: {e}")
+
+    if not customer:
+        raise HTTPException(status_code=404, detail="Customer not found")
+        
+    # Запускаем фоновую синхронизацию для актуализации данных
+    try:
+        sync_single_customer_task.delay(customer.phone)
+    except Exception as e:
+        logger.warning(f"Failed to trigger auto-sync for customer {customer.phone}: {e}")
         
     return customer
 
 @router.post("/", response_model=CustomerResponse, status_code=status.HTTP_201_CREATED)
-async def create_customer(
+def create_customer(
     customer_data: CustomerCreate,
     session: Session = Depends(get_session)
 ):
@@ -161,7 +212,7 @@ async def create_customer(
 
 @router.put("/{customer_id}", response_model=CustomerResponse)
 @router.patch("/{customer_id}", response_model=CustomerResponse)
-async def update_customer(
+def update_customer(
     customer_id: int,
     customer_data: CustomerUpdate,
     session: Session = Depends(get_session)
@@ -277,7 +328,7 @@ async def sync_customer(customer_id: int, session: Session = Depends(get_session
         raise HTTPException(status_code=500, detail=f"Sync failed: {str(e)}")
 
 @router.post("/{customer_id}/full-sync")
-async def full_sync_customer(customer_id: int, session: Session = Depends(get_session)):
+def full_sync_customer(customer_id: int, session: Session = Depends(get_session)):
     """Запуск полной фоновой синхронизации (профиль + OLAP + история) через Celery"""
     customer = session.get(Customer, customer_id)
     if not customer:
@@ -313,7 +364,7 @@ async def get_customer_bonus_history(
         raise HTTPException(status_code=500, detail=f"Failed to fetch bonus history: {str(e)}")
 
 @router.get("/{customer_id}/local-bonus-history")
-async def get_local_bonus_history(
+def get_local_bonus_history(
     customer_id: int,
     session: Session = Depends(get_session)
 ):
@@ -331,7 +382,7 @@ async def get_local_bonus_history(
 
 
 @router.get("/{customer_id}/local-addresses")
-async def get_local_addresses(
+def get_local_addresses(
     customer_id: int,
     session: Session = Depends(get_session)
 ):
@@ -344,7 +395,7 @@ async def get_local_addresses(
     return {"addresses": addresses}
 
 @router.get("/{customer_id}/local-phones")
-async def get_local_phones(
+def get_local_phones(
     customer_id: int,
     session: Session = Depends(get_session)
 ):
@@ -357,7 +408,7 @@ async def get_local_phones(
     return {"phones": phones}
 
 @router.post("/{customer_id}/local-phones")
-async def add_local_phone(
+def add_local_phone(
     customer_id: int,
     phone_data: Dict[str, str],
     session: Session = Depends(get_session)
@@ -394,7 +445,7 @@ async def add_local_phone(
     return {"status": "success", "phone": new_phone}
 
 @router.delete("/{customer_id}/local-phones/{phone_id}")
-async def delete_local_phone(
+def delete_local_phone(
     customer_id: int,
     phone_id: int,
     session: Session = Depends(get_session)
@@ -409,7 +460,7 @@ async def delete_local_phone(
     return {"status": "success"}
 
 @router.post("/import")
-async def import_customers(
+def import_customers(
     file: UploadFile = File(...),
     session: Session = Depends(get_session)
 ):
@@ -479,7 +530,7 @@ async def import_customers(
         raise HTTPException(status_code=500, detail=f"Внутренняя ошибка сервера при импорте: {str(e)}")
 
 @router.post("/sync-all")
-async def sync_all_customers(
+def sync_all_customers(
     force_update: bool = Query(False, description="Принудительно обновить данные существующих клиентов"),
     session: Session = Depends(get_session)
 ):
@@ -516,7 +567,7 @@ async def sync_all_customers(
 
 
 @router.get("/sync-status/{sync_id}")
-async def get_sync_status(sync_id: int, session: Session = Depends(get_session)):
+def get_sync_status(sync_id: int, session: Session = Depends(get_session)):
     """Получение прогресса синхронизации"""
     status = session.get(SyncStatus, sync_id)
     if not status:
@@ -524,7 +575,7 @@ async def get_sync_status(sync_id: int, session: Session = Depends(get_session))
     return status
 
 @router.get("/sync-latest")
-async def get_latest_sync_status(session: Session = Depends(get_session)):
+def get_latest_sync_status(session: Session = Depends(get_session)):
     """Получение статуса последней запущенной синхронизации"""
     status = session.exec(
         select(SyncStatus).where(SyncStatus.sync_type == "customers").order_by(SyncStatus.updated_at.desc())
@@ -600,6 +651,7 @@ async def update_customer_in_iiko(
         is_high_risk_val = bool(is_high_risk)
         iiko_payload["shouldBeCheckedForRisk"] = is_high_risk_val
         iiko_payload["isHighRisk"] = is_high_risk_val
+        iiko_payload["checkedForRisk"] = is_high_risk_val
             
         # Удаляем None и пустые значения
         iiko_payload = {k: v for k, v in iiko_payload.items() if v is not None and str(v).strip() != ""}
@@ -612,7 +664,7 @@ async def update_customer_in_iiko(
         res_id = result.get("id") or result.get("customer", {}).get("id")
         
         if res_id:
-            # Обновляем локально
+            # 1. Сначала обновляем локально основные данные
             for key, value in customer_data.items():
                 if hasattr(customer, key):
                     setattr(customer, key, value)
@@ -621,8 +673,52 @@ async def update_customer_in_iiko(
             session.add(customer)
             session.commit()
             session.refresh(customer)
-            
-            # Запускаем фоновую синхронизацию для обновления всех полей из iiko
+
+            # 2. Логика автоматической генерации карты лояльности
+            try:
+                # Получаем полную информацию о клиенте из iiko, чтобы проверить карты и дату регистрации
+                iiko_info = await iiko_service.get_customer_info(customer_id=res_id)
+                
+                # Условия: есть id, есть карты (проверяем на пустоту)
+                # По спецификации iiko дата регистрации может не приходить в явном виде, 
+                # поэтому ориентируемся на наличие id и отсутствие карт.
+                cards = iiko_info.get("cards", [])
+                
+                if not cards:
+                    logger.info(f"Customer {customer.phone} has no loyalty cards in iiko. Generating a new one...")
+                    
+                    # Генерация номера карты по маске: 72 + последние 10 цифр телефона
+                    clean_phone = ''.join(filter(str.isdigit, customer.phone))
+                    if len(clean_phone) >= 10:
+                        last_10 = clean_phone[-10:]
+                        new_card_number = f"72{last_10}"
+                        
+                        logger.info(f"Assigning new card {new_card_number} to customer {customer.phone}")
+                        
+                        # Отправляем запрос на добавление карты
+                        card_payload = {
+                            "organizationId": iiko_payload.get("organizationId"),
+                            "id": res_id,
+                            "phone": customer.phone,
+                            "cardNumber": new_card_number,
+                            "cardTrack": new_card_number
+                        }
+                        
+                        card_res = await iiko_service.create_or_update_customer(card_payload)
+                        if card_res.get("id") or card_res.get("customer", {}).get("id"):
+                            logger.info(f"Successfully assigned card {new_card_number} to customer {customer.phone}")
+                            customer.card_number = new_card_number
+                            session.add(customer)
+                            session.commit()
+                        else:
+                            logger.warning(f"Failed to assign card to customer {customer.phone}: {card_res}")
+                    else:
+                        logger.warning(f"Phone number {customer.phone} is too short to generate card number")
+
+            except Exception as e:
+                logger.error(f"Error during automatic card generation for {customer.phone}: {str(e)}")
+
+            # 3. Запускаем фоновую синхронизацию для обновления всех остальных полей из iiko
             try:
                 sync_single_customer_task.delay(customer.phone)
             except Exception as e:
@@ -634,7 +730,7 @@ async def update_customer_in_iiko(
         raise HTTPException(status_code=500, detail=f"iiko update failed: {str(e)}")
 
 @router.get("/{customer_id}/vk-account")
-async def get_customer_vk_account(customer_id: int, session: Session = Depends(get_session)):
+def get_customer_vk_account(customer_id: int, session: Session = Depends(get_session)):
     """Получение связанного VK аккаунта клиента"""
     customer = session.get(Customer, customer_id)
     if not customer:
@@ -647,7 +743,7 @@ async def get_customer_vk_account(customer_id: int, session: Session = Depends(g
     return vk_account
 
 @router.post("/{customer_id}/vk-link")
-async def link_customer_vk(
+def link_customer_vk(
     customer_id: int, 
     vk_user_id: int, 
     session: Session = Depends(get_session)

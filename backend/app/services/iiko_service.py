@@ -84,7 +84,7 @@ class IikoService:
     # Настройки и БД
     # =========================================================================
 
-    def _get_settings_by_org_id(self, organization_id: str) -> Optional[IikoSettings]:
+    async def _get_settings_by_org_id(self, organization_id: str) -> Optional[IikoSettings]:
         """
         Получение настроек API из БД по organization_id с использованием кэширования.
         """
@@ -112,7 +112,7 @@ class IikoService:
                     return None
 
             # Выполняем синхронный запрос в отдельном потоке
-            settings_obj = _fetch()
+            settings_obj = await asyncio.to_thread(_fetch)
             
             if settings_obj:
                 self._org_settings_cache[organization_id] = settings_obj
@@ -253,7 +253,7 @@ class IikoService:
         # Пытаемся получить актуальный api_login из БД если передана организация
         current_api_login = api_login
         if organization_id and not current_api_login:
-            db_settings = self._get_settings_by_org_id(organization_id)
+            db_settings = await self._get_settings_by_org_id(organization_id)
             if db_settings and db_settings.api_login:
                 current_api_login = db_settings.api_login
                 
@@ -1511,23 +1511,31 @@ class IikoService:
 
     async def get_customer_info(
         self,
-        phone: str,
+        phone: Optional[str] = None,
+        customer_id: Optional[str] = None,
         api_login: Optional[str] = None,
         organization_id: Optional[str] = None
     ) -> Dict[str, Any]:
-        """Получение информации о клиенте по номеру телефона (iiko Card)"""
+        """Получение информации о клиенте по номеру телефона или ID (iiko Card)"""
         org_id = organization_id or self.organization_id
-        if phone and not phone.startswith('+'):
-            phone = f"+{phone}"
+        
+        payload = {"organizationId": org_id}
+        
+        if customer_id:
+            payload["type"] = "id"
+            payload["id"] = customer_id
+        elif phone:
+            if not phone.startswith('+'):
+                phone = f"+{phone}"
+            payload["type"] = "phone"
+            payload["phone"] = phone
+        else:
+            raise ValueError("Either phone or customer_id must be provided")
             
         try:
             return await self._request(
                 "POST", "/api/1/loyalty/iiko/customer/info", 
-                {
-                    "organizationId": org_id,
-                    "type": "phone",
-                    "phone": phone
-                },
+                payload,
                 api_login=api_login,
                 organization_id=org_id,
                 log_error=False  # Не логируем 400 ошибки как ERROR здесь
@@ -2485,17 +2493,11 @@ class IikoService:
                 else:
                     raise e
             
-            if raw_response:
-                return response
-                
             # Парсинг ответа v2/v1
             data_rows = self._parse_olap_response(response)
             
             logger.info(f"Resto OLAP parsed rows count: {len(data_rows)}")
             
-            if raw_response:
-                return data_rows
-                
             if data_rows:
                 result = []
                 for row_dict in data_rows:
@@ -2564,7 +2566,6 @@ class IikoService:
                         # Используем DishDiscountSumInt для выручки (Net Revenue)
                         rev = float(row.get("DishDiscountSumInt", row.get("fullSum", 0)))
                         disc = float(row.get("DiscountSum", 0))
-                        
                         if date_str not in result:
                             result[date_str] = {"revenue": 0.0, "discounts": 0.0}
                         
@@ -2686,94 +2687,91 @@ class IikoService:
             else:
                 base_url = f"{base_url}/resto/api"
         
-            # 1. Получаем токен (с ретри на 403 "no connections")
-            max_retries = 2
-            token = None
-            for attempt in range(max_retries):
-                # Добавляем небольшую задержку перед запросом, чтобы не спамить API
-                await asyncio.sleep(0.5)
-                async with httpx.AsyncClient(verify=False, timeout=timeout) as client:
-                    auth_url = f"{base_url}/auth"
-                    password_sha1 = hashlib.sha1(password.encode()).hexdigest()
-                    auth_params = {"login": login, "pass": password_sha1}
-                    
-                    logger.info(f"Resto Auth attempt (SHA-1) {attempt+1}/{max_retries} for {login}")
-                    auth_response = await client.get(auth_url, params=auth_params)
-                    
-                    if auth_response.status_code == 403 and "no connections" in auth_response.text:
-                        if attempt < max_retries - 1:
-                            wait_time = (attempt + 1) * 2
-                            logger.warning(f"Resto API limit reached (403). Retrying in {wait_time}s...")
-                            await asyncio.sleep(wait_time)
-                            continue
-                    
-                    if auth_response.status_code != 200:
-                        # Fallback for older versions
-                        auth_response = await client.get(auth_url, params={"login": login, "pass": password})
-                    
-                    if auth_response.status_code == 200:
-                        token = auth_response.text.strip().replace('"', '')
-                        break
-                    elif attempt == max_retries - 1:
-                        if log_error:
-                            logger.error(f"Resto Auth failed: {auth_response.status_code} | {auth_response.text}")
-                        raise HTTPException(status_code=401, detail=f"Ошибка авторизации Resto: {auth_response.text}")
+        # 1. Получаем токен (с ретри на 403 "no connections")
+        max_retries = 2
+        token = None
+        client = self.insecure_client
+        
+        for attempt in range(max_retries):
+            # Добавляем небольшую задержку перед запросом, чтобы не спамить API
+            await asyncio.sleep(0.5)
+            auth_url = f"{base_url}/auth"
+            password_sha1 = hashlib.sha1(password.encode()).hexdigest()
+            auth_params = {"login": login, "pass": password_sha1}
+            
+            logger.info(f"Resto Auth attempt (SHA-1) {attempt+1}/{max_retries} for {login}")
+            auth_response = await client.get(auth_url, params=auth_params)
+            
+            if auth_response.status_code == 403 and "no connections" in auth_response.text:
+                if attempt < max_retries - 1:
+                    wait_time = (attempt + 1) * 2
+                    logger.warning(f"Resto API limit reached (403). Retrying in {wait_time}s...")
+                    await asyncio.sleep(wait_time)
+                    continue
+            
+            if auth_response.status_code != 200:
+                # Fallback for older versions
+                auth_response = await client.get(auth_url, params={"login": login, "pass": password})
+            
+            if auth_response.status_code == 200:
+                token = auth_response.text.strip().replace('"', '')
+                break
+            elif attempt == max_retries - 1:
+                if log_error:
+                    logger.error(f"Resto Auth failed: {auth_response.status_code} | {auth_response.text}")
+                raise HTTPException(status_code=401, detail=f"Ошибка авторизации Resto: {auth_response.text}")
 
-            # 2. Выполняем основной запрос
-            async with httpx.AsyncClient(verify=False, timeout=timeout) as client:
-                request_url = f"{base_url}{endpoint}"
-                
-                # Подготовка параметров
-                final_params = {}
-                if isinstance(params, dict):
-                    final_params = params.copy()
-                elif isinstance(params, list):
-                    # Если передан список (например для дублирующихся ключей), превращаем в dict если можно
-                    # Но iiko часто требует дублирующиеся ключи (groupRow), так что лучше оставить как есть
-                    # httpx поддерживает список кортежей
-                    final_params = params.copy()
-                
-                if isinstance(final_params, dict):
-                    final_params["key"] = token
-                else:
-                    final_params.append(("key", token))
-                
-                logger.info(f"Resto Request: {method} {request_url}")
-                response = await client.request(method, request_url, params=final_params, json=json_data)
-                
-                # 3. Разлогиниваемся (ОБЯЗАТЕЛЬНО, чтобы не занимать лицензию Resto API)
-                try:
-                    logout_url = f"{base_url}/logout"
-                    await client.get(logout_url, params={"key": token})
-                    logger.debug(f"Resto Session {token[:8]}... logged out successfully")
-                except Exception as le:
-                    logger.warning(f"Failed to logout from Resto: {le}")
+        # 2. Выполняем основной запрос
+        request_url = f"{base_url}{endpoint}"
+        
+        # Подготовка параметров
+        final_params = {}
+        if isinstance(params, dict):
+            final_params = params.copy()
+        elif isinstance(params, list):
+            final_params = params.copy()
+        
+        if isinstance(final_params, dict):
+            final_params["key"] = token
+        else:
+            final_params.append(("key", token))
+        
+        logger.info(f"Resto Request: {method} {request_url}")
+        response = await client.request(method, request_url, params=final_params, json=json_data)
+            
+        # 3. Разлогиниваемся (ОБЯЗАТЕЛЬНО, чтобы не занимать лицензию Resto API)
+        try:
+            logout_url = f"{base_url}/logout"
+            await client.get(logout_url, params={"key": token})
+            logger.debug(f"Resto Session {token[:8]}... logged out successfully")
+        except Exception as le:
+            logger.warning(f"Failed to logout from Resto: {le}")
 
-                if response.status_code >= 400:
-                    # Специальная обработка для ошибки лицензии iiko Resto
-                    if response.status_code == 403 and "module REST_API" in response.text:
-                        logger.error(f"ОШИБКА ЛИЦЕНЗИИ IIKO: Модуль REST API не активен на сервере iiko. Требуется активация лицензии. Ответ сервера: {response.text}")
-                        raise HTTPException(
-                            status_code=403, 
-                            detail="Ошибка iiko: Отсутствует лицензия на модуль 'iiko Server API' (REST_API). Пожалуйста, обратитесь в поддержку iiko для активации."
-                        )
-                    
-                    if log_error:
-                        # Логируем как ошибку только если это не подавленный запрос (например, не перебор вариантов)
-                        logger.error(f"iiko Resto error {response.status_code}: {response.text} | URL: {endpoint}")
-                    elif response.status_code != 400:
-                        # Для 400 при подавленном логе пишем только в debug, так как это штатный перебор полей
-                        logger.debug(f"iiko Resto suppressed 400 error: {response.text}")
-                    
-                    response.raise_for_status()
+        if response.status_code >= 400:
+            # Специальная обработка для ошибки лицензии iiko Resto
+            if response.status_code == 403 and "module REST_API" in response.text:
+                logger.error(f"ОШИБКА ЛИЦЕНЗИИ IIKO: Модуль REST API не активен на сервере iiko. Требуется активация лицензии. Ответ сервера: {response.text}")
+                raise HTTPException(
+                    status_code=403, 
+                    detail="Ошибка iiko: Отсутствует лицензия на модуль 'iiko Server API' (REST_API). Пожалуйста, обратитесь в поддержку iiko для активации."
+                )
+            
+            if log_error:
+                # Логируем как ошибку только если это не подавленный запрос (например, не перебор вариантов)
+                logger.error(f"iiko Resto error {response.status_code}: {response.text} | URL: {endpoint}")
+            elif response.status_code != 400:
+                # Для 400 при подавленном логе пишем только в debug, так как это штатный перебор полей
+                logger.debug(f"iiko Resto suppressed 400 error: {response.text}")
+            
+            response.raise_for_status()
 
-                if response.encoding is None or response.encoding.lower() == 'iso-8859-1':
-                    response.encoding = 'utf-8'
+        if response.encoding is None or response.encoding.lower() == 'iso-8859-1':
+            response.encoding = 'utf-8'
 
-                try:
-                    return response.json()
-                except Exception:
-                    return response.text
+        try:
+            return response.json()
+        except Exception:
+            return response.text
 
     async def get_resto_employees(
         self,

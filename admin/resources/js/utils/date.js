@@ -92,3 +92,18 @@ export const formatDateTime = (val, options = {}) => {
     return val
   }
 }
+
+export const isLongTimeAgo = (val, months = 7) => {
+  if (!val || val === '-') return false
+
+  try {
+    const date = new Date(parseAsUTC(val))
+    const now = new Date()
+    
+    const diffMonths = (now.getFullYear() - date.getFullYear()) * 12 + (now.getMonth() - date.getMonth())
+    
+    return diffMonths >= months
+  } catch (e) {
+    return false
+  }
+}

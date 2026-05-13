@@ -25,7 +25,7 @@ class VkLogResponse(BaseModel):
     created_at: Any
 
 @router.get("/settings", response_model=VkSettingsSchema)
-async def get_vk_settings(db: Session = Depends(get_session)):
+def get_vk_settings(db: Session = Depends(get_session)):
     result = db.execute(select(VkSettings))
     settings_db = result.scalars().first()
     if not settings_db:
@@ -33,7 +33,7 @@ async def get_vk_settings(db: Session = Depends(get_session)):
     return settings_db
 
 @router.post("/settings", response_model=VkSettingsSchema)
-async def save_vk_settings(data: VkSettingsSchema, db: Session = Depends(get_session)):
+def save_vk_settings(data: VkSettingsSchema, db: Session = Depends(get_session)):
     result = db.execute(select(VkSettings))
     settings_db = result.scalars().first()
     
@@ -118,7 +118,7 @@ async def vk_webhook(request: Request, db: Session = Depends(get_session)):
     return Response(content="ok", media_type="text/plain")
 
 @router.get("/logs", response_model=List[VkLogResponse])
-async def get_vk_logs(limit: int = 50, db: Session = Depends(get_session)):
+def get_vk_logs(limit: int = 50, db: Session = Depends(get_session)):
     """Получение последних событий VK"""
     result = db.execute(
         select(VkWebhookLog).order_by(VkWebhookLog.created_at.desc()).limit(limit)

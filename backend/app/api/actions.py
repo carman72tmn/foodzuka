@@ -11,7 +11,7 @@ from app.schemas import ActionCreate, ActionUpdate, ActionResponse
 router = APIRouter(prefix="/actions", tags=["Actions"])
 
 @router.get("/", response_model=List[ActionResponse])
-async def get_actions(
+def get_actions(
     skip: int = 0,
     limit: int = 100,
     is_active: Optional[bool] = None,
@@ -27,7 +27,7 @@ async def get_actions(
     return actions
 
 @router.get("/{action_id}", response_model=ActionResponse)
-async def get_action(action_id: int, session: Session = Depends(get_session)):
+def get_action(action_id: int, session: Session = Depends(get_session)):
     """Детали акции"""
     action = session.get(Action, action_id)
     if not action:
@@ -35,7 +35,7 @@ async def get_action(action_id: int, session: Session = Depends(get_session)):
     return action
 
 @router.post("/", response_model=ActionResponse, status_code=status.HTTP_201_CREATED)
-async def create_action(
+def create_action(
     action_data: ActionCreate,
     session: Session = Depends(get_session)
 ):
@@ -47,7 +47,7 @@ async def create_action(
     return action
 
 @router.patch("/{action_id}", response_model=ActionResponse)
-async def update_action(
+def update_action(
     action_id: int,
     action_data: ActionUpdate,
     session: Session = Depends(get_session)
@@ -67,7 +67,7 @@ async def update_action(
     return action
 
 @router.delete("/{action_id}", status_code=status.HTTP_204_NO_CONTENT)
-async def delete_action(action_id: int, session: Session = Depends(get_session)):
+def delete_action(action_id: int, session: Session = Depends(get_session)):
     """Удаление акции"""
     action = session.get(Action, action_id)
     if not action:

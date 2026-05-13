@@ -1,3 +1,5 @@
+import { h } from 'vue'
+import { Icon } from '@iconify/vue'
 import checkboxChecked from '@images/svg/checkbox-checked.svg'
 import checkboxIndeterminate from '@images/svg/checkbox-indeterminate.svg'
 import checkboxUnchecked from '@images/svg/checkbox-unchecked.svg'
@@ -49,22 +51,30 @@ const aliases = {
 
 export const iconify = {
   component: props => {
-    // Load custom SVG directly instead of going through icon component
-    if (typeof props.icon === 'string') {
+    let iconName = props.icon
+
+    // Normalize icon name for Iconify API
+    // mdi-cog -> mdi:cog, ri-tools-line -> ri:tools-line, bx-home -> bx:home
+    if (typeof iconName === 'string') {
+      const parts = iconName.split('-')
+      if (parts.length > 1) {
+        const prefix = parts[0]
+        const knownPrefixes = ['mdi', 'ri', 'bx', 'bxl', 'bxs', 'fa', 'line-md', 'tabler']
+        if (knownPrefixes.includes(prefix)) {
+          // Join the rest with hyphen
+          iconName = `${prefix}:${parts.slice(1).join('-')}`
+        }
+      }
+      
+      // Load custom SVG directly
       const iconComponent = customIcons[props.icon]
       if (iconComponent)
         return h(iconComponent)
     }
-    
-    return h(props.tag, {
+
+    return h(Icon, {
       ...props,
-
-      // As we are using class based icons
-      class: [props.icon],
-
-      // Remove used props from DOM rendering
-      tag: undefined,
-      icon: undefined,
+      icon: iconName,
     })
   },
 }
