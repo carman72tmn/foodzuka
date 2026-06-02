@@ -1,10 +1,15 @@
 from typing import Any, List, Optional
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlmodel import Session, select
+from sqlalchemy.orm import selectinload
 from app.api import deps
 from app.models.user import User
 from app.models.role import Role, Permission
-from app.schemas.user import UserRead, UserCreate, UserUpdate, RoleRead, PermissionRead
+from app.models.employee import Employee
+from app.schemas.user import (
+    UserRead, UserCreate, UserUpdate, 
+    RoleRead, PermissionRead, RoleCreate, RoleUpdate, RolePermissionUpdate
+)
 from app.core.security import get_password_hash
 
 router = APIRouter(prefix="/users", tags=["users"])
@@ -23,11 +28,27 @@ def read_users(
     db: Session = Depends(deps.get_db),
     skip: int = 0,
     limit: int = 100,
-    current_user: User = Depends(deps.get_current_active_superuser),
+    current_user: User = Depends(deps.require_permission("users_manage")),
 ) -> Any:
     """Получение списка всех пользователей (только для админа)"""
-    users = db.exec(select(User).offset(skip).limit(limit)).all()
+    users = db.exec(
+        select(User)
+        .options(selectinload(User.employee), selectinload(User.role))
+        .offset(skip)
+        .limit(limit)
+    ).all()
     return users
+
+
+@router.get("/employees")
+def get_linkable_employees(
+    db: Session = Depends(deps.get_db),
+    current_user: User = Depends(deps.require_permission("users_manage")),
+) -> Any:
+    """Список всех сотрудников iiko для привязки к аккаунту"""
+    employees = db.exec(select(Employee).where(Employee.status == "Active").order_by(Employee.name)).all()
+    # Возвращаем в формате, который ожидает фронтенд (data.data)
+    return {"status": "success", "data": employees}
 
 
 @router.post("/", response_model=UserRead)
@@ -35,7 +56,7 @@ def create_user(
     *,
     db: Session = Depends(deps.get_db),
     user_in: UserCreate,
-    current_user: User = Depends(deps.get_current_active_superuser),
+    current_user: User = Depends(deps.require_permission("users_manage")),
 ) -> Any:
     """Создание нового пользователя"""
     user = db.exec(select(User).where(User.username == user_in.username)).first()
@@ -45,14 +66,19 @@ def create_user(
             detail="Пользователь с таким именем уже существует",
         )
     
+    # Создаем объект пользователя из данных схемы
+    user_data = user_in.model_dump()
+    password = user_data.pop("password")
+    
+    # Явно извлекаем поля, чтобы избежать AttributeError если Pydantic ведет себя странно
     db_obj = User(
-        username=user_in.username,
-        email=user_in.email,
-        full_name=user_in.full_name,
-        hashed_password=get_password_hash(user_in.password),
-        is_active=user_in.is_active,
-        role_id=user_in.role_id,
-        iiko_id=user_in.iiko_id,
+        username=user_data.get("username"),
+        email=user_data.get("email"),
+        full_name=user_data.get("full_name"),
+        hashed_password=get_password_hash(password),
+        is_active=user_data.get("is_active", True),
+        role_id=user_data.get("role_id"),
+        iiko_id=user_data.get("iiko_id"),
         is_superuser=False
     )
     db.add(db_obj)
@@ -61,13 +87,14 @@ def create_user(
     return db_obj
 
 
+
 @router.patch("/{user_id}", response_model=UserRead)
 def update_user(
     *,
     db: Session = Depends(deps.get_db),
     user_id: int,
     user_in: UserUpdate,
-    current_user: User = Depends(deps.get_current_active_superuser),
+    current_user: User = Depends(deps.require_permission("users_manage")),
 ) -> Any:
     """Обновление пользователя"""
     user = db.get(User, user_id)
@@ -76,9 +103,8 @@ def update_user(
     
     update_data = user_in.model_dump(exclude_unset=True)
     if "password" in update_data:
-        hashed_password = get_password_hash(update_data["password"])
-        user.hashed_password = hashed_password
-        del update_data["password"]
+        password = update_data.pop("password")
+        user.hashed_password = get_password_hash(password)
     
     for field, value in update_data.items():
         setattr(user, field, value)
@@ -89,12 +115,13 @@ def update_user(
     return user
 
 
-@router.delete("/{user_id}", response_model=UserRead)
+
+@router.delete("/{user_id}")
 def delete_user(
     *,
     db: Session = Depends(deps.get_db),
     user_id: int,
-    current_user: User = Depends(deps.get_current_active_superuser),
+    current_user: User = Depends(deps.require_permission("users_edit")),
 ) -> Any:
     """Удаление пользователя"""
     user = db.get(User, user_id)
@@ -115,16 +142,97 @@ def delete_user(
 @router.get("/roles", response_model=List[RoleRead])
 def read_roles(
     db: Session = Depends(deps.get_db),
-    current_user: User = Depends(deps.get_current_active_superuser),
+    current_user: User = Depends(deps.require_permission("roles_manage")),
 ) -> Any:
-    """Список всех ролей"""
-    return db.exec(select(Role)).all()
+    """Список всех ролей с правами"""
+    return db.exec(select(Role).options(selectinload(Role.permissions))).all()
+
+
+@router.post("/roles", response_model=RoleRead)
+def create_role(
+    *,
+    db: Session = Depends(deps.get_db),
+    role_in: RoleCreate,
+    current_user: User = Depends(deps.require_permission("roles_manage")),
+) -> Any:
+    """Создание новой роли"""
+    db_obj = Role(**role_in.model_dump())
+    db.add(db_obj)
+    db.commit()
+    db.refresh(db_obj)
+    return db_obj
+
+
+@router.patch("/roles/{role_id}", response_model=RoleRead)
+def update_role(
+    *,
+    db: Session = Depends(deps.get_db),
+    role_id: int,
+    role_in: RoleUpdate,
+    current_user: User = Depends(deps.require_permission("roles_manage")),
+) -> Any:
+    """Обновление данных роли"""
+    db_obj = db.get(Role, role_id)
+    if not db_obj:
+        raise HTTPException(status_code=404, detail="Роль не найдена")
+    
+    update_data = role_in.model_dump(exclude_unset=True)
+    for field, value in update_data.items():
+        setattr(db_obj, field, value)
+    
+    db.add(db_obj)
+    db.commit()
+    db.refresh(db_obj)
+    return db_obj
+
+
+@router.delete("/roles/{role_id}", response_model=RoleRead)
+def delete_role(
+    *,
+    db: Session = Depends(deps.get_db),
+    role_id: int,
+    current_user: User = Depends(deps.require_permission("roles_manage")),
+) -> Any:
+    """Удаление роли"""
+    db_obj = db.get(Role, role_id)
+    if not db_obj:
+        raise HTTPException(status_code=404, detail="Роль не найдена")
+    if db_obj.is_system:
+        raise HTTPException(status_code=400, detail="Нельзя удалить системную роль")
+    
+    db.delete(db_obj)
+    db.commit()
+    return db_obj
+
+
+@router.post("/roles/{role_id}/permissions")
+def update_role_permissions(
+    *,
+    db: Session = Depends(deps.get_db),
+    role_id: int,
+    perm_in: RolePermissionUpdate,
+    current_user: User = Depends(deps.require_permission("roles_manage")),
+) -> Any:
+    """Обновление прав для роли"""
+    db_obj = db.get(Role, role_id)
+    if not db_obj:
+        raise HTTPException(status_code=404, detail="Роль не найдена")
+    
+    # Получаем список объектов прав по ID
+    permissions = db.exec(select(Permission).where(Permission.id.in_(perm_in.permission_ids))).all()
+    
+    # Обновляем связи
+    db_obj.permissions = permissions
+    db.add(db_obj)
+    db.commit()
+    
+    return {"status": "success", "message": "Права обновлены"}
 
 
 @router.get("/permissions", response_model=List[PermissionRead])
 def read_permissions(
     db: Session = Depends(deps.get_db),
-    current_user: User = Depends(deps.get_current_active_superuser),
+    current_user: User = Depends(deps.require_permission("roles_manage")),
 ) -> Any:
     """Список всех доступных прав"""
     return db.exec(select(Permission)).all()
@@ -133,7 +241,7 @@ def read_permissions(
 @router.post("/sync-iiko-roles")
 async def sync_iiko_roles(
     db: Session = Depends(deps.get_db),
-    current_user: User = Depends(deps.get_current_active_superuser),
+    current_user: User = Depends(deps.require_permission("roles_manage")),
 ) -> Any:
     """Принудительная синхронизация ролей из iiko"""
     from app.services.iiko_sync_service import iiko_sync_service

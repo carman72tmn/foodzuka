@@ -10,6 +10,11 @@ export default defineComponent({
     const route = useRoute()
     const { mdAndDown } = useDisplay()
 
+    const isNavCollapsed = ref(localStorage.getItem('isNavCollapsed') === 'true')
+    const toggleIsNavCollapsed = () => {
+      isNavCollapsed.value = !isNavCollapsed.value
+      localStorage.setItem('isNavCollapsed', isNavCollapsed.value)
+    }
 
     // ℹ️ This is alternative to below two commented watcher
     // We want to show overlay if overlay nav is visible and want to hide overlay if overlay is hidden and vice versa.
@@ -18,7 +23,11 @@ export default defineComponent({
     return () => {
       // 👉 Vertical nav
       const verticalNav = h(VerticalNav, { isOverlayNavActive: isOverlayNavActive.value, toggleIsOverlayNavActive }, {
-        'nav-header': () => slots['vertical-nav-header']?.({ toggleIsOverlayNavActive }),
+        'nav-header': () => slots['vertical-nav-header']?.({ 
+          toggleIsOverlayNavActive,
+          isNavCollapsed: isNavCollapsed.value,
+          toggleIsNavCollapsed
+        }),
         'before-nav-items': () => slots['before-vertical-nav-items']?.(),
         'default': () => slots['vertical-nav-content']?.(),
         'after-nav-items': () => slots['after-vertical-nav-items']?.(),
@@ -29,6 +38,8 @@ export default defineComponent({
       const navbar = h('header', { class: ['layout-navbar navbar-blur'] }, [
         h('div', { class: 'navbar-content-container' }, slots.navbar?.({
           toggleVerticalOverlayNavActive: toggleIsOverlayNavActive,
+          isNavCollapsed: isNavCollapsed.value,
+          toggleIsNavCollapsed
         })),
       ])
 
@@ -51,6 +62,7 @@ export default defineComponent({
         class: [
           'layout-wrapper layout-nav-type-vertical layout-navbar-static layout-footer-static layout-content-width-fluid',
           mdAndDown.value && 'layout-overlay-nav',
+          isNavCollapsed.value && 'layout-vertical-nav-collapsed',
           route.meta.layoutWrapperClasses,
         ],
       }, [

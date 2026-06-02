@@ -34,6 +34,8 @@ watch(() => route.path, () => {
 const isVerticalNavScrolled = ref(false)
 const updateIsVerticalNavScrolled = val => isVerticalNavScrolled.value = val
 
+const isHovered = ref(false)
+
 const handleNavScroll = evt => {
   isVerticalNavScrolled.value = evt.target.scrollTop > 0
 }
@@ -50,8 +52,11 @@ const handleNavScroll = evt => {
         'visible': isOverlayNavActive,
         'scrolled': isVerticalNavScrolled,
         'overlay-nav': mdAndDown,
+        'hovered': isHovered,
       },
     ]"
+    @mouseenter="isHovered = true"
+    @mouseleave="isHovered = false"
   >
     <!-- 👉 Header -->
     <div class="nav-header">

@@ -2,6 +2,7 @@
 <script setup>
 import { ref, onMounted, watch } from 'vue'
 import { formatDateTime, formatDate, isLongTimeAgo } from '@/utils/date'
+import { getAuthHeaders } from '@/utils/auth'
 import CustomerDetailModal from '@/components/CustomerDetailModal.vue'
 
 const clients = ref([])
@@ -70,7 +71,7 @@ const parseLoyaltyCategories = item => {
 
 const fetchCategories = async () => {
   try {
-    const response = await fetch('/api/v1/customers/categories-list')
+    const response = await fetch('/api/v1/customers/categories-list', { headers: getAuthHeaders() })
     if (response.ok) {
       availableCategories.value = await response.json()
     }
@@ -105,16 +106,14 @@ const fetchClients = async () => {
       params.append('filter_duplicates_uid', 'true')
     }
 
-    const response = await fetch(`/api/v1/customers/?${params.toString()}`)
-    const data = await response.json()
-    console.log('Customers API data:', data)
-
-    if (!data.items) {
-      throw new Error('API response missing items array')
+    const response = await fetch(`/api/v1/customers/?${params.toString()}`, { headers: getAuthHeaders() })
+    if (response.ok) {
+      const data = await response.json()
+      clients.value = data.items.map(c => ({ ...c, syncing: false }))
+      totalClients.value = data.total || 0
+    } else {
+      throw new Error(`API Error: ${response.status}`)
     }
-
-    clients.value = data.items.map(c => ({ ...c, syncing: false }))
-    totalClients.value = data.total || 0
   } catch (error) {
     console.error('Error fetching clients details:', error)
     snackbar.value = {
@@ -758,6 +757,7 @@ onMounted(() => {
     </VCard>
 
     <CustomerDetailModal
+      :key="selectedCustomer?.id || 'empty'"
       v-model="isModalVisible"
       :customer="selectedCustomer"
       @updated="fetchClients"

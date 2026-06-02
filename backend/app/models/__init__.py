@@ -13,6 +13,7 @@ from .sync_log import SyncLog, SyncStatus
 from .system_log import SystemLog
 from .audit_log import AuditLog
 from .loyalty import LoyaltyStatus, LoyaltyRule, LoyaltyTransaction
+from .iiko_loyalty import IikoLoyaltyItem
 from .promo_code import PromoCode
 from .iiko_webhook_event import IikoWebhookEvent
 from .company import Company, Branch, DeliveryZone, CustomPolygon
@@ -20,6 +21,7 @@ from .customer import Customer
 from .action import Action
 from .nps import NpsReview
 from .mailing import Mailing
+from .chat import ChatMessage, ChatReadState
 from .story import Story
 from .funnel import Funnel
 from .olap_revenue import OlapRevenueRecord
@@ -28,9 +30,11 @@ from .vk_user import VkUser
 from .vk_activity import VkActivity
 from .vk_settings import VkSettings
 from .vk_webhook_log import VkWebhookLog
+from .vk_message import VkMessage
 from .bot_settings import BotSettings
 from .payment_type import PaymentType
 from .yandex_settings import YandexSettings
+from .max_settings import MaxSettings, MaxBot
 from .vk_bot import (
     VkBotAccount, 
     VkBotGroup, 
@@ -41,6 +45,7 @@ from .vk_bot import (
     MessageStatus
 )
 from .scheduled_task import ScheduledTask
+from .mailing_cascade import MailingCascade, MailingCascadeStep
 
 __all__ = [
     "User",
@@ -59,11 +64,14 @@ __all__ = [
     "IikoSettings",
     "SyncLog",
     "SyncStatus",
+    "ChatMessage",
+    "ChatReadState",
     "SystemLog",
     "AuditLog",
     "LoyaltyStatus",
     "LoyaltyRule",
     "LoyaltyTransaction",
+    "IikoLoyaltyItem",
     "PromoCode",
     "IikoWebhookEvent",
     "Company",
@@ -95,6 +103,11 @@ __all__ = [
     "DeliveryMode",
     "MessageStatus",
     "ScheduledTask",
+    "VkMessage",
+    "MaxSettings",
+    "MaxBot",
+    "MailingCascade",
+    "MailingCascadeStep",
 ]
 
 # Форсируем инициализацию всех мапперов SQLAlchemy

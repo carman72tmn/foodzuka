@@ -4,8 +4,15 @@ Pydantic схемы для валидации данных API
 from typing import List, Optional, Dict, Any, Union
 from datetime import datetime, date
 from decimal import Decimal
-from pydantic import BaseModel, Field, ConfigDict, model_validator
+from pydantic import BaseModel, Field, ConfigDict, model_validator, field_validator
 from app.models.order import OrderStatus
+from .mailing_cascade import (
+    MailingCascadeCreate, 
+    MailingCascadeUpdate, 
+    MailingCascadeResponse,
+    MailingCascadeStepCreate,
+    MailingCascadeStepResponse
+)
 
 
 # ============= Схемы компаний, филиалов и зон =============
@@ -181,6 +188,13 @@ class CategoryResponse(CategoryBase):
 
     model_config = ConfigDict(from_attributes=True)
 
+    @field_validator('iiko_id', 'iiko_image_id', mode='before')
+    @classmethod
+    def cast_uuid_to_str(cls, v):
+        if v is not None and not isinstance(v, str):
+            return str(v)
+        return v
+
 
 # ============= Схемы товаров =============
 
@@ -193,6 +207,13 @@ class ProductSizeResponse(BaseModel):
     is_default: bool
 
     model_config = ConfigDict(from_attributes=True)
+
+    @field_validator('iiko_id', mode='before')
+    @classmethod
+    def cast_uuid_to_str(cls, v):
+        if v is not None and not isinstance(v, str):
+            return str(v)
+        return v
 
 
 class ProductModifierResponse(BaseModel):
@@ -207,6 +228,13 @@ class ProductModifierResponse(BaseModel):
 
     model_config = ConfigDict(from_attributes=True)
 
+    @field_validator('iiko_id', mode='before')
+    @classmethod
+    def cast_uuid_to_str(cls, v):
+        if v is not None and not isinstance(v, str):
+            return str(v)
+        return v
+
 
 class ProductModifierGroupResponse(BaseModel):
     """Группа модификаторов"""
@@ -219,6 +247,13 @@ class ProductModifierGroupResponse(BaseModel):
     modifiers: List[ProductModifierResponse] = []
 
     model_config = ConfigDict(from_attributes=True)
+
+    @field_validator('iiko_id', mode='before')
+    @classmethod
+    def cast_uuid_to_str(cls, v):
+        if v is not None and not isinstance(v, str):
+            return str(v)
+        return v
 
 
 class ProductBase(BaseModel):
@@ -316,6 +351,13 @@ class ProductResponse(BaseModel):
 
     model_config = ConfigDict(from_attributes=True)
 
+    @field_validator('iiko_id', 'iiko_image_id', mode='before')
+    @classmethod
+    def cast_uuid_to_str(cls, v):
+        if v is not None and not isinstance(v, str):
+            return str(v)
+        return v
+
     @model_validator(mode="after")
     def compute_stop_list(self):
         self.is_on_stop_list = bool(self.stop_list_branch_ids)
@@ -344,6 +386,13 @@ class OrderItemResponse(BaseModel):
     modifiers: Optional[List[Dict[str, Any]]] = []
 
     model_config = ConfigDict(from_attributes=True)
+
+    @field_validator('size_iiko_id', mode='before')
+    @classmethod
+    def cast_uuid_to_str(cls, v):
+        if v is not None and not isinstance(v, str):
+            return str(v)
+        return v
 
 
 class OrderCreate(BaseModel):
@@ -384,6 +433,7 @@ class OrderResponse(BaseModel):
     bonus_spent: Decimal
     total_discount: Decimal
     total_with_discount: Decimal = Decimal("0.00")
+    total_paid: Decimal = Decimal("0.00")
     branch_id: Optional[int] = None
     customer_id: Optional[int] = None
     iiko_order_id: Optional[str] = None
@@ -435,8 +485,19 @@ class OrderResponse(BaseModel):
     customer_info_details: Optional[Dict[str, Any]] = None
     status_history: Optional[List[Dict[str, Any]]] = None
     discounts_details: Optional[Dict[str, Any]] = None
+    payments_details: Optional[Dict[str, Any]] = None
+    left_to_pay: Decimal = Decimal("0.00")
+    change_indicators: Optional[Dict[str, Any]] = None
+    acknowledged: bool = False
 
     model_config = ConfigDict(from_attributes=True)
+
+    @field_validator('iiko_order_id', 'terminal_group_id', mode='before')
+    @classmethod
+    def cast_uuid_to_str(cls, v):
+        if v is not None and not isinstance(v, str):
+            return str(v)
+        return v
 
 
 # ============= Схемы синхронизации с iiko =============
@@ -447,6 +508,7 @@ class IikoSyncResponse(BaseModel):
     categories_synced: int = 0
     products_synced: int = 0
     products_updated: int = 0
+    prices_synced: int = 0
     stopped_count: int = 0
     message: Union[str, None] = None
 
@@ -468,6 +530,8 @@ class SyncLogResponse(BaseModel):
 
 class IikoSettingsCreate(BaseModel):
     """Создание/обновление настроек iiko"""
+    model_config = ConfigDict(extra='ignore')
+    
     api_login: str = Field(max_length=500)
     organization_id: Optional[str] = None
     external_menu_id: Optional[str] = None
@@ -482,6 +546,7 @@ class IikoSettingsCreate(BaseModel):
     no_pass_promo: bool = False
     no_use_bonus: bool = False
     no_use_iiko_promo: bool = False
+    use_v2_menu: bool = False
     fallback_email: Optional[str] = None
     fallback_telegram_id: Optional[str] = None
     webhook_url: Optional[str] = None
@@ -498,6 +563,10 @@ class IikoSettingsCreate(BaseModel):
     manual_timezone: Optional[str] = None
     timezone_name: Optional[str] = None
     delivery_zones_map_url: Optional[str] = None
+    access_token: Optional[str] = None
+    token_expires_at: Optional[datetime] = None
+    bonus_program_ids: List[str] = Field(default_factory=list, description="List of loyalty program IDs")
+
 
 
 class IikoSettingsResponse(IikoSettingsCreate):
@@ -645,6 +714,19 @@ class ActionResponse(ActionBase):
     model_config = ConfigDict(from_attributes=True)
 
 
+class AddressHistoryResponse(BaseModel):
+    id: Optional[int] = None
+    city: Optional[str] = None
+    settlement: Optional[str] = None
+    street: Optional[str] = None
+    house: Optional[str] = None
+    entrance: Optional[str] = None
+    floor: Optional[str] = None
+    apartment: Optional[str] = None
+    doorphone: Optional[str] = None
+    address: str
+    model_config = ConfigDict(from_attributes=True)
+
 class CustomerBase(BaseModel):
     phone: str = Field(max_length=20)
     telegram_id: Optional[int] = None
@@ -652,7 +734,7 @@ class CustomerBase(BaseModel):
     email: Optional[str] = None
     birthday: Optional[datetime] = None
     city: Optional[str] = None
-    addresses: Optional[str] = None
+    addresses: Optional[Union[str, List[AddressHistoryResponse]]] = None
     notes: Optional[str] = None
     is_risk: bool = False
     risk_reason: Optional[str] = None
@@ -692,7 +774,7 @@ class CustomerUpdate(BaseModel):
 
     model_config = ConfigDict(populate_by_name=True)
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+
 import json
 
 class CustomerResponse(CustomerBase):
@@ -706,10 +788,27 @@ class CustomerResponse(CustomerBase):
     iiko_id: Optional[str] = None
     vk_user_id: Optional[int] = None
     last_order_id_iiko: Optional[str] = None
+    
+    # [NEW] Поля расширенной аналитики OLAP
+    first_order_date: Optional[datetime] = None
+    total_discount: Decimal = Decimal("0.0")
+    total_items: float = 0.0
+    average_check: Decimal = Decimal("0.0")
+    frequency_days: float = 0.0
+    days_since_last_order: Optional[int] = None
+    
     total_orders_count: int = 0
     total_orders_amount: float = 0.0
     last_order_date: Optional[datetime] = None
+    first_order_date: Optional[datetime] = None
     registration_date: Optional[datetime] = None
+    last_olap_sync_at: Optional[datetime] = None
+    
+    total_discount: float = 0.0
+    total_items: float = 0.0
+    average_check: float = 0.0
+    frequency_days: float = 0.0
+    days_since_last_order: Optional[int] = None
     
     # Premium Fields
     is_high_risk: bool = False
@@ -755,6 +854,13 @@ class CustomerResponse(CustomerBase):
         return v
 
     model_config = ConfigDict(from_attributes=True)
+
+    @field_validator('iiko_customer_id', 'uid', 'iiko_id', 'last_order_id_iiko', 'last_iiko_order_id', mode='before')
+    @classmethod
+    def cast_uuid_to_str(cls, v):
+        if v is not None and not isinstance(v, str):
+            return str(v)
+        return v
 
 
 class CustomerPaginationResponse(BaseModel):

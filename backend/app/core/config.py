@@ -18,7 +18,8 @@ class Settings(BaseSettings):
     API_RELOAD: bool = False
     SECRET_KEY: str
     ALGORITHM: str = "HS256"
-    ACCESS_TOKEN_EXPIRE_MINUTES: int = 30
+    ACCESS_TOKEN_EXPIRE_MINUTES: int = 43200  # 30 дней по умолчанию
+    ACCESS_TOKEN_EXPIRE_DAYS_REMEMBER: int = 365  # 1 год при выборе "Запомнить меня"
     APP_PUBLIC_URL: Optional[str] = None
 
     # Настройки iiko Cloud API

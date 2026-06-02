@@ -1,5 +1,6 @@
 <script setup>
 import { ref, onMounted, computed } from "vue"
+import { formatDateTime } from "@/utils/date"
 
 const loading = ref(false)
 const logs = ref([])
@@ -44,7 +45,7 @@ const loadLogs = async () => {
 }
 
 const formatDate = dateStr => {
-  return new Date(dateStr).toLocaleString("ru-RU")
+  return formatDateTime(dateStr)
 }
 
 const statusColor = status => {

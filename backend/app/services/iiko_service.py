@@ -10,11 +10,13 @@ import logging
 from typing import Optional, Dict, List, Any
 from datetime import datetime, timedelta, timezone
 import secrets
+import json
 import hashlib
 from sqlmodel import Session, select
 from fastapi import HTTPException
 from app.core.config import settings
 from app.core.database import engine
+from app.core.redis import redis_client
 from app.models.iiko_settings import IikoSettings
 from app.services.yandex_service import yandex_service
 from app.utils.geo_utils import parse_kml
@@ -31,6 +33,8 @@ class IikoService:
         self.organization_id = settings.IIKO_ORGANIZATION_ID
         self.access_token: Optional[str] = None
         self.token_expires_at: Optional[datetime] = None
+        # Кеш токенов для разных логинов (api_login -> (token, expires_at))
+        self._token_cache: Dict[str, tuple[str, datetime]] = {}
         
         # Оптимизация производительности: Пулинг соединений и блокировки
         self._client: Optional[httpx.AsyncClient] = None
@@ -42,12 +46,30 @@ class IikoService:
         self._org_settings_cache: Dict[str, IikoSettings] = {}
         self._cache_ttl = 300  # 5 минут
         self._cache_updated_at: Dict[str, datetime] = {}
+        
+        # Cooling Period для предотвращения 429 (Endpoint -> Timestamp)
+        self._cooling_endpoints: Dict[str, datetime] = {}
+        self._cooling_duration = 120  # 2 минуты тишины при 429
+
+        # Denied Period для предотвращения спама при отсутствии прав (403)
+        self._denied_endpoints: Dict[str, datetime] = {}
+        self._denied_duration = 3600  # 1 час тишины при отсутствии прав
+
+        # Кеш токенов для Resto API (login -> (token, expires_at))
+        self._resto_token_cache: Dict[str, tuple[str, datetime]] = {}
+        self._resto_token_lock = None
 
     def _get_token_lock(self):
         """Ленивая инициализация Lock для предотвращения RuntimeError: no running event loop"""
         if self._token_lock is None:
             self._token_lock = asyncio.Lock()
         return self._token_lock
+
+    def _get_resto_token_lock(self):
+        """Лок для авторизации в Resto API"""
+        if self._resto_token_lock is None:
+            self._resto_token_lock = asyncio.Lock()
+        return self._resto_token_lock
 
     @property
     def client(self) -> httpx.AsyncClient:
@@ -193,20 +215,51 @@ class IikoService:
         login = login.strip()
         now = datetime.now(timezone.utc)
 
-        # 1. Быстрая проверка без блокировки (если токен еще валиден)
-        if not api_login and self.access_token and self.token_expires_at:
-            if now < self.token_expires_at:
-                return self.access_token
+        # 1. Проверка in-memory кеша
+        if login in self._token_cache:
+            token, expires_at = self._token_cache[login]
+            if now < expires_at:
+                # Если это основной логин, также обновляем основные поля для совместимости
+                if not api_login:
+                    self.access_token = token
+                    self.token_expires_at = expires_at
+                return token
 
-        # 2. Если нужен новый токен — используем Lock, чтобы только одна корутина делала запрос
+        # 2. Проверка БД (для синхронизации между процессами/воркерами)
         async with self._get_token_lock():
-            # Повторная проверка внутри блокировки (double-checked locking)
-            if not api_login and self.access_token and self.token_expires_at:
-                if now < self.token_expires_at:
-                    return self.access_token
+            # Повторная проверка кеша внутри блокировки
+            if login in self._token_cache:
+                token, expires_at = self._token_cache[login]
+                if now < expires_at:
+                    return token
 
+            # Ищем настройки в БД по логину
+            try:
+                def _get_db_token():
+                    with Session(engine) as session:
+                        return session.exec(select(IikoSettings).where(IikoSettings.api_login == login)).first()
+                
+                settings_db = await asyncio.to_thread(_get_db_token)
+                if settings_db and settings_db.access_token and settings_db.token_expires_at:
+                    # Принудительно делаем expires_at aware если он naive
+                    db_expires = settings_db.token_expires_at
+                    if db_expires.tzinfo is None:
+                        db_expires = db_expires.replace(tzinfo=timezone.utc)
+                    
+                    if now < db_expires:
+                        # Обновляем in-memory кеш из БД
+                        self._token_cache[login] = (settings_db.access_token, db_expires)
+                        if not api_login:
+                            self.access_token = settings_db.access_token
+                            self.token_expires_at = db_expires
+                        logger.debug(f"Токен для {login[:4]}... восстановлен из БД")
+                        return settings_db.access_token
+            except Exception as e:
+                logger.error(f"Ошибка чтения токена из БД: {e}")
+
+            # 3. Если в БД нет или просрочен — запрашиваем новый
             masked_login = f"{login[:4]}...{login[-4:]}" if login and len(login) > 8 else "НЕКОРРЕКТНО"
-            logger.info(f"Запрос токена доступа iiko для логина: {masked_login}")
+            logger.info(f"Запрос НОВОГО токена iiko для логина: {masked_login}")
 
             try:
                 response = await self.client.post(
@@ -214,16 +267,30 @@ class IikoService:
                     json={"apiLogin": login}
                 )
                 response.raise_for_status()
-                if response.encoding is None or response.encoding.lower() == 'iso-8859-1':
-                    response.encoding = 'utf-8'
                 data = response.json()
-
                 token = data["token"]
+                expires_at = now + timedelta(minutes=14)
                 
-                # Кешируем только если это "глобальный" логин
+                # Сохраняем в кеш и БД
+                self._token_cache[login] = (token, expires_at)
+                
+                try:
+                    def _update_db_token(t, e):
+                        with Session(engine) as session:
+                            s = session.exec(select(IikoSettings).where(IikoSettings.api_login == login)).first()
+                            if s:
+                                s.access_token = t
+                                s.token_expires_at = e
+                                session.add(s)
+                                session.commit()
+                    await asyncio.to_thread(_update_db_token, token, expires_at)
+                except Exception as db_err:
+                    logger.error(f"Не удалось сохранить токен в БД: {db_err}")
+
+                # Обновляем основные поля если это "глобальный" логин
                 if not api_login:
                     self.access_token = token
-                    self.token_expires_at = now + timedelta(minutes=14)
+                    self.token_expires_at = expires_at
 
                 return token
             except httpx.HTTPStatusError as e:
@@ -285,6 +352,26 @@ class IikoService:
 
         logger.debug(f"iiko request: {method} {endpoint} | Payload keys: {list(payload.keys()) if payload else 'None'}")
         
+        # Проверка Cooling Period (если мы недавно получали 429 на этот эндпоинт)
+        now = datetime.now(timezone.utc)
+        if endpoint in self._cooling_endpoints:
+            cooling_until = self._cooling_endpoints[endpoint]
+            if now < cooling_until:
+                wait_left = int((cooling_until - now).total_seconds())
+                logger.warning(f"Endpoint {endpoint} is in Cooling Period. Skipping request. Wait {wait_left}s.")
+                return {"status": "error", "error": "TOO_MANY_REQUESTS_COOLING", "message": f"Пожалуйста, подождите {wait_left} сек. перед повторной попыткой."}
+            else:
+                del self._cooling_endpoints[endpoint]
+
+        # Проверка прав (если мы недавно получали 403 на этот эндпоинт)
+        if endpoint in self._denied_endpoints:
+            denied_until = self._denied_endpoints[endpoint]
+            if now < denied_until:
+                logger.debug(f"Endpoint {endpoint} is in Denied Period. Skipping request.")
+                return {"status": "error", "error": "IIKO_RIGHTS_ERROR", "message": "Доступ к этому ресурсу ограничен в iiko Cloud (кэшировано на 1 час)."}
+            else:
+                del self._denied_endpoints[endpoint]
+
         try:
             response = await self.client.request(
                 method,
@@ -294,24 +381,66 @@ class IikoService:
                 timeout=timeout
             )
             
-            # Обработка 429 (Too Many Requests) - Экспоненциальный бэкхофф
-            if response.status_code == 429 and _retry_count < 3:
-                wait_time = (2 ** _retry_count) * 5 # 5, 10, 20 секунд
-                logger.warning(f"iiko API 429 Too Many Requests for {endpoint}. Waiting {wait_time}s before retry {_retry_count + 1}/3...")
-                await asyncio.sleep(wait_time)
-                return await self._request(
-                    method, endpoint, json_data, timeout, 
-                    current_api_login, organization_id, _is_retry=_is_retry,
-                    _retry_count=_retry_count + 1,
-                    log_error=log_error
-                )
+            # Принудительная установка кодировки UTF-8 для корректной обработки кириллицы
+            if response.encoding is None or response.encoding.lower() == 'iso-8859-1':
+                response.encoding = 'utf-8'
+
+            # Обработка 429 (Too Many Requests) - Экспоненциальный бэкхофф + Cooling Period
+            if response.status_code == 429:
+                # Устанавливаем период охлаждения для этого эндпоинта
+                self._cooling_endpoints[endpoint] = datetime.now(timezone.utc) + timedelta(seconds=self._cooling_duration)
+                
+                if _retry_count < 2: # Уменьшаем кол-во повторов для 429
+                    wait_time = (2 ** _retry_count) * 15 # 15, 30 секунд
+                    logger.warning(f"iiko API 429 Too Many Requests for {endpoint}. Waiting {wait_time}s before retry {_retry_count + 1}/2...")
+                    await asyncio.sleep(wait_time)
+                    return await self._request(
+                        method, endpoint, json_data, timeout, 
+                        current_api_login, organization_id, _is_retry=True,
+                        _retry_count=_retry_count + 1,
+                        log_error=log_error
+                    )
+                else:
+                    logger.error(f"iiko API 429: Max retries reached for {endpoint}. Cooling period started.")
+                    try:
+                        return response.json()
+                    except:
+                        return {"error": "TOO_MANY_REQUESTS"}
 
             # Обработка 401 (Unauthorized) - пробуем обновить токен один раз
             if response.status_code == 401 and not _is_retry:
-                logger.warning(f"iiko API 401 Unauthorized for {endpoint}. Retrying with fresh token...")
+                # Если это заведомо эндпоинт, к которому может не быть доступа (например, смены), логируем тише
+                is_sensitive = any(k in endpoint for k in ["/cashshifts/", "/staff/", "/report/"])
+                if is_sensitive:
+                    logger.debug(f"iiko API 401 Unauthorized for {endpoint}. Retrying with fresh token...")
+                else:
+                    logger.warning(f"iiko API 401 Unauthorized for {endpoint}. Retrying with fresh token...")
+                    
                 async with self._get_token_lock():
-                    self.access_token = None
-                    self.token_expires_at = None
+                    # Очищаем кеш для этого логина, чтобы принудительно получить новый токен
+                    if current_api_login in self._token_cache:
+                        del self._token_cache[current_api_login]
+                    
+                    # КРИТИЧЕСКИ ВАЖНО: Очищаем токен в БД, чтобы _get_access_token не взял его оттуда снова
+                    try:
+                        def _clear_db_token():
+                            from app.core.database import Session, engine
+                            with Session(engine) as session:
+                                s = session.exec(select(IikoSettings).where(IikoSettings.api_login == current_api_login)).first()
+                                if s:
+                                    s.access_token = None
+                                    s.token_expires_at = None
+                                    session.add(s)
+                                    session.commit()
+                        await asyncio.to_thread(_clear_db_token)
+                        logger.info(f"Токен для {current_api_login[:4]}... сброшен в БД после 401")
+                    except Exception as db_err:
+                        logger.error(f"Не удалось сбросить токен в БД: {db_err}")
+                    
+                    if not api_login:
+                        self.access_token = None
+                        self.token_expires_at = None
+                        
                 return await self._request(
                     method, endpoint, json_data, timeout, 
                     current_api_login, organization_id, _is_retry=True,
@@ -320,23 +449,47 @@ class IikoService:
                 )
 
             if response.status_code >= 400:
+                # Читаем тело ошибки для диагностики
+                try:
+                    body = response.text
+                except:
+                    body = "Could not read response body"
+                
                 if log_error:
-                    # Добавляем тело ответа для лучшей диагностики 400/422 ошибок
-                    try:
-                        body = response.text
-                    except:
-                        body = "Could not read response body"
-                    logger.error(f"iiko API Error: {response.status_code} | URL: {endpoint} | Body: {body}")
-                    
                     # Специальное уведомление для ошибок прав (Rights)
-                    if "is not allowed for this ApiLogin" in body:
-                        logger.warning(f"ОШИБКА ПРАВ IIKO: Для API Login не разрешен доступ к {endpoint}. Проверьте настройки в ЛК iiko Cloud.")
+                    if "is not allowed for this ApiLogin" in body or response.status_code == 403:
+                        error_msg = f"ОШИБКА ПРАВ IIKO (403/401): Для API Login не разрешен доступ к {endpoint}. Body: {body}"
+                        logger.error(error_msg)
+                        # Добавляем в кэш отказов на 1 час
+                        self._denied_endpoints[endpoint] = datetime.now(timezone.utc) + timedelta(seconds=self._denied_duration)
+                        return {"status": "error", "error": "IIKO_RIGHTS_ERROR", "message": error_msg}
+                    else:
+                        logger.error(f"iiko API Error: {response.status_code} | URL: {endpoint} | Body: {body}")
+                
+                # Для 401, который не прошел ретрай, тоже возвращаем ошибку вместо исключения
+                if response.status_code == 401:
+                    return {"status": "error", "error": "UNAUTHORIZED", "message": "iiko API: Ошибка авторизации (401)"}
+                    
                 response.raise_for_status()
                 
             if response.encoding is None or response.encoding.lower() == 'iso-8859-1':
                 response.encoding = 'utf-8'
                 
             return response.json()
+        except (httpx.RequestError, httpx.TimeoutException) as e:
+            # Обработка сетевых ошибок и таймаутов
+            if _retry_count < 3:
+                wait_time = (2 ** _retry_count) * 3
+                logger.warning(f"iiko API Network Error ({type(e).__name__}) for {endpoint}. Waiting {wait_time}s before retry {_retry_count + 1}/3...")
+                await asyncio.sleep(wait_time)
+                return await self._request(
+                    method, endpoint, json_data, timeout, 
+                    current_api_login, organization_id, _is_retry=_is_retry,
+                    _retry_count=_retry_count + 1,
+                    log_error=log_error
+                )
+            logger.error(f"iiko API failed after 3 retries due to network error: {e}")
+            raise e
         except Exception as e:
             if not isinstance(e, httpx.HTTPStatusError):
                 logger.error(f"iiko API unexpected error for {endpoint}: {e}")
@@ -524,6 +677,28 @@ class IikoService:
                 result.append(item)
         return result
 
+    async def get_stop_lists(
+        self,
+        api_login: Optional[str] = None,
+        organization_id: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """Получение стоп-листов для организации"""
+        org_id = organization_id or self.organization_id
+        res = await self._request(
+            "POST", "/api/1/stop_lists", 
+            {"organizationIds": [org_id]},
+            api_login=api_login,
+            organization_id=org_id
+        )
+        
+        # Если iiko вернула список (бывает при передаче нескольких org_id, 
+        # или из-за особенностей прокси), берем первый элемент или оборачиваем.
+        if isinstance(res, list):
+            logger.warning(f"iiko API returned list for stop_lists instead of dict. Taking first element.")
+            return res[0] if res else {"terminalGroupStopLists": []}
+            
+        return res if isinstance(res, dict) else {"terminalGroupStopLists": []}
+
     # =========================================================================
     # Меню и номенклатура
     # =========================================================================
@@ -542,6 +717,31 @@ class IikoService:
             "POST", "/api/1/nomenclature", 
             {"organizationId": org_id},
             api_login=api_login,
+            organization_id=org_id
+        )
+
+    async def get_menu_v2(
+        self,
+        api_login: Optional[str] = None,
+        organization_id: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """
+        Получение меню через API v2 (/api/2/menu/by_id)
+        Возвращает данные о внешних меню.
+        """
+        org_id = organization_id or self.organization_id
+        # Сначала получаем список внешних меню
+        menus = await self.get_external_menus(api_login=api_login, organization_id=org_id)
+        if not menus:
+            logger.warning(f"No external menus found for org {org_id}")
+            return {"groups": [], "products": []}
+            
+        # Берем первое доступное меню
+        menu_id = menus[0].get("id")
+        logger.info(f"Using external menu {menu_id} for org {org_id}")
+        return await self.get_external_menu_by_id(
+            external_menu_id=menu_id, 
+            api_login=api_login, 
             organization_id=org_id
         )
 
@@ -676,36 +876,6 @@ class IikoService:
 
 
 
-    # =========================================================================
-    # Стоп-листы
-    # =========================================================================
-
-    async def get_stop_lists(
-        self,
-        api_login: Optional[str] = None,
-        organization_id: Optional[str] = None
-    ) -> List[Dict[str, Any]]:
-        """
-        Получение стоп-листов (недоступные позиции)
-
-        Возвращает список продуктов, которые временно недоступны.
-        """
-        org_id = organization_id or self.organization_id
-        data = await self._request(
-            "POST", "/api/1/stop_lists", 
-            {"organizationIds": [org_id]},
-            api_login=api_login,
-            organization_id=org_id
-        )
-        stop_list_items = []
-        for org_stop in data.get("terminalGroupStopLists", []):
-            for tg in org_stop.get("items", []):
-                for item in tg.get("items", []):
-                    stop_list_items.append({
-                        "productId": item.get("productId"),
-                        "balance": item.get("balance", 0)
-                    })
-        return stop_list_items
 
     # =========================================================================
     # Заказы
@@ -1331,6 +1501,53 @@ class IikoService:
             return orders[0]
         return None
 
+    def get_public_url(self, request_url: Optional[str] = None) -> str:
+        """
+        Определяет текущий публичный URL сайта.
+        Приоритет: 1. Явный URL из запроса 2. APP_PUBLIC_URL из конфига 3. Значение из БД
+        """
+        # 1. Сначала проверяем APP_PUBLIC_URL из .env
+        env_url = settings.APP_PUBLIC_URL
+        if env_url and ("your-public-url" in env_url or "ngrok" in env_url):
+            env_url = None
+            
+        # 2. Если в .env пусто, пробуем URL из запроса
+        req_url = request_url
+        
+        # Фильтрация: если URL содержит локальный IP, он нам не подходит для iiko
+        def is_local(u):
+            if not u: return True
+            return "192.168." in u or "127.0.0.1" in u or "localhost" in u or "172." in u or "10." in u
+            
+        final_url = env_url
+        source = "env"
+        
+        if not final_url or is_local(final_url):
+            if req_url and not is_local(req_url):
+                final_url = req_url
+                source = "request"
+        
+        # 3. Если всё еще ничего нет, пробуем из БД
+        if not final_url or is_local(final_url):
+            from app.core.database import SessionLocal
+            from app.models.iiko_settings import IikoSettings
+            with SessionLocal() as db:
+                db_settings = db.query(IikoSettings).first()
+                if db_settings and db_settings.webhook_url and not is_local(db_settings.webhook_url):
+                    from urllib.parse import urlparse
+                    parsed = urlparse(db_settings.webhook_url)
+                    final_url = f"{parsed.scheme}://{parsed.netloc}"
+                    source = "db"
+        
+        # 4. Хардкод-фоллбэк для продакшена (vezuroll.ru)
+        if not final_url or is_local(final_url):
+            final_url = "https://vezuroll.ru"
+            source = "hardcoded-fallback"
+            
+        logger.info(f"Determined public URL: {final_url} (source: {source}, env: {settings.APP_PUBLIC_URL}, req: {request_url})")
+        return final_url
+
+
     # =========================================================================
     # Вебхуки
     # =========================================================================
@@ -1384,7 +1601,7 @@ class IikoService:
             logger.warning(f"[iiko_service] get_webhook_settings failed (possibly 429 too): {e}")
 
         payload = {
-            "organizationId": org_id,
+            "organizationId": str(org_id),
             "webHooksUri": webhook_url,
             "webHooksFilter": {
                 "deliveryOrderFilter": {
@@ -1394,43 +1611,29 @@ class IikoService:
                         "OnWay", "Delivered", "Closed", "Cancelled"
                     ],
                     "errors": True
-                },
-                "stopListUpdateFilter": {
-                    "updates": True
-                },
-                "nomenclatureUpdateFilter": {
-                    "updates": True
                 }
+                # Убрали второстепенные фильтры для теста стабильности 400 ошибки
             }
         }
         if auth_token:
             payload["authToken"] = auth_token
 
-        # Retry logic for 429 Too Many Requests
-        import asyncio
-        max_retries = 3
-        for attempt in range(max_retries):
-            try:
-                return await self._request(
-                    "POST", "/api/1/webhooks/update_settings", 
-                    payload,
-                    api_login=api_login,
-                    organization_id=org_id
-                )
-            except Exception as e:
-                error_str = str(e)
-                if "429" in error_str or "Too Many Requests" in error_str:
-                    if attempt < max_retries - 1:
-                        wait_time = (attempt + 1) * 2
-                        print(f"[iiko_service] 429 Too Many Requests for webhook setup. Waiting {wait_time}s and retrying...")
-                        await asyncio.sleep(wait_time)
-                        continue
-                    else:
-                        # Если исчерпан лимит попыток и мы получаем 429, 
-                        # мы можем выбросить ошибку или просто залогировать и сделать вид, что успех
-                        # Но если мы это сделаем, то secret_key может не совпасть. Выбрасываем ошибку с понятным текстом.
-                        raise ValueError("iiko API Error: Слишком много попыток обновления вебхука (ошибка 429). Подождите несколько минут перед повторной попыткой.")
-                raise e
+        logger.info(f"[iiko_service] Registering webhook at {webhook_url} for org {org_id}")
+        # Логируем payload как INFO для отладки
+        logger.info(f"[iiko_service] Webhook payload: {json.dumps(payload, ensure_ascii=False)}")
+
+        # Выполняем запрос через универсальный метод _request
+        try:
+            return await self._request(
+                "POST", "/api/1/webhooks/update_settings", 
+                payload,
+                api_login=api_login,
+                organization_id=org_id,
+                log_error=True
+            )
+        except Exception as e:
+            logger.error(f"[iiko_service] update_webhook_settings HTTP error: {e}")
+            raise e
 
     async def auto_register_webhook(self,
         session: Optional[Session] = None,
@@ -1442,68 +1645,90 @@ class IikoService:
         """
         Автоматическая регистрация вебхука:
         1. Генерация безопасного токена.
-        2. Определение URL (из параметров, запроса или настроек).
-        3. Регистрация в iiko.
-        4. Сохранение в БД (если передан session).
+        2. Определение URL (используя get_public_url).
+        3. Регистрация в iiko Cloud.
+        4. Сохранение в БД.
         """
-        public_url = settings.APP_PUBLIC_URL
-        if public_url and "your-public-url.ngrok-free.app" in public_url:
-            public_url = None  # Игнорировать дефолтную заглушку ngrok
-
-        # Приоритет: 1. Явный base_url 2. URL из запроса 3. APP_PUBLIC_URL из .env
-        url = base_url or request_url or public_url
-        
-        if not url:
-            raise ValueError("Webhook URL cannot be determined. Set APP_PUBLIC_URL or use frontend.")
-        
-        # Получаем только origin (базовый домен до /api)
-        if "/api/" in url:
-            url = url.split("/api/")[0]
-            
-        # Убеждаемся, что URL заканчивается на правильный эндпоинт
-        endpoint = "/api/v1/webhooks/iiko"
-        if not url.endswith(endpoint):
-            url = url.rstrip("/") + endpoint
-        
-        # Генерация токена если нужно
-        auth_token = secrets.token_hex(16)
-        
-        # Регистрация
         try:
+            # Определяем итоговый базовый URL через общую логику
+            public_url = self.get_public_url(request_url or base_url)
+            
+            # Формируем полный путь к вебхуку
+            webhook_path = "/api/v1/webhooks/iiko"
+            url = f"{public_url.rstrip('/')}{webhook_path}"
+            
+            logger.info(f"[iiko_service] Starting auto-registration for: {url}")
+            
+            # Генерация токена
+            auth_token = secrets.token_hex(16)
+            
+            # Регистрация в iiko
             result = await self.update_webhook_settings(
                 webhook_url=url,
                 auth_token=auth_token,
                 api_login=api_login,
                 organization_id=organization_id
             )
-        except ValueError as e:
-            if "429" in str(e):
-                print(f"[iiko_service] Принудительно сохраняем вебхук локально: {e}")
-                result = {"status": "rate_limited", "message": "Настройки сохранены локально. iiko API вернул 429 (Too Many Requests), попробуйте позже, если требуется синхронизация."}
+            
+            # Проверяем успешность (iiko возвращает correlationId при успехе)
+            is_success = bool(result.get("correlationId"))
+            
+            # Сохранение в БД
+            if is_success:
+                # Если сессия не передана, создаем свою временную
+                if not session:
+                    from app.core.database import SessionLocal
+                    with SessionLocal() as db:
+                        self._save_webhook_to_db(db, url, auth_token)
+                else:
+                    self._save_webhook_to_db(session, url, auth_token)
+                
+                return {
+                    "success": True,
+                    "webhook_url": url,
+                    "auth_token": auth_token,
+                    "iiko_response": result
+                }
             else:
-                raise e
-        
-        # Сохранение в БД (только если регистрация успешна)
-        if session and result.get("correlationId"): # correlationId есть только в успешном ответе iiko
-            try:
-                db_settings = session.exec(select(IikoSettings)).first()
-                if db_settings:
-                    db_settings.webhook_url = url
-                    db_settings.webhook_auth_token = auth_token
-                    session.add(db_settings)
-                    session.commit()
-                    logger.info(f"Webhook settings successfully registered and saved to DB: {url}")
-            except Exception as e:
-                logger.error(f"Failed to save webhook to DB: {e}")
-        elif session:
-            logger.warning(f"Webhook NOT saved to DB because registration failed or was rate limited: {result}")
-        
-        return {
-            "success": True,
-            "webhook_url": url,
-            "auth_token": auth_token,
-            "iiko_response": result
-        }
+                error_data = result if isinstance(result, dict) else {}
+                error_msg = error_data.get('message', 'iiko Cloud API не вернул ID подтверждения. Проверьте настройки авторизации.')
+                
+                # Специальная обработка для Cooling Period
+                if error_data.get('error') == 'TOO_MANY_REQUESTS_COOLING':
+                    error_msg = f"iiko API: Превышен лимит запросов. {error_msg}"
+                
+                logger.error(f"[iiko_service] Webhook registration failed: {json.dumps(result, ensure_ascii=False)}")
+                return {
+                    "success": False,
+                    "error": error_msg,
+                    "iiko_response": result
+                }
+
+        except Exception as e:
+            error_msg = str(e)
+            logger.error(f"[iiko_service] Critical error in auto_register_webhook: {error_msg}")
+            return {
+                "success": False,
+                "error": error_msg,
+                "webhook_url": locals().get('url'),
+                "auth_token": locals().get('auth_token')
+            }
+
+    def _save_webhook_to_db(self, db, url: str, token: str):
+        """Вспомогательный метод для сохранения настроек вебхука в БД"""
+        from app.models.iiko_settings import IikoSettings
+        try:
+            db_settings = db.query(IikoSettings).first()
+            if db_settings:
+                logger.info(f"Saving webhook settings to DB: {url}")
+                db_settings.webhook_url = url
+                db_settings.webhook_auth_token = token
+                db.commit()
+            else:
+                logger.warning("No iiko settings found in DB to save webhook")
+        except Exception as e:
+            logger.error(f"Failed to save webhook settings to DB: {e}")
+            db.rollback()
 
     # =========================================================================
     # iiko Card (Loyalty)
@@ -1576,18 +1801,6 @@ class IikoService:
             organization_id=org_id
         )
 
-    async def get_customer_balance(
-        self,
-        customer_id: str,
-        api_login: Optional[str] = None,
-        organization_id: Optional[str] = None
-    ) -> float:
-        """Получение баланса баллов клиента"""
-        # В v1 информация о балансе обычно возвращается в get_customer_info в walletBalances
-        # Но если нужно отдельное получение, iiko Card API имеет свои особенности
-        info = await self.get_customer_info("", api_login=api_login, organization_id=organization_id)
-        # Реализация зависит от конкретной версии iiko Card
-        return 0.0
 
     async def add_customer_balance(
         self,
@@ -1725,6 +1938,34 @@ class IikoService:
         org_id = organization_id or self.organization_id
         return await self._request(
             "POST", "/api/1/loyalty/iiko/program",
+            {"organizationId": org_id},
+            api_login=api_login,
+            organization_id=org_id
+        )
+
+    async def get_loyalty_coupons_series(
+        self,
+        api_login: Optional[str] = None,
+        organization_id: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """Получение списка серий купонов"""
+        org_id = organization_id or self.organization_id
+        return await self._request(
+            "POST", "/api/1/loyalty/iiko/coupons/series",
+            {"organizationId": org_id},
+            api_login=api_login,
+            organization_id=org_id
+        )
+
+    async def get_loyalty_manual_conditions(
+        self,
+        api_login: Optional[str] = None,
+        organization_id: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """Получение ручных условий лояльности"""
+        org_id = organization_id or self.organization_id
+        return await self._request(
+            "POST", "/api/1/loyalty/iiko/manual_condition",
             {"organizationId": org_id},
             api_login=api_login,
             organization_id=org_id
@@ -1904,6 +2145,16 @@ class IikoService:
         from app.core.database import get_session_sync
         from app.core.datetime_utils import get_tz_name
         
+        # 0. Попытка получить из кеша (увеличиваем TTL до 10 минут)
+        cache_key = f"org_report_{organization_id}_{date_from}_{date_to}"
+        if settings.CACHE_ENABLED:
+            try:
+                cached_data = await redis_client.get(cache_key)
+                if cached_data:
+                    return json.loads(cached_data)
+            except Exception as ce:
+                logger.warning(f"Cache read error: {ce}")
+        
         # 1. Парсинг дат и часовой пояс
         with get_session_sync() as db:
             tz_name = get_tz_name(db)
@@ -2014,7 +2265,11 @@ class IikoService:
             fetch_employees(),
             fetch_courier_locations(),
             fetch_sections(tg_ids),
-            self.get_olap_report(date_from=dt_from, date_to=dt_to, organization_id=organization_id, raw_response=True),
+            # OLAP отчет может быть очень тяжелым, добавляем индивидуальный таймаут
+            asyncio.wait_for(
+                self.get_olap_report(date_from=dt_from, date_to=dt_to, organization_id=organization_id, raw_response=True),
+                timeout=25.0
+            ),
             return_exceptions=True
         )
 
@@ -2105,7 +2360,7 @@ class IikoService:
                         "organizationId": item.get("organizationId")
                     })
 
-        return {
+        result = {
             "organizationId": organization_id,
             "dateFrom": dt_from.strftime("%Y-%m-%d %H:%M:%S.000"),
             "dateTo": dt_to.strftime("%Y-%m-%d %H:%M:%S.000"),
@@ -2141,6 +2396,15 @@ class IikoService:
             "olap": olap_res if isinstance(olap_res, dict) else {"error": str(olap_res)},
             "errors": []
         }
+        
+        # Сохранение в кеш на 5 минут
+        if settings.CACHE_ENABLED:
+            try:
+                await redis_client.setex(cache_key, 300, json.dumps(result))
+            except Exception as ce:
+                logger.warning(f"Cache write error: {ce}")
+                
+        return result
 
     async def get_customer_order_history_olap(
         self,
@@ -2153,6 +2417,14 @@ class IikoService:
         Возвращает список выполненных заказов с суммами и датами.
         """
         org_id = organization_id or self.organization_id
+        
+        # Кэширование истории заказов клиента на 1 час
+        cache_key = f"customer_orders_olap_{phone}_{org_id}"
+        if settings.CACHE_ENABLED:
+            try:
+                cached = await redis_client.get(cache_key)
+                if cached: return json.loads(cached)
+            except: pass
         
         # Очищаем телефон от лишних символов (нужны только цифры для iiko)
         clean_phone = "".join(filter(str.isdigit, phone))
@@ -2219,6 +2491,11 @@ class IikoService:
                         
                         # Сортируем по дате
                         processed.sort(key=lambda x: str(x.get("date") or ""), reverse=True)
+                        
+                        if settings.CACHE_ENABLED:
+                            try: await redis_client.setex(cache_key, 3600, json.dumps(processed))
+                            except: pass
+                            
                         return processed
                 except Exception as e:
                     continue # Пробуем следующий набор полей или следующий фильтр по телефону
@@ -2236,6 +2513,14 @@ class IikoService:
         """
         org_id = organization_id or self.organization_id
         
+        # Кэширование аналитики клиента на 1 час
+        cache_key = f"customer_analytics_olap_{phone}_{org_id}"
+        if settings.CACHE_ENABLED:
+            try:
+                cached = await redis_client.get(cache_key)
+                if cached: return json.loads(cached)
+            except: pass
+        
         clean_phone = "".join(filter(str.isdigit, phone))
         if clean_phone.startswith("8") and len(clean_phone) == 11:
             clean_phone = "7" + clean_phone[1:]
@@ -2249,7 +2534,7 @@ class IikoService:
         # Расширенный список полей для поиска телефона в разных версиях iiko
         # ПРИОРИТЕТ: Delivery.CustomerPhone (валидное поле для этой версии iiko)
         phone_variants = [clean_phone, f"+{clean_phone}", phone]
-        possible_fields = ["Delivery.CustomerPhone", "Delivery.Phone", "OrderCustomer.Phone", "Customer.Phone", "Phone"]
+        possible_fields = ["Delivery.CustomerPhone", "Delivery.Phone", "OrderCustomer.Phone"]
 
         
         # Попробуем получить данные
@@ -2268,7 +2553,6 @@ class IikoService:
             # Список полей агрегации для пробы (могут отличаться в разных версиях iiko)
             aggregate_variants = [
                 ["DishDiscountSumInt", "fullSum", "DiscountSum", "UniqOrderId", "DishAmountInt"],
-                ["DishDiscountSum", "fullSum", "DiscountSum", "UniqOrderId", "DishAmount"],
                 ["fullSum", "DiscountSum", "UniqOrderId"] # Минимальный набор
             ]
 
@@ -2292,10 +2576,10 @@ class IikoService:
                                 if n in r: return float(r[n] or 0)
                             return 0.0
 
-                        total_sum = sum(get_val(r, ["DishDiscountSumInt", "DishDiscountSum", "fullSum"]) for r in rows)
+                        total_sum = sum(get_val(r, ["DishDiscountSumInt", "fullSum"]) for r in rows)
                         total_count = sum(int(r.get("UniqOrderId", 1)) for r in rows)
                         total_discount = sum(get_val(r, ["DiscountSum"]) for r in rows)
-                        total_items = sum(get_val(r, ["DishAmountInt", "DishAmount"]) for r in rows)
+                        total_items = sum(get_val(r, ["DishAmountInt"]) for r in rows)
                         
                         dates = []
                         for r in rows:
@@ -2309,7 +2593,7 @@ class IikoService:
                         first_order = min(dates) if dates else None
                         last_order = max(dates) if dates else None
                         
-                        return {
+                        result = {
                             "total_sum": round(total_sum, 2),
                             "total_revenue": round(total_sum, 2), # Для совместимости
                             "total_count": total_count,
@@ -2322,13 +2606,19 @@ class IikoService:
                             "days_since_last_order": (datetime.now() - last_order).days if last_order else None,
                             "frequency_days": round((last_order - first_order).days / total_count, 1) if (total_count > 1 and first_order and last_order) else 0
                         }
+                        
+                        if settings.CACHE_ENABLED:
+                            try: await redis_client.setex(cache_key, 3600, json.dumps(result))
+                            except: pass
+                            
+                        return result
                     else:
                         # Если отчет пустой, пробуем следующий вариант агрегации или выходим
                         break
                 except Exception as e:
                     if "REST_API" in str(e):
                         raise e
-                    logger.warning(f"OLAP analytics aggregate variant {agg_fields} failed with field {field}: {e}")
+                    logger.debug(f"OLAP analytics aggregate variant {agg_fields} failed with field {field}: {e}")
                     # Пробуем следующий вариант агрегации для этого же фильтра по телефону
                     continue
                 
@@ -2595,8 +2885,9 @@ class IikoService:
         """Универсальный метод для получения любых OLAP-отчетов через Server API"""
         from datetime import timedelta
         org_id = organization_id or self.organization_id
-        v2_from = date_from.strftime("%Y-%m-%dT00:00:00.000")
-        v2_to = (date_to + timedelta(days=1)).strftime("%Y-%m-%dT00:00:00.000")
+        # [FIX] Для фильтра типа DATE в iiko v2 API нельзя передавать время
+        v2_from = date_from.strftime("%Y-%m-%d")
+        v2_to = (date_to + timedelta(days=1)).strftime("%Y-%m-%d")
         
         if "UniqOrderId" not in aggregate_fields:
             aggregate_fields.append("UniqOrderId")
@@ -2669,15 +2960,18 @@ class IikoService:
     ) -> Any:
         """Метод для запросов к iiko Resto (Office) API с SHA-1 авторизацией"""
         # Пытаемся получить настройки из БД если передана организация
-        db_settings = self._get_settings_by_org_id(organization_id) if organization_id else None
+        db_settings = None
+        if organization_id:
+            db_settings = await self._get_settings_by_org_id(organization_id)
         
         url = resto_url or (db_settings.resto_url if db_settings else None) or settings.IIKO_RESTO_URL
         login = resto_login or (db_settings.resto_login if db_settings else None) or settings.IIKO_RESTO_LOGIN
         password = resto_password or (db_settings.resto_password if db_settings else None) or settings.IIKO_RESTO_PASSWORD
 
         if not url or not login:
-            logger.error(f"Resto API not configured for org {organization_id}. URL: {url}, Login: {login}")
-            raise ValueError("Данные iiko Resto (URL/Login) не настроены.")
+            if log_error:
+                logger.error(f"Resto API not configured for org {organization_id}. URL: {url}, Login: {login}")
+            raise ValueError(f"Данные iiko Resto (URL/Login) не настроены для организации {organization_id}.")
 
         # Normalize URL
         base_url = url.rstrip('/')
@@ -2687,42 +2981,61 @@ class IikoService:
             else:
                 base_url = f"{base_url}/resto/api"
         
-        # 1. Получаем токен (с ретри на 403 "no connections")
-        max_retries = 2
+        # 1. Получаем токен из кэша или авторизуемся
         token = None
-        client = self.insecure_client
+        cache_key = f"{login}_{base_url}"
         
-        for attempt in range(max_retries):
-            # Добавляем небольшую задержку перед запросом, чтобы не спамить API
-            await asyncio.sleep(0.5)
-            auth_url = f"{base_url}/auth"
-            password_sha1 = hashlib.sha1(password.encode()).hexdigest()
-            auth_params = {"login": login, "pass": password_sha1}
+        async with self._get_resto_token_lock():
+            cached = self._resto_token_cache.get(cache_key)
+            if cached:
+                c_token, c_expiry = cached
+                if datetime.now() < c_expiry:
+                    token = c_token
             
-            logger.info(f"Resto Auth attempt (SHA-1) {attempt+1}/{max_retries} for {login}")
-            auth_response = await client.get(auth_url, params=auth_params)
-            
-            if auth_response.status_code == 403 and "no connections" in auth_response.text:
-                if attempt < max_retries - 1:
-                    wait_time = (attempt + 1) * 2
-                    logger.warning(f"Resto API limit reached (403). Retrying in {wait_time}s...")
-                    await asyncio.sleep(wait_time)
-                    continue
-            
-            if auth_response.status_code != 200:
-                # Fallback for older versions
-                auth_response = await client.get(auth_url, params={"login": login, "pass": password})
-            
-            if auth_response.status_code == 200:
-                token = auth_response.text.strip().replace('"', '')
-                break
-            elif attempt == max_retries - 1:
-                if log_error:
-                    logger.error(f"Resto Auth failed: {auth_response.status_code} | {auth_response.text}")
-                raise HTTPException(status_code=401, detail=f"Ошибка авторизации Resto: {auth_response.text}")
+            if not token:
+                max_retries = 2
+                client = self.insecure_client
+                
+                for attempt in range(max_retries):
+                    # Добавляем небольшую задержку перед запросом
+                    await asyncio.sleep(0.5)
+                    auth_url = f"{base_url}/auth"
+                    password_sha1 = hashlib.sha1(password.encode()).hexdigest()
+                    auth_params = {"login": login, "pass": password_sha1}
+                    
+                    logger.info(f"Resto Auth attempt (SHA-1) {attempt+1}/{max_retries} for {login}")
+                    try:
+                        auth_response = await client.get(auth_url, params=auth_params)
+                        
+                        if auth_response.status_code == 403 and "no connections" in auth_response.text:
+                            if attempt < max_retries - 1:
+                                wait_time = (attempt + 1) * 3
+                                logger.warning(f"Resto API limit reached (403). Retrying in {wait_time}s...")
+                                await asyncio.sleep(wait_time)
+                                continue
+                        
+                        if auth_response.status_code != 200:
+                            # Fallback for older versions
+                            auth_response = await client.get(auth_url, params={"login": login, "pass": password})
+                        
+                        if auth_response.status_code == 200:
+                            token = auth_response.text.strip().replace('"', '')
+                            # Кэшируем на 15 минут
+                            self._resto_token_cache[cache_key] = (token, datetime.now() + timedelta(minutes=15))
+                            logger.info(f"Resto Session {token[:8]}... created and cached for {login}")
+                            break
+                        elif attempt == max_retries - 1:
+                            if log_error:
+                                logger.error(f"Resto Auth failed: {auth_response.status_code} | {auth_response.text}")
+                            raise HTTPException(status_code=401, detail=f"Ошибка авторизации Resto: {auth_response.text}")
+                    except Exception as e:
+                        if attempt == max_retries - 1:
+                            raise
+                        await asyncio.sleep(1)
 
         # 2. Выполняем основной запрос
         request_url = f"{base_url}{endpoint}"
+        client = self.insecure_client
         
         # Подготовка параметров
         final_params = {}
@@ -2737,15 +3050,19 @@ class IikoService:
             final_params.append(("key", token))
         
         logger.info(f"Resto Request: {method} {request_url}")
-        response = await client.request(method, request_url, params=final_params, json=json_data)
-            
-        # 3. Разлогиниваемся (ОБЯЗАТЕЛЬНО, чтобы не занимать лицензию Resto API)
         try:
-            logout_url = f"{base_url}/logout"
-            await client.get(logout_url, params={"key": token})
-            logger.debug(f"Resto Session {token[:8]}... logged out successfully")
-        except Exception as le:
-            logger.warning(f"Failed to logout from Resto: {le}")
+            response = await client.request(method, request_url, params=final_params, json=json_data)
+            
+            # Если токен протух (401), сбрасываем кэш
+            if response.status_code == 401:
+                logger.warning(f"Resto Token expired for {login}, clearing cache")
+                if cache_key in self._resto_token_cache:
+                    del self._resto_token_cache[cache_key]
+        except Exception as e:
+            logger.error(f"Resto Request failed: {e}")
+            raise
+
+        # 3. НЕ разлогиниваемся (переиспользуем сессию)
 
         if response.status_code >= 400:
             # Специальная обработка для ошибки лицензии iiko Resto
@@ -2777,7 +3094,8 @@ class IikoService:
         self,
         resto_url: Optional[str] = None,
         resto_login: Optional[str] = None,
-        resto_password: Optional[str] = None
+        resto_password: Optional[str] = None,
+        organization_id: Optional[str] = None
     ) -> List[Dict[str, Any]]:
         """Получение детального списка сотрудников из iiko Resto"""
         # iiko Resto возвращает XML по умолчанию
@@ -3088,6 +3406,7 @@ class IikoService:
                 # Формируем объект заказа для фронтенда и синхронизатора
                 transformed.append({
                     "id": row.get("Delivery.Number", row.get("delivery.number")),
+                    "iiko_order_id": row.get("UniqOrderId", row.get("uniqorderid")),
                     "address": addr_parts, 
                     "deliveryZone": row.get("Delivery.Zone", row.get("delivery.zone")) or row.get("Delivery.Region", row.get("delivery.region")),
                     "sum": self._safe_float(row.get("fullSum", row.get("fullsum", row.get("DishDiscountSumInt", 0)))),
@@ -3289,12 +3608,21 @@ class IikoService:
                 
         return "Staff"
 
-    def _safe_float(self, val: Any) -> float:
+    @staticmethod
+    def _safe_float(val: Any) -> float:
         """Безопасное преобразование значения к float"""
         try:
             return float(val) if val is not None else 0.0
         except (ValueError, TypeError):
             return 0.0
+
+    @staticmethod
+    def _safe_int(val: Any) -> int:
+        """Безопасное преобразование значения к int"""
+        try:
+            return int(val) if val is not None else 0
+        except (ValueError, TypeError):
+            return 0
 
     # =========================================================================
     # iiko Transport (Cloud API) - Дополнительная статистика
@@ -3415,28 +3743,7 @@ class IikoService:
             logger.error(f"Error getting courier revenue OLAP: {e}")
             return {}
 
-    async def get_delivery_restrictions(
-        self,
-        organization_id: str,
-        api_login: Optional[str] = None
-    ) -> List[Dict[str, Any]]:
-        """Получение ограничений и зон доставки из iiko Cloud"""
-        payload = {"organizationIds": [organization_id]}
-        try:
-            res = await self._request(
-                "POST", "/api/1/delivery_restrictions",
-                payload,
-                api_login=api_login,
-                organization_id=organization_id
-            )
-            # Возвращает список ограничений, в каждом есть deliveryZones
-            return res.get("deliveryRestrictions", [])
-        except Exception as e:
-            logger.error(f"Error getting delivery restrictions: {e}")
-            return []
-
-
-    async def get_detailed_deliveries(
+    async def get_detailed_deliveries_cloud(
         self,
         date_from: datetime,
         date_to: datetime,
@@ -3480,7 +3787,6 @@ class IikoService:
             try:
                 response = await client.get(url, follow_redirects=True)
                 response.raise_for_status()
-                # Пытаемся получить текст в UTF-8
                 content = response.text
                 logger.info(f"KML загружен, размер: {len(content)} символов. Начинаем парсинг...")
                 return self.parse_kml_content(content)
@@ -3491,27 +3797,160 @@ class IikoService:
     def parse_kml_content(self, kml_text: str) -> List[Dict[str, Any]]:
         """
         Парсит XML/KML содержимое в список полигонов.
-        Использует вспомогательную функцию из geo_utils.
         """
         from app.utils.geo_utils import parse_kml
         return parse_kml(kml_text)
 
-    @staticmethod
-    def _safe_float(value) -> float:
-        """Безопасное преобразование значения к float"""
-        try:
-            return float(value) if value is not None else 0.0
-        except (TypeError, ValueError):
-            return 0.0
+    # =========================================================================
+    # Delivery Management (iiko Cloud)
+    # =========================================================================
 
-    @staticmethod
-    def _safe_int(value) -> int:
-        """Безопасное преобразование значения к int"""
-        try:
-            return int(value) if value is not None else 0
-        except (TypeError, ValueError):
-            return 0
+    async def assign_delivery_courier(
+        self,
+        organization_id: str,
+        order_id: str,
+        courier_id: str,
+        api_login: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """Назначение курьера на заказ в iiko Cloud"""
+        payload = {
+            "organizationId": organization_id,
+            "orderId": order_id,
+            "courierId": courier_id
+        }
+        return await self._request(
+            "POST", "/api/1/deliveries/assign_courier", 
+            payload,
+            api_login=api_login,
+            organization_id=organization_id
+        )
 
+    async def change_delivery_status(
+        self,
+        organization_id: str,
+        order_id: str,
+        delivery_status: str,
+        api_login: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """
+        Изменение статуса доставки в iiko Cloud.
+        Возможные статусы: Waiting, OnWay, Delivered, Unconfirmed, Cancelled
+        """
+        payload = {
+            "organizationId": organization_id,
+            "orderId": order_id,
+            "deliveryStatus": delivery_status
+        }
+        return await self._request(
+            "POST", "/api/1/deliveries/update_order_delivery_status", 
+            payload,
+            api_login=api_login,
+            organization_id=organization_id
+        )
+
+    async def change_order_payments(
+        self,
+        organization_id: str,
+        order_id: str,
+        payments: List[Dict[str, Any]],
+        api_login: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """
+        Изменение списка оплат заказа.
+        payments: список словарей с полями paymentTypeKind, sum, paymentTypeId
+        """
+        payload = {
+            "organizationId": organization_id,
+            "orderId": order_id,
+            "payments": payments
+        }
+        return await self._request(
+            "POST", "/api/1/deliveries/change_payments", 
+            payload,
+            api_login=api_login,
+            organization_id=organization_id
+        )
+
+    async def close_delivery(
+        self,
+        organization_id: str,
+        order_id: str,
+        api_login: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """
+        Закрытие доставки в iiko Cloud. 
+        Оплаты должны быть добавлены заранее через change_order_payments.
+        """
+        payload = {
+            "organizationId": organization_id,
+            "orderId": order_id
+        }
+        return await self._request(
+            "POST", "/api/1/deliveries/close", 
+            payload,
+            api_login=api_login,
+            organization_id=organization_id
+        )
+
+    # =========================================================================
+    # Shifts and Couriers (iiko Cloud)
+    # =========================================================================
+
+    async def get_active_couriers(
+        self,
+        organization_id: str,
+        api_login: Optional[str] = None
+    ) -> List[Dict[str, Any]]:
+        """Получение списка активных курьеров (с открытыми сменами) через эндпоинт локаций"""
+        payload = {
+            "organizationIds": [organization_id]
+        }
+        data = await self._request(
+            "POST", "/api/1/employees/couriers/active_location", 
+            payload,
+            api_login=api_login,
+            organization_id=organization_id
+        )
+        
+        # Обработка ответа: маппинг из activeCourierLocations -> items
+        couriers = []
+        if isinstance(data, dict):
+            locations = data.get("activeCourierLocations", [])
+            for loc in locations:
+                items = loc.get("items", [])
+                for item in items:
+                    couriers.append({
+                        "id": item.get("courierId"),
+                        "latitude": item.get("lastActiveLatitude"),
+                        "longitude": item.get("lastActiveLongitude"),
+                        "lastActiveClientDate": item.get("lastActiveClientDate")
+                    })
+        return couriers
+
+    async def get_cash_shifts(
+        self,
+        organization_id: str,
+        date_from: datetime,
+        date_to: datetime,
+        status: Optional[str] = "OPEN",
+        api_login: Optional[str] = None
+    ) -> List[Dict[str, Any]]:
+        """Получение списка кассовых смен"""
+        payload = {
+            "organizationIds": [organization_id],
+            "openDateFrom": date_from.strftime("%Y-%m-%d %H:%M:%S.000"),
+            "openDateTo": date_to.strftime("%Y-%m-%d %H:%M:%S.000")
+        }
+        if status:
+            payload["status"] = status
+
+        data = await self._request(
+            "POST", "/api/1/cashshifts/list", 
+            payload,
+            api_login=api_login,
+            organization_id=organization_id
+        )
+        return data.get("cashShifts", [])
 
 # Глобальный экземпляр сервиса
 iiko_service = IikoService()

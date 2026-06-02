@@ -13,6 +13,10 @@ export const routes = [
         component: () => import('@/pages/orders/index.vue'),
       },
       {
+        path: 'courier',
+        component: () => import('@/pages/employee/courier.vue'),
+      },
+      {
         path: 'companies',
         component: () => import('@/pages/companies.vue'),
       },
@@ -49,8 +53,21 @@ export const routes = [
         component: () => import('@/pages/settings/vk-notifications_utf8.vue'),
       },
       {
+        path: 'settings/vk-parser',
+        name: 'settings-vk-parser',
+        component: () => import('@/pages/settings/vk-parser.vue'),
+      },
+      {
         path: 'settings/yandex',
         component: () => import('@/pages/settings/yandex.vue'),
+      },
+      {
+        path: 'settings/max',
+        component: () => import('@/pages/settings/max.vue'),
+      },
+      {
+        path: 'mailings/cascades',
+        component: () => import('@/pages/mailings/cascades.vue'),
       },
 
       {
@@ -64,6 +81,10 @@ export const routes = [
       {
         path: 'system/tasks',
         component: () => import('@/pages/system/tasks.vue'),
+      },
+      {
+        path: 'system/server',
+        component: () => import('@/pages/system/server.vue'),
       },
       {
         path: 'loyalty',

@@ -17,7 +17,7 @@ def upload_file(local_path, remote_path):
     # Мы используем python3 для надежности, так как base64 utility может капризничать с переносами строк
     remote_command = f"python3 -c \"import base64, sys; sys.stdout.buffer.write(base64.b64decode(sys.stdin.read().strip()))\" > {remote_path}"
     
-    process = subprocess.Popen(['ssh', 'foodtech', remote_command], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    process = subprocess.Popen(['ssh', 'vezuroll', remote_command], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     stdout, stderr = process.communicate(input=b64_content)
     
     if process.returncode == 0:

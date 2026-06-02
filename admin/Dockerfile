@@ -15,8 +15,9 @@ RUN apk add --no-cache \
     libpng-dev \
     libzip-dev \
     oniguruma-dev \
+    icu-dev \
     unzip \
-    && docker-php-ext-install pdo pdo_pgsql pgsql gd zip mbstring
+    && docker-php-ext-install pdo pdo_pgsql pgsql gd zip mbstring bcmath intl exif
 
 # Get Composer
 COPY --from=composer:latest /usr/bin/composer /usr/bin/composer

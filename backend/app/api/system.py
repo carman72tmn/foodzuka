@@ -329,3 +329,43 @@ def delete_scheduled_task(task_id: int, session: Session = Depends(get_session))
     session.delete(task)
     session.commit()
     return {"status": "success"}
+
+@router.get("/server-status")
+def get_server_status():
+    """Возвращает метрики нагрузки сервера: CPU, RAM, Disk"""
+    try:
+        import psutil
+    except ImportError:
+        raise HTTPException(status_code=500, detail="psutil is not installed")
+        
+    try:
+        # Процессор
+        cpu_percent = psutil.cpu_percent(interval=0.1)
+        
+        # Оперативная память
+        mem = psutil.virtual_memory()
+        
+        # Диск (корневой каталог)
+        disk = psutil.disk_usage('/')
+        
+        return {
+            "status": "success",
+            "cpu": {
+                "percent": cpu_percent
+            },
+            "ram": {
+                "total": mem.total,
+                "used": mem.used,
+                "free": mem.available,
+                "percent": mem.percent
+            },
+            "disk": {
+                "total": disk.total,
+                "used": disk.used,
+                "free": disk.free,
+                "percent": disk.percent
+            }
+        }
+    except Exception as e:
+        logger.error(f"Error getting server status: {e}")
+        raise HTTPException(status_code=500, detail=str(e))

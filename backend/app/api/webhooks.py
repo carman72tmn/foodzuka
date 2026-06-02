@@ -86,7 +86,7 @@ async def process_courier_assigned(event_info: dict):
             # Отправка уведомления курьеру в VK
             if order:
                 try:
-                    await iiko_sync_service.send_order_notification(order, "courier_assigned")
+                    await iiko_sync_service.send_order_notification(order, "courier_assigned", session=session)
                 except Exception as vk_err:
                     logger.error(f"Failed to send courier notification: {vk_err}")
         except Exception as e:

@@ -12,12 +12,13 @@ def get_tz_name(session: Session) -> str:
     from app.models.iiko_settings import IikoSettings
     settings = session.exec(select(IikoSettings)).first()
     if settings:
-        if settings.timezone_name:
-            return settings.timezone_name
-        if settings.manual_timezone:
-            # Преобразование GMT+5 в что-то понятное zoneinfo если нужно, 
-            # но обычно timezone_name заполнен (Europe/Moscow, Asia/Yekaterinburg)
-            return settings.manual_timezone
+        tz_n = settings.timezone_name or settings.manual_timezone
+        if tz_n:
+            # Исправление для некорректных символов (например, 'एशिया/Tyumen')
+            if "Tyumen" in tz_n: return "Asia/Tyumen"
+            if "Yekaterinburg" in tz_n: return "Asia/Yekaterinburg"
+            if "Moscow" in tz_n: return "Europe/Moscow"
+            return tz_n
     return "Asia/Yekaterinburg"
 
 def get_tz(session: Session) -> zoneinfo.ZoneInfo:
@@ -33,3 +34,20 @@ def to_local(dt: datetime, tz_name: str) -> datetime:
 def get_local_now(tz_name: str) -> datetime:
     """Возвращает текущее локальное время"""
     return datetime.now(zoneinfo.ZoneInfo(tz_name))
+
+def get_day_boundaries(date_str: str, tz_name: str):
+    """
+    date_str: YYYY-MM-DD
+    Возвращает (start_utc, end_utc) для данного дня в указанном часовом поясе.
+    """
+    tz = zoneinfo.ZoneInfo(tz_name)
+    dt = datetime.strptime(date_str, "%Y-%m-%d")
+    
+    start_local = dt.replace(hour=0, minute=0, second=0, microsecond=0, tzinfo=tz)
+    end_local = dt.replace(hour=23, minute=59, second=59, microsecond=999999, tzinfo=tz)
+    
+    # Переводим в UTC и убираем tzinfo для сравнения с naive datetime в БД
+    start_utc = start_local.astimezone(timezone.utc).replace(tzinfo=None)
+    end_utc = end_local.astimezone(timezone.utc).replace(tzinfo=None)
+    
+    return start_utc, end_utc

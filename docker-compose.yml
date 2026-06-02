@@ -31,10 +31,11 @@ services:
     restart: always
     env_file: .env
     environment:
+      - PYTHONIOENCODING=utf-8
       - DATABASE_URL=postgresql://${DB_USERNAME:-foodtech_user}:${DB_PASSWORD:-postgres}@db:5432/${DB_DATABASE:-foodtech_db}
       - REDIS_URL=redis://redis:6379/0
       - API_RELOAD=True
-      - APP_PUBLIC_URL=http://192.168.31.162:8000
+      - APP_PUBLIC_URL=https://vezuroll.ru
     expose:
       - "8000"
     volumes:
@@ -52,6 +53,7 @@ services:
     env_file: .env
     command: celery -A app.core.celery_app worker --loglevel=info
     environment:
+      - PYTHONIOENCODING=utf-8
       - DATABASE_URL=postgresql://${DB_USERNAME:-foodtech_user}:${DB_PASSWORD:-postgres}@db:5432/${DB_DATABASE:-foodtech_db}
       - REDIS_URL=redis://redis:6379/0
     volumes:
@@ -66,6 +68,7 @@ services:
     container_name: foodtech-bot
     restart: always
     environment:
+      - PYTHONIOENCODING=utf-8
       - API_URL=http://backend:8000/api/v1
     depends_on:
       - backend

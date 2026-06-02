@@ -1,6 +1,6 @@
 <script setup>
 import { ref, watch, computed } from "vue"
-import { formatDateTime, isLongTimeAgo } from "@/utils/date"
+import { formatDate, formatDateTime, formatTime } from "@/utils/date"
 import CustomerDetailModal from "./CustomerDetailModal.vue"
 
 // Импорт новых стилей
@@ -19,9 +19,13 @@ const props = defineProps({
     type: String,
     default: "line1",
   },
+  isReadOnly: {
+    type: Boolean,
+    default: false,
+  },
 })
 
-const emit = defineEmits(["update:modelValue"])
+const emit = defineEmits(["update:modelValue", "update:order"])
 
 const dialog = computed({
   get: () => props.modelValue,
@@ -31,6 +35,38 @@ const dialog = computed({
 const customerInfo = ref(null)
 const isLoadingCustomer = ref(false)
 const customerModalVisible = ref(false)
+const selectedItem = ref(null)
+const isSyncing = ref(false)
+
+const syncWithIiko = async () => {
+  if (!props.order?.id || isSyncing.value) return
+
+  isSyncing.value = true
+  try {
+    const response = await fetch(`/api/v1/orders/${props.order.id}/sync-iiko`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+    })
+
+    if (response.ok) {
+      // Оповещаем родителя о необходимости обновить данные
+      emit("update:order", props.order.id)
+      
+      // Временное решение: перезагрузка страницы для отображения изменений
+      window.location.reload()
+    } else {
+      const err = await response.json()
+      alert(err.detail || "Ошибка синхронизации")
+    }
+  } catch (e) {
+    console.error("Sync error:", e)
+    alert("Ошибка сети")
+  } finally {
+    isSyncing.value = false
+  }
+}
 
 const fetchCustomerInfo = async () => {
   if (!props.order?.customer_phone) return
@@ -40,8 +76,6 @@ const fetchCustomerInfo = async () => {
     const response = await fetch(`/api/v1/customers/by-phone/${encodeURIComponent(props.order.customer_phone)}`)
     if (response.ok) {
       customerInfo.value = await response.json()
-    } else {
-      customerInfo.value = null
     }
   } catch (e) {
     console.error("Failed to fetch customer info:", e)
@@ -49,6 +83,10 @@ const fetchCustomerInfo = async () => {
   } finally {
     isLoadingCustomer.value = false
   }
+}
+
+const showDetails = item => {
+  selectedItem.value = item
 }
 
 const openCustomerModal = async () => {
@@ -67,7 +105,7 @@ watch(dialog, newVal => {
   }
 })
 
-const formatDate = (dateString, showOnlyTime = false) => {
+const formatDateFunc = (dateString, showOnlyTime = false) => {
   if (!dateString) return "—"
 
   return formatDateTime(dateString, showOnlyTime ? { day: undefined, month: undefined, year: undefined } : {})
@@ -77,6 +115,16 @@ const formatPrice = value => {
   const num = parseFloat(value)
 
   return isNaN(num) ? "0.00" : num.toFixed(2)
+}
+
+const canEditStatus = computed(() => {
+  return !props.isReadOnly
+})
+
+const callCustomer = phone => {
+  if (!phone) return
+
+  window.location.href = `tel:${phone}`
 }
 
 const yandexMapLink = computed(() => {
@@ -91,8 +139,23 @@ const twoGisLink = computed(() => {
   return `https://2gis.ru/search/${encodeURIComponent(props.order.delivery_address)}`
 })
 
+const googleMapsLink = computed(() => {
+  if (!props.order?.delivery_address) return "#"
+
+  return `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(props.order.delivery_address)}`
+})
+
+const petalMapsLink = computed(() => {
+  if (!props.order?.delivery_address) return "#"
+
+  return `https://www.petalmaps.com/search/?q=${encodeURIComponent(props.order.delivery_address)}`
+})
+
 const formattedAddress = computed(() => {
   if (!props.order) return "—"
+
+  const timeStr = props.order.iiko_creation_time || props.order.actual_time || props.order.created_at
+
   if (props.order.order_type === "Самовывоз" || !props.order.delivery_address) return "🙍 Самовывоз"
 
   const status = (props.order.status || "").toLowerCase()
@@ -135,42 +198,42 @@ const formattedAddress = computed(() => {
 
 const statusColor = computed(() => {
   const statusColors = {
-    new: "#E3F2FD",
-    unconfirmed: "#FFF3E0",
-    confirmed: "#E1F5FE",
-    preparing: "#E0F2F1",
-    cooking: "#FFF8E1",
-    ready: "#E8F5E9",
-    readyForPickup: "#E8F5E9",
-    delivering: "#E8EAF6",
-    delivered: "#F1F8E9",
-    closed: "#F5F5F5",
-    cancelled: "#FFEBEE",
+    new: "#F0F9FF",          // Light Blue
+    unconfirmed: "#FFFBEB",  // Light Amber
+    confirmed: "#EFF6FF",    // Light Blue
+    preparing: "#F0FDF4",    // Light Green
+    cooking: "#FFFBEB",      // Light Amber
+    ready: "#ECFDF5",        // Light Emerald
+    readyForPickup: "#ECFDF5",
+    delivering: "#EEF2FF",   // Light Indigo
+    delivered: "#F0FDF4",    // Light Green
+    closed: "#F8FAFC",       // Slate 50
+    cancelled: "#FEF2F2",    // Light Red
   }
 
   const key = props.order?.status ? props.order.status.replace(/_([a-z])/g, g => g[1].toUpperCase()) : "new"
 
-  return statusColors[key] || "#F5F5F5"
+  return statusColors[key] || "#F8FAFC"
 })
 
 const statusTextColor = computed(() => {
   const textColors = {
-    new: "#1565C0",
-    unconfirmed: "#E65100",
-    confirmed: "#0277BD",
-    preparing: "#00695C",
-    cooking: "#F57F17",
-    ready: "#2E7D32",
-    readyForPickup: "#2E7D32",
-    delivering: "#283593",
-    delivered: "#33691E",
-    closed: "#616161",
-    cancelled: "#C62828",
+    new: "#0369A1",          // Darker Blue
+    unconfirmed: "#B45309",  // Darker Amber
+    confirmed: "#1D4ED8",    // Darker Blue
+    preparing: "#15803D",    // Darker Green
+    cooking: "#B45309",
+    ready: "#047857",        // Darker Emerald
+    readyForPickup: "#047857",
+    delivering: "#4338CA",   // Darker Indigo
+    delivered: "#15803D",
+    closed: "#475569",       // Slate 600
+    cancelled: "#B91C1C",    // Darker Red
   }
 
   const key = props.order?.status ? props.order.status.replace(/_([a-z])/g, g => g[1].toUpperCase()) : "new"
 
-  return textColors[key] || "#616161"
+  return textColors[key] || "#475569"
 })
 
 const getStatusLabel = status => {
@@ -241,15 +304,71 @@ const getStatusDuration = idx => {
 }
 
 const printOrder = () => {
-  // Logic for printing
   window.print()
+}
+
+const getLoyaltyIcon = type => {
+  switch (type) {
+  case 'coupon_series': return 'bx-purchase-tag'
+  case 'promotion': return 'bx-gift'
+  case 'manual_condition': return 'bx-cog'
+  case 'discount': return 'bx-minus-circle'
+  default: return 'bx-star'
+  }
+}
+
+const getLoyaltyColor = type => {
+  switch (type) {
+  case 'coupon_series': return 'blue-lighten-5'
+  case 'promotion': return 'pink-lighten-5'
+  case 'manual_condition': return 'amber-lighten-5'
+  case 'discount': return 'red-lighten-5'
+  default: return 'grey-lighten-5'
+  }
+}
+
+const getLoyaltyIconColor = type => {
+  switch (type) {
+  case 'coupon_series': return 'blue-darken-1'
+  case 'promotion': return 'pink-darken-1'
+  case 'manual_condition': return 'amber-darken-2'
+  case 'discount': return 'red-darken-1'
+  default: return 'grey-darken-1'
+  }
+}
+
+const filteredDiscounts = computed(() => {
+  return props.order?.discounts_details?.items || []
+})
+
+const getPaymentIcon = kind => {
+  const icons = {
+    cash: 'bx-money',
+    card: 'bx-credit-card',
+    online: 'bx-globe',
+    external: 'bx-link-external',
+    iikocard: 'bx-gift',
+  }
+  return icons[kind] || 'bx-wallet'
+}
+
+const getPaymentLabel = kind => {
+  const labels = {
+    cash: 'Наличные',
+    card: 'Карта',
+    online: 'Онлайн',
+    external: 'Внешняя',
+    iikocard: 'Бонусы/Карта',
+  }
+
+  return labels[kind] || kind || 'Оплата'
 }
 </script>
 
 <template>
   <VDialog
     v-model="dialog"
-    max-width="1000"
+    max-width="1200"
     scrollable
     transition="fade-transition"
   >
@@ -263,22 +382,29 @@ const printOrder = () => {
           <div class="d-flex align-center ga-3">
             <VIcon
               icon="bx-receipt"
-              color="grey-lighten-1"
+              color="blue-grey-lighten-4"
               size="24"
             />
-            <span class="text-h5 font-weight-bold text-slate-800">Заказ #{{ order.id }}</span>
+            <span 
+              class="text-h5 font-weight-bold" 
+              style="color: var(--text-dark)"
+            >
+              Заказ №{{ order.external_number || order.number || order.id }}
+            </span>
             <VChip
               size="x-small"
-              color="blue-grey-lighten-5"
+              color="indigo-lighten-5"
               variant="flat"
-              class="text-uppercase font-weight-bold text-blue-grey-lighten-1"
+              class="text-uppercase font-weight-bold"
+              style="color: #6366f1 !important"
             >
               {{ order.source || 'iiko' }}
             </VChip>
           </div>
           <span
             v-if="order.external_number"
-            class="text-caption text-disabled ms-9"
+            class="text-caption ms-9"
+            style="color: var(--text-light)"
           >
             Внешний ID: {{ order.external_number }}
           </span>
@@ -287,8 +413,26 @@ const printOrder = () => {
         <VSpacer />
 
         <div class="d-flex align-center ga-3">
+          <VBtn
+            v-if="order.iiko_order_id"
+            icon
+            variant="tonal"
+            color="primary"
+            size="small"
+            class="rounded-lg"
+            :loading="isSyncing"
+            @click="syncWithIiko"
+          >
+            <VIcon icon="bx-refresh" />
+            <VTooltip activator="parent">Обновить из iiko</VTooltip>
+          </VBtn>
+
           <VChip
-            :style="{ backgroundColor: statusColor + ' !important', color: statusTextColor + ' !important' }"
+            :style="{ 
+              backgroundColor: statusColor + ' !important', 
+              color: statusTextColor + ' !important', 
+              borderColor: 'rgba(0,0,0,0.05) !important' 
+            }"
             variant="flat"
             class="px-5 font-weight-bold shadow-sm border"
           >
@@ -305,19 +449,181 @@ const printOrder = () => {
           >
             <VIcon
               icon="bx-x"
-              color="grey-darken-1"
+              style="color: var(--text-muted)"
             />
           </VBtn>
         </div>
       </VCardTitle>
 
-      <VCardText class="pa-0 bg-slate-50">
+      <!-- Индикаторы изменений -->
+      <div 
+        v-if="order.change_indicators && Object.values(order.change_indicators).some(v => v)" 
+        class="px-6 py-3 bg-error-lighten-5 border-b d-flex flex-wrap ga-2"
+      >
+        <VChip
+          v-if="order.change_indicators.items"
+          size="small"
+          color="error"
+          variant="flat"
+          prepend-icon="bx-error"
+          class="font-weight-bold animate-pulse shadow-sm"
+        >
+          ИЗМЕНИЛСЯ СОСТАВ ЗАКАЗА!
+        </VChip>
+        <VChip
+          v-if="order.change_indicators.amount"
+          size="small"
+          color="error"
+          variant="flat"
+          prepend-icon="bx-error"
+          class="font-weight-bold animate-pulse shadow-sm"
+        >
+          ИЗМЕНИЛАСЬ СУММА ОПЛАТЫ!
+        </VChip>
+        <VChip
+          v-if="order.change_indicators.address"
+          size="small"
+          color="error"
+          variant="flat"
+          prepend-icon="bx-error"
+          class="font-weight-bold animate-pulse shadow-sm"
+        >
+          ИЗМЕНИЛСЯ АДРЕС ДОСТАВКИ!
+        </VChip>
+        <VChip
+          v-if="order.change_indicators.time"
+          size="small"
+          color="error"
+          variant="flat"
+          prepend-icon="bx-error"
+          class="font-weight-bold animate-pulse shadow-sm"
+        >
+          ИЗМЕНИЛОСЬ ВРЕМЯ ДОСТАВКИ!
+        </VChip>
+        <VChip
+          v-if="order.change_indicators.payment"
+          size="small"
+          color="error"
+          variant="flat"
+          prepend-icon="bx-error"
+          class="font-weight-bold animate-pulse shadow-sm"
+        >
+          ИЗМЕНИЛСЯ СПОСОБ ОПЛАТЫ!
+        </VChip>
+      </div>
+
+      <!-- Quick Info Banner -->
+      <div 
+        class="px-6 py-4 border-b d-flex flex-wrap align-center ga-6" 
+        style="background-color: var(--soft-bg)"
+      >
+        <!-- Execution Time -->
+        <div 
+          class="d-flex align-center ga-3 py-1 px-4 rounded-xl bg-white shadow-sm border" 
+          style="border-color: var(--soft-border) !important"
+        >
+          <div
+            :class="order.is_asap ? 'time-asap-soft' : 'time-preorder-soft'"
+            class="pa-2 rounded-lg border"
+          >
+            <VIcon
+              :icon="order.is_asap ? 'bx-bolt-circle' : 'bx-calendar-event'"
+              :color="order.is_asap ? 'amber-darken-1' : 'blue-darken-1'"
+              size="24"
+            />
+          </div>
+          <div class="d-flex flex-column">
+            <span class="section-label-soft mb-0">Срок исполнения</span>
+            <span class="data-value-soft">
+              {{ order.is_asap ? 'Как можно скорее' : 'Ко времени: ' + formatTime(order.expected_time) }}
+            </span>
+          </div>
+        </div>
+
+        <!-- Delivery Zone -->
+        <div
+          v-if="order.delivery_zone"
+          class="d-flex align-center ga-3 py-1 px-4 rounded-xl bg-white shadow-sm border"
+          style="border-color: var(--soft-border) !important"
+        >
+          <div 
+            class="pa-2 rounded-lg" 
+            style="background-color: #ecfdf5"
+          >
+            <VIcon
+              icon="bx-map-pin"
+              color="emerald-darken-1"
+              size="24"
+            />
+          </div>
+          <div class="d-flex flex-column">
+            <span class="section-label-soft mb-0">Зона доставки</span>
+            <span class="data-value-soft">
+              {{ order.delivery_zone }}
+            </span>
+          </div>
+        </div>
+
+        <!-- Terminal Group / Branch -->
+        <div
+          v-if="order.terminal_group_name"
+          class="d-flex align-center ga-3 py-1 px-4 rounded-xl bg-white shadow-sm border"
+          style="border-color: var(--soft-border) !important"
+        >
+          <div 
+            class="pa-2 rounded-lg" 
+            style="background-color: #f5f3ff"
+          >
+            <VIcon
+              icon="bx-store-alt"
+              color="purple-darken-1"
+              size="24"
+            />
+          </div>
+          <div class="d-flex flex-column">
+            <span class="section-label-soft mb-0">Точка продаж</span>
+            <span class="data-value-soft">
+              {{ order.terminal_group_name }}
+            </span>
+          </div>
+        </div>
+
+        <!-- Admin / Creation -->
+        <div 
+          class="d-flex align-center ga-3 py-1 px-4 rounded-xl bg-white shadow-sm border" 
+          style="border-color: var(--soft-border) !important"
+        >
+          <div 
+            class="pa-2 rounded-lg" 
+            style="background-color: #eef2ff"
+          >
+            <VIcon
+              icon="bx-user-circle"
+              color="indigo-darken-1"
+              size="24"
+            />
+          </div>
+          <div class="d-flex flex-column">
+            <span class="section-label-soft mb-0">Администратор</span>
+            <span class="data-value-soft">
+              {{ order.admin_name || 'Автоматически' }}
+            </span>
+          </div>
+        </div>
+
+        <VSpacer />
+      </div>
+
+      <VCardText
+        class="pa-0 custom-scroll-premium"
+        style="background-color: var(--pastel-gray)"
+      >
         <VRow no-gutters>
           <!-- Left Column: Info Blocks -->
           <VCol
             cols="12"
             md="5"
-            class="border-e pa-6 d-flex flex-column ga-1"
+            class="border-e pa-6 d-flex flex-column ga-4"
           >
             <!-- 1. Client -->
             <div class="info-section-soft">
@@ -332,103 +638,81 @@ const printOrder = () => {
                 class="glass-block-soft d-flex align-center cursor-pointer"
                 @click="openCustomerModal"
               >
-                <VAvatar
-                  size="40"
-                  color="blue-grey-lighten-5"
-                  class="me-3 border"
-                >
+                <div class="premium-icon-box">
                   <VIcon
                     icon="bx-user"
-                    size="20"
+                    size="22"
                     color="blue-grey-lighten-2"
                   />
-                </VAvatar>
+                </div>
                 <div class="d-flex flex-column overflow-hidden">
-                  <span class="text-body-2 font-weight-bold text-truncate">{{ order.customer_info_details?.name || order.customer_name || 'Гость' }}</span>
-                  <span class="text-caption text-disabled">{{ order.customer_phone }}</span>
-                </div>
-                <VSpacer />
-                <div class="d-flex ga-2 px-2">
-                  <VTooltip
-                    v-if="(order.customer_info_details?.is_new_guest && (order.customer_info_details?.total_orders_count || 0) <= 1) || order.is_first_order"
-                    text="Новый гость"
+                  <span
+                    class="data-value-soft text-truncate"
+                    style="font-size: 1rem"
                   >
-                    <template #activator="{ props: tooltipProps }">
-                      <VIcon
-                        v-bind="tooltipProps"
-                        icon="bx-star"
-                        color="amber-lighten-3"
-                        size="20"
-                      />
-                    </template>
-                  </VTooltip>
-                  <VTooltip
-                    v-if="isLongTimeAgo(order.customer_info_details?.last_order_date)"
-                    text="Вернувшийся клиент"
-                  >
-                    <template #activator="{ props: tooltipProps }">
-                      <VIcon
-                        v-bind="tooltipProps"
-                        icon="ri-history-line"
-                        color="warning"
-                        size="20"
-                      />
-                    </template>
-                  </VTooltip>
-                  <VTooltip :text="order.customer_info_details?.is_high_risk ? 'Высокий риск' : 'Проверен'">
-                    <template #activator="{ props: tooltipProps }">
-                      <VIcon
-                        v-bind="tooltipProps"
-                        :icon="order.customer_info_details?.is_high_risk ? 'bx-shield-x' : 'bx-shield-quarter'"
-                        :color="order.customer_info_details?.is_high_risk ? 'red-lighten-4' : 'green-lighten-4'"
-                        size="20"
-                      />
-                    </template>
-                  </VTooltip>
-                </div>
-                <VIcon
-                  icon="bx-chevron-right"
-                  color="grey-lighten-3"
-                />
-              </div>
-            </div>
-
-            <!-- 2. Execution Time -->
-            <div class="info-section-soft">
-              <div class="section-label-soft">
-                <VIcon
-                  icon="bx-time-five"
-                  size="14"
-                  class="me-1"
-                /> ВРЕМЯ ИСПОЛНЕНИЯ
-              </div>
-              <div
-                class="glass-block-soft d-flex align-center"
-                :class="order.is_asap ? 'time-asap-soft' : 'time-preorder-soft'"
-              >
-                <div class="me-4 text-h5 opacity-50">
-                  {{ order.is_asap ? '⚡' : '📅' }}
-                </div>
-                <div class="d-flex flex-column">
-                  <span class="text-overline font-weight-black leading-none mb-1 opacity-50">
-                    {{ order.is_asap ? 'КАК МОЖНО СКОРЕЕ' : 'ПРЕДЗАКАЗ' }}
+                    {{ order.customer_info_details?.name || order.customer_name || 'Гость' }}
                   </span>
-                  <div class="d-flex align-baseline ga-2">
-                    <span class="text-h6 font-weight-bold leading-none text-slate-700">
-                      {{ formatDateTime(order.expected_time || order.creation_date, { day: undefined, month: undefined, year: undefined }) }}
-                    </span>
-                    <span
-                      v-if="!order.is_asap"
-                      class="text-caption font-weight-medium text-slate-500"
-                    >
-                      {{ formatDateTime(order.expected_time, { hour: undefined, minute: undefined, second: undefined }) }}
-                    </span>
+                  <div class="d-flex align-center ga-2">
+                    <span class="text-caption text-slate-500 font-weight-bold">{{ order.customer_phone }}</span>
+                    <VBtn
+                      v-if="order.customer_phone"
+                      icon="bx-phone-call"
+                      size="20"
+                      color="success"
+                      variant="tonal"
+                      density="compact"
+                      class="rounded-sm"
+                      @click.stop="callCustomer(order.customer_phone)"
+                    />
+                  </div>
+                  
+                  <div 
+                    v-if="customerInfo || order.customer_info_details" 
+                    class="d-flex align-center ga-3 mt-2"
+                  >
+                    <div class="d-flex align-center ga-1">
+                      <VIcon 
+                        icon="bx-wallet" 
+                        size="12" 
+                        color="indigo-lighten-2" 
+                      />
+                      <span class="text-tiny font-weight-black text-indigo-darken-1">
+                        {{ formatPrice((customerInfo || order.customer_info_details).bonus_points || 0) }} Б
+                      </span>
+                    </div>
+                    <div class="d-flex align-center ga-1">
+                      <VIcon 
+                        icon="bx-package" 
+                        size="12" 
+                        color="slate-400" 
+                      />
+                      <span class="text-tiny font-weight-bold text-slate-500">
+                        Заказов: {{ (customerInfo || order.customer_info_details).total_orders_count || 0 }}
+                      </span>
+                    </div>
                   </div>
                 </div>
+                <VSpacer />
+                <div class="d-flex ga-1 px-1">
+                  <VChip
+                    v-if="(customerInfo?.is_new_guest || order.customer_info_details?.is_new_guest) || order.is_first_order"
+                    size="x-small"
+                    class="loyalty-new font-weight-bold px-2"
+                    variant="flat"
+                  >
+                    НОВЫЙ
+                  </VChip>
+                  <VIcon
+                    v-if="order.customer_info_details?.is_high_risk"
+                    icon="bx-shield-x"
+                    color="error"
+                    size="18"
+                  />
+                </div>
               </div>
             </div>
 
-            <!-- 3. Comment -->
+            <!-- 1.1. Comment (Moved here) -->
             <div
               v-if="order.comment"
               class="info-section-soft"
@@ -440,12 +724,193 @@ const printOrder = () => {
                   class="me-1"
                 /> КОММЕНТАРИЙ
               </div>
-              <div class="glass-block-soft bg-white border-slate-100 text-body-2 italic text-slate-600">
+              <div class="glass-block-soft bg-white text-body-2 italic text-slate-600">
                 "{{ order.comment }}"
               </div>
             </div>
 
-            <!-- 4. Address -->
+
+
+            <!-- 3. Timing iiko -->
+            <div class="info-section-soft">
+              <div class="section-label-soft">
+                <VIcon
+                  icon="bx-time"
+                  size="14"
+                  class="me-1"
+                /> ТАЙМИНГ (IIKO)
+              </div>
+              <div class="glass-block-soft pa-3">
+                <div class="d-flex flex-column ga-2">
+                  <div class="d-flex justify-space-between align-center">
+                    <span class="text-caption text-slate-400 font-weight-bold uppercase">ОБЕЩАНО</span>
+                    <span class="text-body-2 font-weight-bold text-slate-700">{{ formatDateTime(order.expected_time) }}</span>
+                  </div>
+                  <div 
+                    v-if="order.actual_time" 
+                    class="d-flex justify-space-between align-center"
+                  >
+                    <span class="text-caption text-slate-400 font-weight-bold uppercase">ИСПОЛНЕНО</span>
+                    <span class="text-body-2 font-weight-bold text-slate-700">{{ formatDateTime(order.actual_time) }}</span>
+                  </div>
+                  <div 
+                    v-if="order.delay_minutes > 0" 
+                    class="d-flex justify-space-between align-center pt-2 border-t border-dashed"
+                  >
+                    <span class="text-caption text-error font-weight-bold uppercase">ОПОЗДАНИЕ</span>
+                    <VChip 
+                      size="x-small" 
+                      color="error" 
+                      variant="flat" 
+                      class="font-weight-bold"
+                    >
+                      {{ order.delay_minutes }} мин.
+                    </VChip>
+                  </div>
+                  <div 
+                    v-else-if="order.actual_time" 
+                    class="d-flex justify-space-between align-center pt-2 border-t border-dashed"
+                  >
+                    <span class="text-caption text-success font-weight-bold uppercase">СТАТУС</span>
+                    <span class="text-caption font-weight-black text-success">ВОВРЕМЯ</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <!-- 4. Loyalty & Discounts -->
+            <div
+              v-if="order.discounts_details?.items?.length || order.bonus_spent > 0 || order.bonus_accrued > 0"
+              class="info-section-soft"
+            >
+              <div class="section-label-soft">
+                <VIcon
+                  icon="bx-gift"
+                  size="14"
+                  class="me-1"
+                /> ЛОЯЛЬНОСТЬ
+              </div>
+              <div class="glass-block-soft bg-white pa-3">
+
+                <!-- Discounts and Promotions -->
+                <div 
+                  v-for="(discount, idx) in filteredDiscounts" 
+                  :key="idx"
+                  class="d-flex align-center justify-space-between"
+                  :class="idx < (filteredDiscounts.length - 1) || order.bonus_accrued > 0 ? 'mb-2' : ''"
+                >
+                  <div class="d-flex align-center overflow-hidden">
+                    <VAvatar 
+                      size="24" 
+                      :color="getLoyaltyColor(discount.type)" 
+                      class="me-2"
+                    >
+                      <VIcon 
+                        :icon="getLoyaltyIcon(discount.type)" 
+                        size="14" 
+                        :color="getLoyaltyIconColor(discount.type)" 
+                      />
+                    </VAvatar>
+                    <div class="d-flex flex-column overflow-hidden">
+                      <span class="text-caption font-weight-bold text-truncate">{{ discount.name }}</span>
+                      <span 
+                        v-if="discount.type === 'coupon_series'" 
+                        class="text-tiny text-blue-darken-1"
+                      >
+                        Купон: {{ discount.coupon || 'Применен' }}
+                      </span>
+                    </div>
+                  </div>
+                  <span class="text-caption font-weight-bold text-red-darken-1">-{{ formatPrice(discount.sum) }} ₽</span>
+                </div>
+
+                <!-- Accrued Bonuses -->
+                <div 
+                  v-if="order.bonus_accrued > 0" 
+                  class="d-flex align-center justify-space-between mt-2 pt-2 border-t border-dashed"
+                >
+                  <div class="d-flex align-center">
+                    <VAvatar 
+                      size="24" 
+                      color="green-lighten-5" 
+                      class="me-2"
+                    >
+                      <VIcon 
+                        icon="bx-plus-circle" 
+                        size="14" 
+                        color="green-darken-1" 
+                      />
+                    </VAvatar>
+                    <span class="text-caption font-weight-bold">Будет начислено</span>
+                  </div>
+                  <span class="text-caption font-weight-bold text-green-darken-2">+{{ formatPrice(order.bonus_accrued) }} Б</span>
+                </div>
+              </div>
+            </div>
+
+            <!-- [NEW] 5.5 Applied Promotions (Loyalty Details) -->
+            <div 
+              v-if="order.discounts_details?.items?.length" 
+              class="info-section-soft"
+            >
+              <div class="section-label-soft">
+                <VIcon
+                  icon="bx-gift"
+                  size="14"
+                  class="me-1"
+                /> ПРИМЕНЕННЫЕ АКЦИИ (IIKO)
+              </div>
+              <div class="glass-block-soft pa-0">
+                <VList density="compact" class="bg-transparent pa-0">
+                  <VListItem
+                    v-for="(item, idx) in order.discounts_details.items"
+                    :key="idx"
+                    class="py-2"
+                    :class="{ 'border-b border-dashed': idx < order.discounts_details.items.length - 1 }"
+                  >
+                    <template #prepend>
+                      <VAvatar 
+                        size="32" 
+                        :color="getLoyaltyColor(item.ui_info?.type || item.type)" 
+                        class="me-3"
+                      >
+                        <VIcon 
+                          :icon="getLoyaltyIcon(item.ui_info?.type || item.type)" 
+                          size="18" 
+                          :color="getLoyaltyIconColor(item.ui_info?.type || item.type)" 
+                        />
+                      </VAvatar>
+                    </template>
+
+                    <VListItemTitle class="text-body-2 font-weight-bold d-flex align-center justify-space-between">
+                      <span class="text-truncate" style="max-width: 250px;">{{ item.name }}</span>
+                      <span class="text-red-darken-1">-{{ formatPrice(item.sum) }} ₽</span>
+                    </VListItemTitle>
+
+                    <VListItemSubtitle class="mt-1 d-flex flex-column ga-1">
+                      <div v-if="item.ui_info?.program_name" class="d-flex align-center ga-1">
+                        <VIcon icon="bx-purchase-tag-alt" size="12" color="primary" />
+                        <span class="text-caption font-weight-medium text-primary">Программа: {{ item.ui_info.program_name }}</span>
+                      </div>
+                      <div v-if="item.ui_info?.marketing_campaign_name" class="d-flex align-center ga-1">
+                        <VIcon icon="bx-bullseye" size="12" color="pink" />
+                        <span class="text-caption">Акция: {{ item.ui_info.marketing_campaign_name }}</span>
+                      </div>
+                      <div v-if="item.ui_info?.coupon || item.ui_info?.certificate" class="d-flex align-center ga-1">
+                        <VIcon icon="bx-qr-scan" size="12" color="indigo" />
+                        <span class="text-caption text-indigo-darken-2 font-weight-bold">
+                          {{ item.ui_info.coupon ? `Купон: ${item.ui_info.coupon}` : `Сертификат: ${item.ui_info.certificate}` }}
+                        </span>
+                      </div>
+                    </VListItemSubtitle>
+                  </VListItem>
+                </VList>
+              </div>
+            </div>
+
+
+
+            <!-- 6. Address -->
             <div class="info-section-soft">
               <div class="section-label-soft d-flex justify-space-between w-100">
                 <span>
@@ -459,27 +924,62 @@ const printOrder = () => {
                   v-if="order.delivery_address && order.order_type !== 'Самовывоз'"
                   class="d-flex ga-1 mt-n1"
                 >
-                  <VBtn
-                    :href="yandexMapLink"
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    size="x-small"
-                    variant="text"
-                    color="grey-lighten-2"
-                    icon="bx-map"
-                  />
-                  <VBtn
-                    :href="twoGisLink"
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    size="x-small"
-                    variant="text"
-                    color="grey-lighten-2"
-                    icon="bx-navigation"
-                  />
+                  <VMenu>
+                    <template #activator="{ props: menuProps }">
+                      <VBtn
+                        v-bind="menuProps"
+                        size="x-small"
+                        variant="tonal"
+                        color="primary"
+                        prepend-icon="bx-map"
+                        class="soft-btn px-2"
+                      >
+                        Открыть в навигаторе
+                        <VIcon
+                          icon="bx-chevron-down"
+                          size="12"
+                          class="ms-1"
+                        />
+                      </VBtn>
+                    </template>
+                    <VList density="compact">
+                      <VListItem
+                        :href="yandexMapLink"
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        prepend-icon="bx-map"
+                      >
+                        <VListItemTitle>Яндекс.Карты</VListItemTitle>
+                      </VListItem>
+                      <VListItem
+                        :href="twoGisLink"
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        prepend-icon="bx-navigation"
+                      >
+                        <VListItemTitle>2GIS</VListItemTitle>
+                      </VListItem>
+                      <VListItem
+                        :href="googleMapsLink"
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        prepend-icon="bx-globe"
+                      >
+                        <VListItemTitle>Google Maps</VListItemTitle>
+                      </VListItem>
+                      <VListItem
+                        :href="petalMapsLink"
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        prepend-icon="bx-mobile-vibration"
+                      >
+                        <VListItemTitle>Petal Maps</VListItemTitle>
+                      </VListItem>
+                    </VList>
+                  </VMenu>
                 </div>
               </div>
-              <div class="glass-block-soft">
+              <div class="glass-block-soft pa-3">
                 <div class="text-body-2 font-weight-bold text-slate-700">
                   {{ formattedAddress }}
                 </div>
@@ -504,7 +1004,7 @@ const printOrder = () => {
               </div>
             </div>
 
-            <!-- 5. Courier -->
+            <!-- 7. Courier -->
             <div class="info-section-soft">
               <div class="section-label-soft">
                 <VIcon
@@ -528,7 +1028,7 @@ const printOrder = () => {
               </div>
             </div>
 
-            <!-- 6. State & Payment Type -->
+            <!-- 8. State & Payment Type -->
             <div class="info-section-soft">
               <div class="section-label-soft">
                 <VIcon
@@ -541,11 +1041,10 @@ const printOrder = () => {
                 <div class="d-flex align-center ga-2 bg-white pa-2 px-3 rounded-lg border border-slate-100 shadow-sm">
                   <span class="text-caption text-disabled">Оплата:</span>
                   <VChip
-                    :color="order.is_paid ? '#E8F5E9' : '#FFF3E0'"
+                    :class="order.is_paid ? 'status-soft-success' : 'status-soft-warning'"
                     size="x-small"
                     variant="flat"
-                    class="font-weight-bold"
-                    :style="{ color: order.is_paid ? '#2E7D32' : '#E65100' }"
+                    class="font-weight-bold px-3"
                   >
                     {{ order.is_paid ? 'ОПЛАЧЕН' : 'НЕ ОПЛАЧЕН' }}
                   </VChip>
@@ -557,12 +1056,60 @@ const printOrder = () => {
               </div>
             </div>
 
-            <!-- 7. Financials Mini -->
+            <!-- 9. Order Meta (Moved to bottom) -->
+            <div class="info-section-soft">
+              <div class="section-label-soft">
+                <VIcon
+                  icon="bx-info-circle"
+                  size="14"
+                  class="me-1"
+                /> ИНФОРМАЦИЯ О ЗАКАЗЕ
+              </div>
+              <div class="glass-block-soft pa-3">
+                <div class="d-flex flex-column ga-2">
+                  <div class="d-flex justify-space-between align-center">
+                    <span class="text-caption text-slate-400 font-weight-bold uppercase">Источник</span>
+                    <VChip 
+                      size="x-small" 
+                      variant="tonal" 
+                      color="primary" 
+                      class="font-weight-black px-2"
+                    >
+                      {{ order.source || 'Сайт' }}
+                    </VChip>
+                  </div>
+                  <div 
+                    v-if="order.order_number" 
+                    class="d-flex justify-space-between align-center"
+                  >
+                    <span class="text-caption text-slate-400 font-weight-bold uppercase">Внешний ID</span>
+                    <span class="text-caption font-weight-bold text-slate-600">{{ order.order_number }}</span>
+                  </div>
+                  <div class="d-flex justify-space-between align-center">
+                    <span class="text-caption text-slate-400 font-weight-bold uppercase">Создан на сайте</span>
+                    <span class="text-caption font-weight-medium text-slate-500">{{ formatDateTime(order.created_at) }}</span>
+                  </div>
+                  <div 
+                    v-if="order.admin_name" 
+                    class="d-flex justify-space-between align-center border-t border-dashed mt-1 pt-1"
+                  >
+                    <span class="text-caption text-slate-400 font-weight-bold uppercase">Админ</span>
+                    <span class="text-caption font-weight-black text-indigo-accent-2">{{ order.admin_name }}</span>
+                  </div>
+                  <div class="d-flex justify-space-between align-center">
+                    <span class="text-caption text-slate-400 font-weight-bold uppercase">Создан в iiko</span>
+                    <span class="text-caption font-weight-bold text-slate-500">{{ formatDateTime(order.iiko_creation_time) }}</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <!-- 9. Financials Mini -->
             <div class="info-section-soft mt-auto mb-0">
               <div class="financial-panel-glass-soft">
                 <div class="financial-row">
-                  <span>Подытог:</span>
-                  <span class="value">{{ formatPrice(parseFloat(order.total_with_discount || 0) + parseFloat(order.total_discount || 0)) }} ₽</span>
+                  <span>Сумма товаров:</span>
+                  <span class="value">{{ formatPrice(props.order.total_amount || 0) }} ₽</span>
                 </div>
                 <div
                   v-if="parseFloat(order.total_discount || 0) > 0"
@@ -571,25 +1118,77 @@ const printOrder = () => {
                   <span>Скидка:</span>
                   <span class="value">-{{ formatPrice(order.total_discount) }} ₽</span>
                 </div>
-                <div class="financial-row total">
-                  <span>ИТОГО:</span>
-                  <span class="value">{{ formatPrice(order.total_with_discount) }} ₽</span>
+
+                <div class="financial-row total border-t-dotted mt-3 pt-3">
+                  <span>ИТОГО К ОПЛАТЕ:</span>
+                  <span class="value text-indigo-accent-2 font-weight-black" style="font-size: 1.1rem;">{{ formatPrice(order.total_with_discount) }} ₽</span>
                 </div>
+
+                <div class="financial-row mt-2" style="font-size: 0.85rem; opacity: 0.8;">
+                  <span>Оплачено:</span>
+                  <span class="value text-success font-weight-bold">{{ formatPrice(order.total_paid > 0 ? order.total_paid : (order.total_with_discount - (order.left_to_pay || 0))) }} ₽</span>
+                </div>
+                <div v-if="parseFloat(order.left_to_pay || 0) > 0" class="financial-row" style="font-size: 0.85rem; color: #f43f5e;">
+                  <span>Остаток к оплате:</span>
+                  <span class="value font-weight-bold">{{ formatPrice(order.left_to_pay) }} ₽</span>
+                </div>
+
+                <!-- Детализация оплат -->
                 <VDivider class="my-3 opacity-30" />
-                <div class="d-flex justify-space-between align-center mb-3">
-                  <span class="text-subtitle-1 font-weight-bold text-slate-600">ИТОГО К ОПЛАТЕ:</span>
-                  <span class="text-h5 font-weight-black text-indigo-accent-2">{{ formatPrice(order.total_with_discount) }} ₽</span>
+                <div 
+                  class="section-label-soft mb-2" 
+                  style="font-size: 10px;"
+                >
+                  ДЕТАЛИ ОПЛАТЫ
                 </div>
-                <div class="d-flex justify-space-between align-center pt-2 border-t">
-                  <span class="text-caption text-disabled">Метод оплаты:</span>
-                  <VChip
-                    size="x-small"
-                    variant="tonal"
-                    color="grey-lighten-1"
-                    class="font-weight-bold"
+                
+                <div v-if="order.payments_details?.items?.length">
+                  <div 
+                    v-for="(pay, pidx) in order.payments_details.items" 
+                    :key="pidx"
+                    class="d-flex justify-space-between align-center mb-1"
                   >
-                    {{ order.payment_method || '—' }}
-                  </VChip>
+                    <div class="d-flex align-center">
+                      <VIcon 
+                        :icon="getPaymentIcon(pay.paymentType?.name || pay.type)" 
+                        size="12" 
+                        class="me-1 opacity-50" 
+                      />
+                      <span class="text-tiny text-slate-700">{{ pay.paymentType?.name || getPaymentLabel(pay.type) }}</span>
+                    </div>
+                    <span class="text-tiny text-slate-800">{{ formatPrice(pay.sum) }} ₽</span>
+                  </div>
+                </div>
+                <div v-else class="d-flex justify-space-between align-center mb-1">
+                  <div class="d-flex align-center">
+                    <VIcon 
+                      icon="bx-wallet" 
+                      size="12" 
+                      class="me-1 opacity-50" 
+                    />
+                    <span class="text-tiny text-slate-500">{{ order.payment_method || 'Способ не указан' }}</span>
+                  </div>
+                  <span class="text-tiny">{{ formatPrice(order.total_with_discount) }} ₽</span>
+                </div>
+
+                <!-- Остаток к оплате -->
+                <div 
+                  v-if="parseFloat(order.left_to_pay) > 0" 
+                  class="d-flex justify-space-between align-center mt-2 pa-2 rounded bg-red-lighten-5 border border-red-lighten-4"
+                >
+                  <span class="text-caption font-weight-bold text-red-darken-2 uppercase">ОСТАЛОСЬ ОПЛАТИТЬ:</span>
+                  <span class="text-subtitle-2 font-weight-black text-red-darken-2">{{ formatPrice(order.left_to_pay) }} ₽</span>
+                </div>
+                <div 
+                  v-else-if="order.is_paid" 
+                  class="d-flex justify-space-between align-center mt-2 pa-2 rounded bg-green-lighten-5 border border-green-lighten-4"
+                >
+                  <span class="text-caption font-weight-bold text-green-darken-2 uppercase">ПОЛНОСТЬЮ ОПЛАЧЕН</span>
+                  <VIcon 
+                    icon="bx-check-double" 
+                    size="16" 
+                    color="green-darken-2" 
+                  />
                 </div>
               </div>
             </div>
@@ -652,9 +1251,13 @@ const printOrder = () => {
                     v-for="(item, idx) in order.order_items_details"
                     :key="'det-'+idx"
                   >
-                    <tr>
+                    <tr :class="{ 'deleted-item-row': item.deleted }">
                       <td class="py-3">
-                        <div class="font-weight-bold text-body-2 text-slate-700">
+                        <div 
+                          class="font-weight-bold text-body-2"
+                          :class="item.deleted ? 'text-disabled' : 'text-slate-700'"
+                        >
+                          <VIcon v-if="item.deleted" icon="bx-x" size="14" color="error" class="me-1" />
                           {{ item.name }}
                         </div>
                         <div
@@ -670,7 +1273,7 @@ const printOrder = () => {
                       <td class="text-right text-body-2">
                         {{ formatPrice(item.price) }} ₽
                       </td>
-                      <td class="text-right font-weight-bold text-body-2 text-slate-600">
+                      <td class="text-right font-weight-bold text-body-2" :class="item.deleted ? 'text-disabled' : 'text-slate-600'">
                         {{ formatPrice(item.sum || (item.amount * item.price)) }} ₽
                       </td>
                     </tr>
@@ -709,35 +1312,74 @@ const printOrder = () => {
               </tbody>
             </VTable>
 
-            <!-- 2. Financials Duplicate -->
-            <div class="glass-block-soft d-flex flex-wrap justify-space-between align-center ga-4 mb-8">
-              <div class="d-flex ga-6 align-center">
+            <!-- 2. Financial Summary Banner -->
+            <div class="glass-block-soft d-flex flex-wrap justify-space-between align-center ga-6 mb-8 py-5 px-6 financial-banner-soft">
+              <div class="d-flex ga-6 align-center flex-wrap">
                 <div class="d-flex flex-column">
-                  <span class="text-caption text-disabled uppercase">Подытог</span>
-                  <span class="text-body-2 font-weight-bold text-slate-600">{{ formatPrice(parseFloat(order.total_with_discount || 0) + parseFloat(order.total_discount || 0)) }} ₽</span>
+                  <span class="text-caption text-slate-400 font-weight-bold text-uppercase-bold mb-1">Сумма</span>
+                  <span class="text-h6 font-weight-black text-slate-700">{{ formatPrice(order.total_amount) }} ₽</span>
                 </div>
-                <VDivider
-                  vertical
-                  length="24"
-                  class="mx-0 opacity-30"
-                />
+                
+                <VDivider vertical length="32" class="mx-0 opacity-20" />
+                
                 <div class="d-flex flex-column">
-                  <span class="text-caption text-disabled uppercase">Скидка</span>
-                  <span class="text-body-2 font-weight-bold text-red-lighten-2">-{{ formatPrice(order.total_discount) }} ₽</span>
+                  <span class="text-caption text-error-darken-1 font-weight-bold text-uppercase-bold mb-1">Скидки</span>
+                  <span class="text-h6 font-weight-black text-error">-{{ formatPrice(order.total_discount || 0) }} ₽</span>
                 </div>
-                <VDivider
-                  vertical
-                  length="24"
-                  class="mx-0 opacity-30"
-                />
+
+
+
                 <div class="d-flex flex-column">
-                  <span class="text-caption text-disabled uppercase">Итого</span>
-                  <span class="text-h6 font-weight-black text-indigo-accent-2">{{ formatPrice(order.total_with_discount) }} ₽</span>
+                  <span class="text-caption text-indigo-darken-1 font-weight-bold text-uppercase-bold mb-1">К оплате</span>
+                  <span class="text-h6 font-weight-black text-indigo-accent-4">{{ formatPrice(order.total_with_discount || order.sum) }} ₽</span>
                 </div>
               </div>
-              <div class="d-flex flex-column align-end">
-                <span class="text-caption text-disabled uppercase mb-1">Метод оплаты</span>
-                <span class="text-caption font-weight-bold text-slate-500 bg-slate-100 px-2 py-1 rounded">{{ order.payment_method || '—' }}</span>
+
+              <div class="d-flex ga-6 align-center flex-wrap">
+                <VDivider vertical length="32" class="mx-0 opacity-20 hidden-sm-and-down" />
+                
+                <div class="d-flex flex-column align-end">
+                  <span class="text-caption text-success-darken-2 font-weight-bold text-uppercase-bold mb-1">Оплачено</span>
+                  <div class="d-flex align-center">
+                    <VIcon v-if="(order.total_paid > 0 ? order.total_paid : (order.total_with_discount - (order.left_to_pay || 0))) >= order.total_with_discount" icon="bx-check-circle" color="success" size="18" class="me-2" />
+                    <span class="text-h6 font-weight-black text-success">{{ formatPrice(order.total_paid > 0 ? order.total_paid : (order.total_with_discount - (order.left_to_pay || 0))) }} ₽</span>
+                  </div>
+                </div>
+
+                <div v-if="parseFloat(order.left_to_pay) > 0" class="d-flex flex-column align-end">
+                  <span class="text-caption text-error font-weight-bold text-uppercase-bold mb-1">Остаток</span>
+                  <span class="text-h6 font-weight-black text-error pulse-soft">{{ formatPrice(order.left_to_pay) }} ₽</span>
+                </div>
+              </div>
+            </div>
+
+            <div class="d-flex flex-column align-end mb-8">
+              <div class="d-flex align-center ga-2 flex-wrap justify-end">
+                <template v-if="order.payments_details?.items?.length">
+                  <VChip
+                    v-for="(pay, pidx) in order.payments_details.items"
+                    :key="pidx"
+                    size="small"
+                    variant="outlined"
+                    class="payment-chip-soft"
+                    :class="pay.is_processed ? 'processed' : 'pending'"
+                  >
+                    <VIcon 
+                      :icon="getPaymentIcon(pay.kind)" 
+                      size="14" 
+                      class="me-2" 
+                    />
+                    {{ pay.name || getPaymentLabel(pay.kind) }}: {{ formatPrice(pay.sum) }} ₽
+                  </VChip>
+                </template>
+                <VChip 
+                  v-else 
+                  color="slate-100" 
+                  class="text-slate-700 font-weight-bold border border-slate-200" 
+                  variant="flat"
+                >
+                  {{ order.payment_method || 'Способ не указан' }}
+                </VChip>
               </div>
             </div>
 
@@ -829,8 +1471,6 @@ const printOrder = () => {
 
 <style scoped>
 .order-detail-card-soft {
-  box-shadow: 0 30px 60px -12px rgba(0, 0, 0, 0.12) !important;
-  background-color: #ffffff !important;
   border-radius: 24px !important;
 }
 
@@ -840,28 +1480,25 @@ const printOrder = () => {
 .text-slate-600 { color: #475569 !important; }
 .text-slate-500 { color: #64748b !important; }
 .text-slate-400 { color: #94a3b8 !important; }
-.bg-slate-50 { background-color: #f8fafc !important; }
-.bg-slate-100 { background-color: #f1f5f9 !important; }
-.border-slate-100 { border-color: #f1f5f9 !important; }
 
 .shadow-sm {
   box-shadow: 0 1px 2px 0 rgba(0, 0, 0, 0.05) !important;
 }
 
-.uppercase { text-transform: uppercase !important; letter-spacing: 0.08em !important; }
+.uppercase { text-transform: uppercase !important; letter-spacing: 0.12em !important; font-weight: 600 !important; }
 
 /* Content Blocks */
 .info-section-soft {
-  margin-bottom: 28px;
+  margin-bottom: 24px;
 }
 
 .section-label-soft {
   font-size: 11px;
-  font-weight: 800;
+  font-weight: 600;
   color: #94a3b8;
   text-transform: uppercase;
   letter-spacing: 0.12em;
-  margin-bottom: 12px;
+  margin-bottom: 10px;
   display: flex;
   align-items: center;
   opacity: 0.8;
@@ -885,7 +1522,7 @@ const printOrder = () => {
 .financial-row {
   display: flex;
   justify-content: space-between;
-  margin-bottom: 10px;
+  margin-bottom: 8px;
   font-size: 14px;
   color: #475569;
 }
@@ -896,8 +1533,8 @@ const printOrder = () => {
 }
 
 .financial-row.total {
-  margin-top: 16px;
-  padding-top: 16px;
+  margin-top: 12px;
+  padding-top: 12px;
   border-top: 1px dashed #e2e8f0;
   font-weight: 800;
   color: #1e293b;
@@ -939,20 +1576,34 @@ const printOrder = () => {
 }
 
 /* Items Table Refinement */
-.items-table-soft {
+.order-items-table-soft {
   border-radius: 16px !important;
   overflow: hidden !important;
   border: 1px solid #f1f5f9 !important;
   background: white !important;
 }
 
-.items-table-soft :deep(th) {
+.order-items-table-soft :deep(th) {
   background: #fcfdfe !important;
   color: #64748b !important;
   font-size: 11px !important;
   font-weight: 800 !important;
   height: 48px !important;
   border-bottom: 1px solid #f1f5f9 !important;
+}
+
+.deleted-item-row {
+  background-color: #fffafb !important;
+}
+
+.deleted-item-row td {
+  text-decoration: line-through;
+  color: #94a3b8 !important;
+  opacity: 0.7;
+}
+
+.deleted-item-row .text-disabled {
+  color: #cbd5e1 !important;
 }
 
 .modifier-soft td {
@@ -962,6 +1613,13 @@ const printOrder = () => {
   font-size: 12px !important;
   padding-top: 4px !important;
   padding-bottom: 4px !important;
+}
+
+/* Accrued Bonuses Chip (in Loyalty) */
+.loyalty-new {
+  background-color: #fff1f2 !important;
+  color: #e11d48 !important;
+  border: 1px solid #fecdd3 !important;
 }
 
 /* Scrollbar styling */
@@ -975,7 +1633,7 @@ const printOrder = () => {
 }
 
 :deep(.v-card-text::-webkit-scrollbar-thumb) {
-  background-color: #cbd5e1;
-  border-radius: 20px;
+  background: #cbd5e1;
+  border-radius: 10px;
 }
 </style>

@@ -67,7 +67,7 @@ def get_all_modifiers(session: Session = Depends(get_session)):
         product = session.get(Product, g.product_id)
         result.append({
             "id": g.id,
-            "iiko_id": g.iiko_id,
+            "iiko_id": str(g.iiko_id) if g.iiko_id else None,
             "name": g.name,
             "product_id": g.product_id,
             "product_name": product.name if product else "—",
@@ -77,7 +77,7 @@ def get_all_modifiers(session: Session = Depends(get_session)):
             "modifiers": [
                 {
                     "id": m.id,
-                    "iiko_id": m.iiko_id,
+                    "iiko_id": str(m.iiko_id) if m.iiko_id else None,
                     "name": m.name,
                     "price": float(m.price),
                     "min_amount": m.min_amount,

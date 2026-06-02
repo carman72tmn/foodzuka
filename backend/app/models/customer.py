@@ -78,28 +78,38 @@ class Customer(SQLModel, table=True):
     registered_organization: Optional[str] = Field(default=None, max_length=255, description="Зарегистрировавшая организация")
     
     last_order_date: Optional[datetime] = Field(default=None, description="Дата последнего заказа")
+    first_order_date: Optional[datetime] = Field(default=None, description="Дата самого первого заказа")
     last_olap_sync_at: Optional[datetime] = Field(default=None, description="Время последней OLAP синхронизации аналитики")
+    
+    # [NEW] Поля расширенной аналитики OLAP
     total_orders_count: int = Field(default=0, description="Общее количество заказов")
-    total_orders_amount: Decimal = Field(sa_type=Numeric(12, 2), default=0, description="Общая сумма выкупленных заказов")
+    total_orders_amount: Decimal = Field(sa_type=Numeric(12, 2), default=0, description="Общая сумма выкупленных заказов (LTV)")
+    total_discount: Decimal = Field(sa_type=Numeric(12, 2), default=0, description="Общая сумма скидок")
+    total_items: float = Field(default=0, description="Общее количество товаров в заказах")
+    
+    average_check: Decimal = Field(sa_type=Numeric(12, 2), default=0, description="Средний чек")
+    frequency_days: float = Field(default=0, description="Средняя частота заказов в днях")
+    days_since_last_order: Optional[int] = Field(default=None, description="Количество дней с последнего заказа")
+    
+    total_purchases_sum: Decimal = Field(sa_type=Numeric(12, 2), default=0, description="Общая сумма выкупа (Laravel)")
     
     # Новые поля для синхронизации с Laravel (по ТЗ пользователя)
     is_high_risk: bool = Field(default=False, description="Статус высокого риска (Laravel)")
     risk_reason: Optional[str] = Field(default=None, description="Причина высокого риска (Laravel)")
     iiko_notes: Optional[str] = Field(default=None, description="Заметки iiko (Laravel)")
-    total_purchases_sum: Decimal = Field(sa_type=Numeric(12, 2), default=0, description="Общая сумма выкупа (Laravel)")
     last_iiko_order_id: Optional[str] = Field(default=None, description="ID последнего заказа в iiko (Laravel)")
+    last_order_id_iiko: Optional[str] = Field(default=None, description="ID последнего заказа в iiko (Cloud)")
+    wallet_balances: Optional[List[dict]] = Field(sa_type=JSONB, default=[], description="Балансы кошельков гостя iiko")
 
-    # Старые поля для обратной совместимости (если используются)
-    high_risk_status: bool = Field(default=False, description="Статус высокого риска (Python-legacy)")
-    high_risk_reason: Optional[str] = Field(default=None, description="Причина высокого риска (Python-legacy)")
-    iiko_comment: Optional[str] = Field(default=None, description="Комментарий из iiko (Python-legacy)")
-    loyalty_categories: Optional[str] = Field(default=None, description="Категории гостя в формате JSON")
+    # Старые поля для обратной совместимости
     is_new_guest: bool = Field(default=True, description="Статус 'Новый гость'")
+    iiko_comment: Optional[str] = Field(default=None, description="Комментарий из iiko")
+    loyalty_categories: Optional[str] = Field(default=None, description="Категории гостя в формате JSON")
     
-    # Совсем старые поля
-    categories: Optional[str] = Field(default=None, description="Категории гостя (старое поле)")
-    wallet_balances: Optional[str] = Field(default=None, description="Балансы (старое поле)")
-    is_risk: bool = Field(default=False, description="Флаг риска (старое поле)")
+    # Флаги риска (дублирующие, но оставлены для совместимости, если используются в коде)
+    high_risk_status: bool = Field(default=False, description="Статус высокого риска (legacy)")
+    high_risk_reason: Optional[str] = Field(default=None, description="Причина высокого риска (legacy)")
+    is_risk: bool = Field(default=False, description="Флаг риска (legacy)")
     # risk_reason уже определен выше
     
     is_blocked: bool = Field(default=False, description="Заблокирован ли клиент")
@@ -157,13 +167,17 @@ class ClientAddressHistory(SQLModel, table=True):
 
     id: Optional[int] = Field(default=None, primary_key=True)
     client_id: int = Field(foreign_key="customers.id", index=True)
-    city: Optional[str] = Field(default=None, max_length=255)
-    street: Optional[str] = Field(default=None, max_length=255)
-    house: Optional[str] = Field(default=None, max_length=50)
-    apartment: Optional[str] = Field(default=None, max_length=50)
-    address: str = Field(description="Полный собранный адрес")
+    city: str = Field(default="Тюмень", sa_column_kwargs={"server_default": "Тюмень"}, nullable=False, max_length=255)
+    settlement: Optional[str] = Field(default="", max_length=255, description="Населенный пункт")
+    street: str = Field(default="", sa_column_kwargs={"server_default": ""}, nullable=False, max_length=255)
+    house: str = Field(default="-", sa_column_kwargs={"server_default": "-"}, nullable=False, max_length=50)
+    entrance: Optional[str] = Field(default="", max_length=50)
+    floor: Optional[str] = Field(default="", max_length=50)
+    apartment: Optional[str] = Field(default="", max_length=50)
+    doorphone: Optional[str] = Field(default="", max_length=50)
+    address: str = Field(default="", description="Полный собранный адрес")
     last_used_at: Optional[datetime] = Field(default=None)
-    orders_count: int = Field(default=0)
+    orders_count: int = Field(default=1)
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 

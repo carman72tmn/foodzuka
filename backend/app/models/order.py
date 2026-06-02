@@ -51,6 +51,7 @@ class Order(SQLModel, table=True):
     # Расширенные данные из iiko
     bonus_accrued: Decimal = Field(sa_type=Numeric(10, 2), default=Decimal("0.00"), description="Начисленные бонусы")
     total_with_discount: Decimal = Field(sa_type=Numeric(10, 2), default=Decimal("0.00"), description="Итого к оплате")
+    total_paid: Decimal = Field(sa_type=Numeric(12, 2), default=Decimal("0.00"), description="Сумма, оплаченная на кассе")
     payment_method: Optional[str] = Field(default=None, description="Способ оплаты (из iiko)")
     order_type: Optional[str] = Field(default=None, description="Тип заказа: доставка/самовывоз/зал")
     courier_name: Optional[str] = Field(default=None, description="Имя курьера")
@@ -104,6 +105,12 @@ class Order(SQLModel, table=True):
     order_items_details: Optional[List[Dict[str, Any]]] = Field(default=None, sa_column=Column(JSON), description="Полный состав заказа из iiko")
     customer_info_details: Optional[Dict[str, Any]] = Field(default=None, sa_column=Column(JSON), description="Полные данные заказчика")
     address_parts: Optional[Dict[str, Any]] = Field(default=None, sa_column=Column(JSON), description="Детальные компоненты адреса (JSON)")
+    
+    # Индикаторы изменений для курьера (Real-time alerts)
+    change_indicators: Optional[Dict[str, bool]] = Field(
+        default=None, sa_column=Column(JSON), 
+        description="Флаги изменений: items, amount, address, time, payment"
+    )
     
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))

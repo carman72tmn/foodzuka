@@ -238,7 +238,7 @@ async def get_clients_report(
     settings = await asyncio.to_thread(lambda: db.exec(select(IikoSettings)).first())
     rows = await iiko_service.get_custom_olap_report(
         "SALES",
-        ["Customer.Name", "Customer.Phone"],
+        ["Delivery.CustomerName", "Delivery.CustomerPhone"],
         ["fullSum", "UniqOrderId"],
         df, dt, settings.organization_id
     )
@@ -256,7 +256,7 @@ async def get_orders_olap_report(
     settings = await asyncio.to_thread(lambda: db.exec(select(IikoSettings)).first())
     rows = await iiko_service.get_custom_olap_report(
         "SALES",
-        ["OrderNum", "OpenTime", "Customer.Name", "Delivery.Courier"],
+        ["OrderNum", "OpenTime", "Delivery.CustomerName", "Delivery.Courier"],
         ["fullSum", "UniqOrderId"],
         df, dt, settings.organization_id
     )

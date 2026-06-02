@@ -24,6 +24,8 @@ import logging
 from app.services.iiko_service import iiko_service
 from app.services.iiko_sync_service import iiko_sync_service
 from app.services.order_geo_service import geocode_order
+from app.api import deps
+from app.models.user import User
 
 
 logger = logging.getLogger(__name__)
@@ -37,7 +39,8 @@ def get_orders(
     limit: int = 100,
     status_filter: Optional[OrderStatus] = None,
     telegram_user_id: Optional[int] = None,
-    session: Session = Depends(get_session)
+    session: Session = Depends(get_session),
+    current_user: User = Depends(deps.require_permission("orders_view")),
 ):
     """
     Получить список заказов
@@ -49,7 +52,8 @@ def get_orders(
     """
     query = select(Order).options(
         selectinload(Order.resolved_zone),
-        selectinload(Order.customer)
+        selectinload(Order.customer),
+        selectinload(Order.items)  # Подгружаем позиции сразу
     ).order_by(Order.created_at.desc()).offset(skip).limit(limit)
 
     if status_filter:
@@ -60,12 +64,13 @@ def get_orders(
 
     orders = session.exec(query).all()
 
-    # Добавляем позиции к каждому заказу
     result = []
     for order in orders:
-        items_query = select(OrderItem).where(OrderItem.order_id == order.id)
         order_dict = order.model_dump()
-        order_dict["items"] = list(session.exec(items_query).all())
+        # Позиции уже подгружены через selectinload
+        order_dict["items"] = order.items
+        order_dict["total_paid"] = order.total_paid
+        
         # Явно добавляем имя зоны доставки из property
         order_dict["resolved_delivery_zone_name"] = order.resolved_zone_name
 
@@ -82,13 +87,17 @@ def get_orders(
 
 
 @router.get("/{order_id}", response_model=OrderResponse)
-def get_order(order_id: int, session: Session = Depends(get_session)):
+def get_order(
+    order_id: int, 
+    session: Session = Depends(get_session),
+    current_user: User = Depends(deps.require_permission("orders_view")),
+):
     """Получить заказ по ID"""
     # Получаем позиции заказа и зону
-    items_query = select(OrderItem).where(OrderItem.order_id == order_id)
     order = session.exec(select(Order).options(
         selectinload(Order.resolved_zone),
-        selectinload(Order.customer)
+        selectinload(Order.customer),
+        selectinload(Order.items)
     ).where(Order.id == order_id)).first()
     if not order:
         raise HTTPException(
@@ -96,7 +105,9 @@ def get_order(order_id: int, session: Session = Depends(get_session)):
             detail=f"Order with id {order_id} not found"
         )
     order_dict = order.model_dump()
-    order_dict["items"] = list(session.exec(items_query).all())
+    order_dict["items"] = order.items
+    order_dict["total_paid"] = order.total_paid
+    logger.info(f"API GET ORDER {order_id}: total_paid={order.total_paid}")
     # Явно добавляем имя зоны доставки из property
     order_dict["resolved_delivery_zone_name"] = order.resolved_zone_name
 
@@ -392,7 +403,8 @@ def update_order(
     order_id: int,
     order_data: OrderUpdate,
     background_tasks: BackgroundTasks,
-    session: Session = Depends(get_session)
+    session: Session = Depends(get_session),
+    current_user: User = Depends(deps.require_permission("orders_edit")),
 ):
 
     """Обновить заказ"""
@@ -426,7 +438,11 @@ def update_order(
 
 
 @router.post("/{order_id}/cancel", response_model=OrderResponse)
-async def cancel_order(order_id: int, session: Session = Depends(get_session)):
+async def cancel_order(
+    order_id: int, 
+    session: Session = Depends(get_session),
+    current_user: User = Depends(deps.require_permission("orders_edit")),
+):
     """Отменить заказ"""
     order = await asyncio.to_thread(session.get, Order, order_id)
     if not order:
@@ -550,8 +566,43 @@ def run_sync_with_session(func, *args, **kwargs):
             loop.close()
 
 
+@router.post("/{order_id}/sync-iiko")
+async def sync_order_from_iiko(
+    order_id: int,
+    session: Session = Depends(get_session),
+    current_user: User = Depends(deps.require_permission("orders_edit")),
+):
+    """Принудительно обновить данные конкретного заказа из iiko"""
+    order = session.get(Order, order_id)
+    if not order:
+        raise HTTPException(status_code=404, detail="Order not found")
+        
+    if not order.iiko_order_id:
+        raise HTTPException(status_code=400, detail="Order has no iiko ID")
+        
+    # Получаем organization_id через филиал или настройки
+    org_id = order.branch.company.iiko_organization_id if order.branch and order.branch.company else None
+    if not org_id:
+        settings_db = session.exec(select(IikoSettings)).first()
+        org_id = settings_db.organization_id if settings_db else None
+        
+    if not org_id:
+        raise HTTPException(status_code=400, detail="Organization ID not configured")
+        
+    success = await iiko_sync_service.sync_order_by_id(session, order.iiko_order_id, org_id)
+    
+    if success:
+        return {"status": "success", "message": "Order data updated from iiko"}
+    else:
+        raise HTTPException(status_code=500, detail="Failed to sync order from iiko")
+
+
 @router.post("/sync")
-def sync_recent_orders(background_tasks: BackgroundTasks, session: Session = Depends(get_session)):
+def sync_recent_orders(
+    background_tasks: BackgroundTasks, 
+    session: Session = Depends(get_session),
+    current_user: User = Depends(deps.require_permission("orders_edit")),
+):
     """
     Ручная синхронизация заказов из iiko (ревизии + последние 48 часов).
     """

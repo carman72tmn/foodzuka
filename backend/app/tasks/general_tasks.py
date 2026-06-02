@@ -97,3 +97,20 @@ def sync_orders_task(self, status_id: int, hours: int = 24):
                 session.add(status)
                 session.commit()
         raise e
+
+@celery_app.task(bind=True, name="app.tasks.general_tasks.sync_courier_deliveries_task")
+def sync_courier_deliveries_task(self, days: int = 1):
+    """Задача синхронизации доставок курьеров из Resto OLAP"""
+    loop = asyncio.get_event_loop()
+    if loop.is_closed():
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+    
+    try:
+        with Session(engine) as session:
+            # Выполняем синхронизацию
+            loop.run_until_complete(iiko_sync_service.sync_courier_deliveries(session, days=days))
+        return {"status": "completed"}
+    except Exception as e:
+        logger.error(f"Courier deliveries sync task failed: {e}")
+        raise e

@@ -1,0 +1,22 @@
+Task: Fix Iiko Webhook Synchronization and UTF-8 Encoding Issues.
+Date: 2026-05-01 18:15
+Status: SUCCESS
+
+Summary of Actions:
+1. Updated SSH configuration and domain references to vezuroll.ru.
+2. Fixed UTF-8 encoding issues in Docker logs by adding PYTHONIOENCODING=utf-8.
+3. Restored corrupted Python source files on VPS with clean UTF-8 versions.
+4. Synchronized Iiko Webhook auth token in the database (9a471a278c00b4eeb0b46536706153cf) to match Iiko Cloud settings.
+5. Cleared corrupted logs and verified API connectivity.
+6. Updated system_faq.md documentation.
+
+Files modified:
+- docker-compose.yml
+- backend/app/api/webhooks.py
+- backend/app/services/iiko_service.py
+- Service_info/system_faq.md
+
+Verification:
+- Token successfully updated in iiko_settings.
+- Logs are now clean and UTF-8 encoded.
+- Iiko Cloud API connectivity confirmed.

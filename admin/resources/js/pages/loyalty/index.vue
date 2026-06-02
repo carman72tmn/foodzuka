@@ -1,5 +1,6 @@
 <script setup>
 import { ref, onMounted } from "vue"
+import { formatDateTime } from "@/utils/date"
 
 const activeTab = ref("statuses")
 
@@ -260,7 +261,7 @@ const getStatusName = id => {
   return s ? s.name : `#${id}`
 }
 
-const formatDate = d => new Date(d).toLocaleString("ru-RU")
+const formatDate = d => formatDateTime(d)
 
 // ==================== Инициализация ====================
 onMounted(async () => {

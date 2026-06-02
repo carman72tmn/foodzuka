@@ -138,25 +138,64 @@ def get_customer(customer_id: int, session: Session = Depends(get_session)):
     except Exception as e:
         logger.warning(f"Failed to trigger auto-sync for customer {customer.phone}: {e}")
     
-    # [FIX] Если поле addresses пустое, наполняем его из истории (для фронтенда)
-    if not customer.addresses:
-        try:
-            addr_list = []
-            if customer.addresses_history:
-                addr_list = [a.address for a in customer.addresses_history if a.address]
-            elif customer.guest_addresses:
-                addr_list = [a.address for a in customer.guest_addresses if a.address]
-            
-            if addr_list:
-                # Убираем дубликаты сохраняя порядок
-                seen = set()
-                unique_addrs = [x for x in addr_list if not (x in seen or seen.add(x))]
-                customer.addresses = json.dumps(unique_addrs, ensure_ascii=False)
-                # Мы не коммитим это в БД здесь, чтобы не замедлять GET запрос, 
-                # но возвращаем наполненный объект фронтенду.
-        except Exception as e:
-            logger.error(f"Error auto-populating addresses for customer {customer_id}: {e}")
+    # [FIX] Наполняем детальные адреса из истории
+    # Теперь мы возвращаем СПИСОК ОБЪЕКТОВ, а не просто строк, чтобы фронтенд мог вывести детали
+    detailed_addresses = []
+    
+    def format_detailed_address(addr_obj):
+        parts = []
+        if getattr(addr_obj, 'city', None): parts.append(addr_obj.city)
+        if getattr(addr_obj, 'settlement', None): parts.append(addr_obj.settlement)
+        if getattr(addr_obj, 'street', None): 
+            s = addr_obj.street
+            parts.append(f"ул. {s}" if not any(k in s.lower() for k in ['ул.', 'пр.', 'б-р', 'пер.']) else s)
+        if getattr(addr_obj, 'house', None): 
+            h = addr_obj.house
+            parts.append(f"д. {h}" if "д." not in h.lower() else h)
+        if getattr(addr_obj, 'entrance', None): 
+            e = addr_obj.entrance
+            parts.append(f"под. {e}" if "под." not in e.lower() else e)
+        if getattr(addr_obj, 'floor', None): 
+            fl = addr_obj.floor
+            parts.append(f"эт. {fl}" if "эт." not in fl.lower() else fl)
+        if getattr(addr_obj, 'apartment', None) or getattr(addr_obj, 'flat', None): 
+            apt = getattr(addr_obj, 'apartment', None) or getattr(addr_obj, 'flat', None)
+            parts.append(f"кв. {apt}" if not any(k in apt.lower() for k in ['кв.', 'офис']) else apt)
+        if getattr(addr_obj, 'doorphone', None): 
+            dp = addr_obj.doorphone
+            parts.append(f"дом. {dp}" if "дом." not in dp.lower() else dp)
+        return ", ".join(parts)
 
+    # 1. Берем из ClientAddressHistory (Laravel формат)
+    if customer.addresses_history:
+        for addr in customer.addresses_history:
+            detailed_addresses.append({
+                "id": addr.id,
+                "city": addr.city or "Тюмень",
+                "settlement": addr.settlement,
+                "street": addr.street,
+                "house": addr.house,
+                "entrance": addr.entrance,
+                "floor": addr.floor,
+                "apartment": addr.apartment,
+                "doorphone": addr.doorphone,
+                "address": addr.address or format_detailed_address(addr)
+            })
+            
+    # 2. Если история пуста, пробуем взять из GuestAddress (Legacy формат)
+    if not detailed_addresses and customer.guest_addresses:
+        for ga in customer.guest_addresses:
+            detailed_addresses.append({
+                "id": ga.id,
+                "address": ga.address,
+                "city": "Тюмень",
+                "street": "Не указана"
+            })
+
+    # Создаем объект ответа на основе схемы
+    # Так как мы используем response_model=CustomerResponse, FastAPI автоматически 
+    # преобразует этот объект в нужный формат. Нам достаточно передать объект с нужным полем.
+    customer.addresses = detailed_addresses
     return customer
     
 @router.get("/by-phone/{phone}", response_model=CustomerResponse)
@@ -768,7 +807,7 @@ async def check_customers_ids(session: Session = Depends(get_session)):
     return {
         "count": len(customers),
         "customers": [
-            {"id": c.id, "phone": c.phone, "name": c.name, "uid": c.uid, "iiko_id": c.iiko_id} 
+            {"id": c.id, "phone": c.phone, "name": c.name, "uid": str(c.uid) if c.uid else None, "iiko_id": str(c.iiko_id) if c.iiko_id else None} 
             for c in customers
         ]
     }
@@ -800,6 +839,31 @@ async def get_customer_olap_stats(customer_id: int, session: Session = Depends(g
     
     try:
         stats = await iiko_service.get_customer_analytics_olap(customer.phone, session)
+        
+        # [NEW] Сохраняем в базу данных для кэширования
+        if stats and not stats.get("error"):
+            customer.total_orders_count = stats.get("orders_count", stats.get("total_count", 0))
+            customer.total_orders_amount = Decimal(str(stats.get("total_revenue", stats.get("total_sum", 0))))
+            customer.total_purchases_sum = customer.total_orders_amount
+            customer.total_discount = Decimal(str(stats.get("total_discount", 0)))
+            customer.total_items = float(stats.get("total_items", 0))
+            customer.average_check = Decimal(str(stats.get("average_check", 0)))
+            customer.frequency_days = float(stats.get("frequency_days", 0))
+            customer.days_since_last_order = stats.get("days_since_last_order")
+            
+            if stats.get("first_order_date"):
+                try:
+                    customer.first_order_date = datetime.fromisoformat(stats["first_order_date"])
+                except: pass
+            if stats.get("last_order_date"):
+                try:
+                    customer.last_order_date = datetime.fromisoformat(stats["last_order_date"])
+                except: pass
+            
+            customer.last_olap_sync_at = datetime.now()
+            session.add(customer)
+            session.commit()
+            
         return stats
     except Exception as e:
         logger.error(f"Failed to get OLAP stats for {customer.phone}: {e}")

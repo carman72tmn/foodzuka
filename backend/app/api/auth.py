@@ -1,9 +1,9 @@
 """
 Роутер для аутентификации пользователей
 """
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status, Form
 from fastapi.security import OAuth2PasswordRequestForm
 from sqlmodel import Session, select
 from app.api import deps
@@ -17,9 +17,12 @@ router = APIRouter(prefix="/auth", tags=["auth"])
 @router.post("/login")
 def login_access_token(
     db: Session = Depends(deps.get_db),
-    form_data: OAuth2PasswordRequestForm = Depends()
+    form_data: OAuth2PasswordRequestForm = Depends(),
+    device_id: str = Form(None),
+    remember: bool = Form(False)
 ) -> Any:
-    """Логин и получение JWT токена"""
+
+    """Логин и получение JWT токена с привязкой к устройству"""
     user = db.exec(select(User).where(User.username == form_data.username)).first()
     if not user or not security.verify_password(form_data.password, user.hashed_password):
         raise HTTPException(
@@ -32,10 +35,22 @@ def login_access_token(
             detail="Пользователь неактивен",
         )
     
-    access_token_expires = timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
+    # Определяем срок жизни токена
+    if remember:
+        access_token_expires = timedelta(days=settings.ACCESS_TOKEN_EXPIRE_DAYS_REMEMBER)
+    else:
+        access_token_expires = timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
+    
+    # Обновляем время последнего входа
+    user.last_login_at = datetime.now(timezone.utc)
+    db.add(user)
+    db.commit()
+    
     return {
         "access_token": security.create_access_token(
-            user.id, expires_delta=access_token_expires
+            user.id, 
+            expires_delta=access_token_expires,
+            fingerprint=device_id
         ),
         "token_type": "bearer",
     }

@@ -93,6 +93,8 @@ def get_employees(
     result = []
     for e in employees:
         d = e.model_dump()
+        if d.get("iiko_id"):
+            d["iiko_id"] = str(d["iiko_id"])
         d["is_courier"] = _is_courier(e)
         d["is_admin"] = _is_admin(e)
         result.append(d)
@@ -132,7 +134,13 @@ async def get_employee_stats(
 
 @router.get("/shifts/open")
 def get_open_shifts(session: Session = Depends(get_session)):
-    shifts = session.exec(select(Shift).where(Shift.status == "OPEN").order_by(Shift.date_open.desc())).all()
+    from sqlalchemy.orm import selectinload
+    shifts = session.exec(
+        select(Shift)
+        .options(selectinload(Shift.employee))
+        .where(Shift.status == "OPEN")
+        .order_by(Shift.date_open.desc())
+    ).all()
     result = []
     for s in shifts:
         d = s.model_dump()
@@ -183,7 +191,8 @@ def get_all_shifts(
 ):
     day_names = ["Понедельник", "Вторник", "Среда", "Четверг", "Пятница", "Суббота", "Воскресенье"]
     tz_name = get_tz_name(session)
-    query = select(Shift).order_by(Shift.date_open.desc())
+    from sqlalchemy.orm import selectinload
+    query = select(Shift).options(selectinload(Shift.employee)).order_by(Shift.date_open.desc())
 
     if date_from:
         try:
@@ -209,7 +218,7 @@ def get_all_shifts(
         close_local = _to_local(shift.date_close, session)
         result.append({
             "id": shift.id,
-            "iiko_id": shift.iiko_id,
+            "iiko_id": str(shift.iiko_id) if shift.iiko_id else None,
             "employee_id": shift.employee_id,
             "employee_name": shift.employee.name if shift.employee else "Unknown",
             "employee_role": shift.employee.role if shift.employee else None,
@@ -240,7 +249,8 @@ def get_schedules(
     date_to: Optional[str] = None,
     session: Session = Depends(get_session)
 ):
-    query = select(Schedule)
+    from sqlalchemy.orm import selectinload
+    query = select(Schedule).options(selectinload(Schedule.employee))
     if date_from:
         query = query.where(Schedule.date_from >= datetime.fromisoformat(date_from))
     if date_to:
@@ -322,10 +332,8 @@ def get_courier_detail_report(
 
     # Если запрос включает сегодняшний день — запускаем фоновую синхронизацию для актуализации данных
     if dt_local.date() >= now_local.date():
-        async def run_sync_bg():
-            with Session(engine) as sync_session:
-                await iiko_sync_service.sync_courier_deliveries(sync_session, days=1)
-        background_tasks.add_task(run_sync_bg)
+        from app.tasks.general_tasks import sync_courier_deliveries_task
+        sync_courier_deliveries_task.delay(days=1)
 
     df_utc = df_local.astimezone(timezone.utc)
     dt_utc = dt_local.astimezone(timezone.utc)
@@ -393,7 +401,7 @@ def get_courier_detail_report(
             # Детализация заказа
             days_map[day_key]["deliveries"].append({
                 "order_num": order.order_num,
-                "iiko_id": order.iiko_id,
+                "iiko_id": str(order.iiko_id) if order.iiko_id else None,
                 "address": iiko_sync_service.format_address(order.address_parts, city=city_name, fmt=addr_fmt) if order.address_parts else (order.address or ""),
                 "zone": zone,
                 "amount": rev,

@@ -2,6 +2,7 @@ import { ref } from 'vue'
 
 // Глобальная настройка часового пояса (обновляется при загрузке приложения)
 export const appTimezone = ref(localStorage.getItem('app_timezone') || 'Asia/Yekaterinburg')
+
 // Смещение в часах (например, +5 или -3)
 export const appOffset = ref(parseInt(localStorage.getItem('app_offset') || '0'))
 
@@ -28,7 +29,7 @@ const parseAsUTC = val => {
   return val
 }
 
-export const formatDate = val => {
+export const formatDate = (val, options = {}) => {
   if (!val) return '-'
 
   try {
@@ -37,8 +38,10 @@ export const formatDate = val => {
     // Если задано ручное смещение, корректируем время перед форматированием
     if (appOffset.value !== 0) {
       date = new Date(date.getTime() + appOffset.value * 3600000)
+      
       return new Intl.DateTimeFormat('ru-RU', {
         timeZone: 'UTC',
+        ...options,
       }).format(date)
     }
 
@@ -46,9 +49,45 @@ export const formatDate = val => {
 
     return new Intl.DateTimeFormat('ru-RU', {
       timeZone: tz || undefined,
+      ...options,
     }).format(date)
   } catch (e) {
     console.error('Date format error:', e, val)
+    
+    return val
+  }
+}
+
+export const formatTime = (val, options = {}) => {
+  if (!val) return '-'
+
+  try {
+    const utcVal = parseAsUTC(val)
+    let date = new Date(utcVal)
+
+    // Если задано ручное смещение, корректируем время
+    if (appOffset.value !== 0) {
+      date = new Date(date.getTime() + appOffset.value * 3600000)
+
+      return new Intl.DateTimeFormat('ru-RU', {
+        hour: '2-digit',
+        minute: '2-digit',
+        timeZone: 'UTC',
+        ...options,
+      }).format(date)
+    }
+
+    const tz = appTimezone.value === 'System' ? undefined : appTimezone.value
+
+    return new Intl.DateTimeFormat('ru-RU', {
+      hour: '2-digit',
+      minute: '2-digit',
+      timeZone: tz || undefined,
+      ...options,
+    }).format(date)
+  } catch (e) {
+    console.error('Time format error:', e, val)
+    
     return val
   }
 }

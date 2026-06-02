@@ -35,6 +35,7 @@
 
 <script setup>
 import { ref, onMounted } from 'vue'
+import { formatDateTime as formatDT } from '@/utils/date'
 
 const selectedPeriod = ref('today')
 const loading = ref(false)
@@ -54,8 +55,7 @@ function formatCurrency(val) {
 }
 
 function formatDateTime(val) {
-  if (!val) return '—'
-  return new Date(val).toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })
+  return formatDT(val)
 }
 
 async function fetchReport(forceRefresh = false) {

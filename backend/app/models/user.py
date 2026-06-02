@@ -4,6 +4,8 @@
 from typing import Optional, TYPE_CHECKING
 from datetime import datetime, timezone
 from sqlmodel import Field, SQLModel, Relationship
+from sqlalchemy import String, cast
+from sqlalchemy.orm import foreign
 
 if TYPE_CHECKING:
     from .role import Role
@@ -17,7 +19,7 @@ class User(SQLModel, table=True):
 
     id: Optional[int] = Field(default=None, primary_key=True)
     username: str = Field(unique=True, index=True, max_length=100)
-    email: str = Field(unique=True, index=True, max_length=255)
+    email: Optional[str] = Field(default=None, unique=True, index=True, max_length=255)
     hashed_password: str = Field(max_length=255)
     full_name: Optional[str] = Field(default=None, max_length=255)
     is_active: bool = Field(default=True)
@@ -29,13 +31,19 @@ class User(SQLModel, table=True):
     
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    last_login_at: Optional[datetime] = Field(default=None)
 
     # Связи
     role: Optional["Role"] = Relationship(back_populates="users")
     
     # Связь с сотрудником iiko
     employee: Optional["Employee"] = Relationship(
-        sa_relationship_kwargs={"primaryjoin": "foreign(User.iiko_id) == Employee.iiko_id", "uselist": False}
+        sa_relationship_kwargs={
+            "primaryjoin": "cast(foreign(User.iiko_id), TEXT) == cast(Employee.iiko_id, TEXT)",
+            "uselist": False,
+            "viewonly": True,
+            "overlaps": "employee"
+        }
     )
 
     class Config:

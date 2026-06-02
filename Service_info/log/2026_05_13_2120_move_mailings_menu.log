@@ -1,0 +1,7 @@
+# Log: Move bot settings to new "Рассылки" menu item
+Date: 2026-05-13 21:20
+Task: Add "Рассылки" group and move Telegram/VK settings/parser there.
+
+## Changes:
+- Modified `admin/resources/js/layouts/components/NavItems.vue`
+- Updated `Service_info/sitenav.md`

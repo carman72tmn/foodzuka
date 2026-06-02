@@ -3,7 +3,9 @@ import { ref, onMounted, onUnmounted, computed, watch } from 'vue'
 import { getAuthHeaders, authState } from '@/utils/auth'
 import { useTheme } from 'vuetify'
 import { useToast } from 'vue-toastification'
+import { formatDate, formatTime, formatDateTime } from '@/utils/date'
 import OrderArchiveCard from '@/components/OrderArchiveCard.vue'
+import OrderDetailModal from '@/components/OrderDetailModal.vue'
 
 const toast = useToast()
 
@@ -22,12 +24,164 @@ const showCloseDialog = ref(false)
 const selectedOrder = ref(null)
 const preferredNavigator = ref(localStorage.getItem('preferred_navigator') || 'yandex')
 
+// Отслеживание индикаторов изменений (10 минут)
+const indicatorsSeen = ref(JSON.parse(localStorage.getItem('courier_indicators_seen') || '{}'))
+
+const saveIndicatorsSeen = () => {
+  localStorage.setItem('courier_indicators_seen', JSON.stringify(indicatorsSeen.value))
+}
+
+const getActiveIndicators = order => {
+  if (!order.change_indicators) return null
+  
+  const hasChanges = Object.values(order.change_indicators).some(v => v)
+  if (!hasChanges) {
+    // Если на бэкенде изменений нет, проверяем, не истекло ли время отображения старых
+    const seen = indicatorsSeen.value[order.id]
+    if (seen && Date.now() - seen.timestamp < 10 * 60 * 1000) {
+      return seen.indicators
+    }
+
+    return null
+  }
+
+  // Если изменения есть на бэкенде, обновляем время "увидения"
+  const currentSeen = indicatorsSeen.value[order.id]
+  const indicatorsStr = JSON.stringify(order.change_indicators)
+  
+  if (!currentSeen || JSON.stringify(currentSeen.indicators) !== indicatorsStr) {
+    indicatorsSeen.value[order.id] = {
+      timestamp: Date.now(),
+      indicators: order.change_indicators,
+    }
+    saveIndicatorsSeen()
+  }
+
+  return order.change_indicators
+}
+
+const formatDeliveryTime = order => {
+  if (order.is_asap) return 'КАК МОЖНО СКОРЕЕ'
+  if (!order.expected_time) return formatDateTime(order.iiko_creation_time || order.created_at, { day: undefined, month: undefined, year: undefined })
+  
+  const expected = new Date(order.expected_time)
+  const today = new Date()
+  const isToday = expected.getDate() === today.getDate() && 
+                  expected.getMonth() === today.getMonth() && 
+                  expected.getFullYear() === today.getFullYear()
+  
+  if (isToday) {
+    return formatDateTime(order.expected_time, { day: undefined, month: undefined, year: undefined })
+  }
+  
+  return formatDateTime(order.expected_time)
+}
+
 // Фильтры для архива
-const selectedDate = ref(new Date().toISOString().substr(0, 10))
+const formatDateLocal = date => {
+  const year = date.getFullYear()
+  const month = String(date.getMonth() + 1).padStart(2, '0')
+  const day = String(date.getDate()).padStart(2, '0')
+  return `${year}-${month}-${day}`
+}
+
+const getPaymentStatusText = order => {
+  if (order.is_paid) return 'Оплачено'
+  const left = parseFloat(order.left_to_pay || 0)
+  const total = parseFloat(order.total_with_discount || order.sum || 0)
+  if (left > 0 && left < total) return `Частично (ост. ${left} ₽)`
+
+  return 'Ожидает оплаты'
+}
+
+const getPaymentStatusColor = order => {
+  if (order.is_paid) return 'success'
+  const left = parseFloat(order.left_to_pay || 0)
+  const total = parseFloat(order.total_with_discount || order.sum || 0)
+  if (left > 0 && left < total) return 'warning'
+
+  return 'error'
+}
+
+const getPaymentStatusIcon = order => {
+  if (order.is_paid) return 'bx-check-shield'
+  const left = parseFloat(order.left_to_pay || 0)
+  const total = parseFloat(order.total_with_discount || order.total_amount || order.sum || 0)
+  if (left > 0 && left < total) return 'bx-adjust'
+
+  return 'bx-error-circle'
+}
+
+const getPaymentTypeIcon = method => {
+  if (!method) return 'bx-credit-card'
+  const m = method.toLowerCase()
+  if (m.includes('налич')) return 'bx-money'
+  if (m.includes('карт') || m.includes('visa') || m.includes('master')) return 'bx-credit-card'
+  if (m.includes('qr') || m.includes('сбп')) return 'bx-qr-scan'
+  if (m.includes('сайт') || m.includes('онлайн')) return 'bx-globe'
+  if (m.includes('бонус')) return 'bx-gift'
+
+  return 'bx-wallet'
+}
+
+const formatPaymentMethods = order => {
+  if (order.payments_details?.items?.length) {
+    return order.payments_details.items
+      .map(p => `${p.name}: ${p.sum} ₽`)
+      .join(', ')
+  }
+
+  return order.payment_method || 'Не указан'
+}
+
+const selectedDate = ref(formatDateLocal(new Date()))
 const archiveCourierFilter = ref(null)
+const userSelectedSpecificDate = ref(false)
 const showDatePicker = ref(false)
 
-const setPreferredNavigator = (val) => {
+// [NEW] Tracking for button responsiveness
+const buttonLocks = ref({}) // Tracks lockout for "Start Delivery" (10s)
+const manualClickTimes = ref({}) // Tracks when "Start Delivery" was clicked (60s delay for "Delivered")
+
+const isButtonLocked = orderId => {
+  const lockTime = buttonLocks.value[orderId]
+  if (!lockTime) return false
+  
+  const elapsed = Date.now() - lockTime
+  if (elapsed >= 10000) {
+    delete buttonLocks.value[orderId]
+    return false
+  }
+  
+  return true
+}
+
+const canShowDelivered = order => {
+  // 1. Check local manual click time
+  const clickTime = manualClickTimes.value[order.id]
+  if (clickTime) {
+    if ((Date.now() - clickTime) > 60000) return true
+  }
+  
+  // 2. Check server-provided on_the_way_time
+  if (order.on_the_way_time) {
+    const onWayDate = new Date(order.on_the_way_time)
+    if (!isNaN(onWayDate.getTime())) {
+      if ((Date.now() - onWayDate.getTime()) > 60000) return true
+    }
+  }
+  
+  return false
+}
+
+// Пагинация и даты курьера
+const archivePage = ref(1)
+const archiveTotalPages = ref(1)
+const archiveTotalItems = ref(0)
+const archivePageSize = ref(24)
+const courierDates = ref([])
+
+const setPreferredNavigator = val => {
   preferredNavigator.value = val
   localStorage.setItem('preferred_navigator', val)
 }
@@ -49,17 +203,10 @@ const fetchData = async (options = {}) => {
   }
 
   try {
-    if (!quiet) {
-      const syncRes = await fetch('/api/v1/courier/sync', {
-        method: 'POST',
-        headers: getAuthHeaders(),
-      })
-      const syncData = await syncRes.json()
-      if (syncData.status === 'success') {
-        toast.success('Синхронизация с iiko завершена')
-      }
-    }
-
+    // [OPTIMIZED] Убрана автоматическая синхронизация при каждой загрузке fetchData,
+    // так как это перегружает RMS iiko. Данные синхронизируются фоновым воркером.
+    // Для ручного обновления добавлена отдельная кнопка syncData.
+    
     if (activeTab.value === 'orders') {
       await fetchOrders()
     } else if (activeTab.value === 'archive') {
@@ -69,7 +216,7 @@ const fetchData = async (options = {}) => {
     } else if (activeTab.value === 'couriers') {
       await fetchActiveCouriers()
     }
-    lastUpdated.value = new Date().toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit', second: '2-digit' })
+    lastUpdated.value = formatTime(new Date(), { second: '2-digit' })
   } catch (e) {
     if (!quiet) {
       error.value = 'Ошибка загрузки данных'
@@ -79,6 +226,27 @@ const fetchData = async (options = {}) => {
     if (!quiet) loading.value = false
   }
 }
+const syncData = async () => {
+  loading.value = true
+  try {
+    const res = await fetch('/api/v1/courier/sync', {
+      method: 'POST',
+      headers: getAuthHeaders(),
+    })
+    const data = await res.json()
+    if (data.status === 'success') {
+      toast.success('Данные успешно обновлены из iiko')
+      await fetchData(true)
+    } else {
+      toast.error('Ошибка синхронизации: ' + (data.message || 'неизвестная ошибка'))
+    }
+  } catch (e) {
+    toast.error('Ошибка при обращении к серверу')
+    console.error(e)
+  } finally {
+    loading.value = false
+  }
+}
 
 const fetchOrders = async (includeClosed = false) => {
   let url = '/api/v1/courier/orders'
@@ -86,13 +254,18 @@ const fetchOrders = async (includeClosed = false) => {
   
   if (includeClosed) {
     params.append('include_closed', 'true')
-    if (selectedDate.value) {
+    // Если выбран курьер и НЕ выбрана конкретная дата - НЕ шлем дату, чтобы бэкенд показал 7 дней
+    // Иначе шлем selectedDate
+    if (selectedDate.value && (!archiveCourierFilter.value || userSelectedSpecificDate.value)) {
       params.append('date_from', selectedDate.value)
       params.append('date_to', selectedDate.value)
     }
+    
     if (archiveCourierFilter.value) {
       params.append('courier_filter', archiveCourierFilter.value)
     }
+    params.append('page', archivePage.value)
+    params.append('size', archivePageSize.value)
   }
   
   const queryString = params.toString()
@@ -102,9 +275,14 @@ const fetchOrders = async (includeClosed = false) => {
     headers: getAuthHeaders(),
   })
   const data = await res.json()
+  console.log('Archive fetch result:', data)
   if (data.status === 'success') {
     if (includeClosed) {
       archiveOrders.value = data.data
+      if (data.pagination) {
+        archiveTotalPages.value = data.pagination.pages
+        archiveTotalItems.value = data.pagination.total
+      }
     } else {
       orders.value = data.data
     }
@@ -113,17 +291,13 @@ const fetchOrders = async (includeClosed = false) => {
   }
 }
 
-const formatDateLocal = (date) => {
-  const year = date.getFullYear()
-  const month = String(date.getMonth() + 1).padStart(2, '0')
-  const day = String(date.getDate()).padStart(2, '0')
-  return `${year}-${month}-${day}`
-}
-
-const setArchiveDate = (action) => {
+const setArchiveDate = action => {
+  userSelectedSpecificDate.value = true
   let d = new Date(selectedDate.value + 'T12:00:00')
   if (action === 'today') {
     selectedDate.value = formatDateLocal(new Date())
+    // Для "Сегодня" можно сбросить флаг ручного выбора, если курьер не выбран
+    if (!archiveCourierFilter.value) userSelectedSpecificDate.value = false
   } else if (action === 'yesterday') {
     const yesterday = new Date()
     yesterday.setDate(yesterday.getDate() - 1)
@@ -135,6 +309,33 @@ const setArchiveDate = (action) => {
     d.setDate(d.getDate() + 1)
     selectedDate.value = formatDateLocal(d)
   }
+  archivePage.value = 1 // Сброс страницы при смене даты
+  fetchOrders(true)
+}
+
+const fetchCourierDates = async () => {
+  if (!archiveCourierFilter.value) {
+    courierDates.value = []
+    return
+  }
+  
+  try {
+    const res = await fetch(`/api/v1/courier/dates?courier_name=${encodeURIComponent(archiveCourierFilter.value)}`, {
+      headers: getAuthHeaders(),
+    })
+    const data = await res.json()
+    if (data.status === 'success') {
+      courierDates.value = data.data
+    }
+  } catch (e) {
+    console.error('Failed to fetch courier dates', e)
+  }
+}
+
+const selectCourierDate = (date) => {
+  userSelectedSpecificDate.value = true
+  selectedDate.value = date.split('T')[0]
+  archivePage.value = 1
   fetchOrders(true)
 }
 
@@ -151,7 +352,11 @@ const archiveGroupByCourier = ref(false)
 
 const filteredArchiveOrders = computed(() => {
   let list = [...archiveOrders.value]
-  
+
+  if (archiveCourierFilter.value) {
+    list = list.filter(o => o.courier_name === archiveCourierFilter.value)
+  }
+
   if (archiveSortByCourier.value) {
     list.sort((a, b) => {
       const nameA = a.courier_name || ''
@@ -221,7 +426,13 @@ const fetchPaymentTypes = async () => {
   }
 }
 
-const updateStatus = async (orderId, status) => {
+const updateStatus = async (orderId, status, silent = false) => {
+  // [NEW] Lockout and delay logic
+  if (status === 'OnWay') {
+    buttonLocks.value[orderId] = Date.now()
+    manualClickTimes.value[orderId] = Date.now()
+  }
+
   loading.value = true
   try {
     const res = await fetch(`/api/v1/courier/orders/${orderId}/status?status=${status}`, {
@@ -231,7 +442,9 @@ const updateStatus = async (orderId, status) => {
 
     if (res.ok) {
       await fetchOrders()
-      if (status === 'Delivered') {
+      
+      // Auto-open payment dialog only if NOT silent
+      if (status === 'Delivered' && !silent) {
         const order = orders.value.find(o => o.id === orderId)
         if (order) openCloseDialog(order)
       }
@@ -291,12 +504,13 @@ const closeOrderAction = async () => {
 const getStatusColor = status => {
   if (!status) return 'grey'
   switch (status.toLowerCase()) {
-    case 'ready': return 'orange'
+    case 'ready': return 'amber-darken-2' // Насыщенный оранжевый/желтый
     case 'delivering':
-    case 'onway': return 'blue'
-    case 'delivered': return 'green'
-    case 'closed': return 'grey'
-    case 'cancelled': return 'red'
+    case 'onway': return 'blue-darken-2' // Синий
+    case 'delivered': return 'green-darken-2' // Зеленый
+    case 'closed': return 'slate-900' // Темный
+    case 'cancelled': return 'red-darken-2' // Красный
+    case 'cooking': return 'cyan-darken-2' // Голубой
     default: return 'grey'
   }
 }
@@ -319,12 +533,18 @@ const formatAddress = order => {
   if (!order.address) return 'Адрес не указан'
   const a = order.address
   if (typeof a === 'string') return a
-  return a.line1 || 'Адрес не указан'
+  if (a.line1) return a.line1
+  
+  const parts = []
+  if (a.city) parts.push(a.city)
+  if (a.street) parts.push(a.street)
+  if (a.house || a.home) parts.push(`д. ${a.house || a.home}`)
+  return parts.join(', ') || 'Адрес не указан'
 }
 
 const openMaps = (order, provider = null) => {
-  const addr = formatAddress(order)
-  if (addr === 'Адрес не указан') {
+  const addr = order.delivery_address || formatAddress(order)
+  if (!addr || addr === 'Адрес не указан') {
     toast.error('Адрес не указан для этого заказа')
     return
   }
@@ -342,13 +562,13 @@ const openMaps = (order, provider = null) => {
       url = `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(addr)}`
       break
     case 'petal':
-      url = `https://www.petalmaps.com/search/?query=${encodeURIComponent(addr)}`
+      url = `https://www.petalmaps.com/search/?q=${encodeURIComponent(addr)}`
       break
     default:
       url = `https://yandex.ru/maps/?text=${encodeURIComponent(addr)}`
   }
   
-  if (url) window.open(url, '_blank')
+  if (url) window.open(url, '_blank', 'noopener,noreferrer')
 }
 
 const copyToClipboard = async (text) => {
@@ -379,29 +599,40 @@ const getDuration = (startStr, endStr) => {
   return diff > 0 ? `${diff} мин.` : '< 1 мин.'
 }
 
-const getLateness = minutes => {
-  if (!minutes || minutes <= 0) return null
-  return `${minutes} мин.`
+const getLateness = (order) => {
+  if (!order.expected_time) return null
+  const target = new Date(order.expected_time)
+  // Если заказ доставлен, используем actual_time, иначе текущее время
+  const actual = (order.status === 'delivered' || order.status === 'closed' || order.actual_time) 
+    ? new Date(order.actual_time || Date.now()) 
+    : currentTime.value
+  
+  const diff = Math.floor((actual - target) / 60000)
+  return diff > 0 ? diff : null
 }
 
-const formatDate = dateStr => {
-  if (!dateStr) return '-'
-  return new Date(dateStr).toLocaleString('ru-RU', {
-    hour: '2-digit',
-    minute: '2-digit',
-  })
-}
-
-const openDetails = order => {
+const openDetails = async (order) => {
   detailsOrder.value = order
   showDetailsDialog.value = true
+  
+  if (order.change_indicators && Object.values(order.change_indicators).some(v => v)) {
+    try {
+      await fetch(`/api/v1/courier/orders/${order.id}/acknowledge`, {
+        method: 'POST',
+        headers: getAuthHeaders(),
+      })
+      order.change_indicators = null
+    } catch (e) {
+      console.error('Failed to acknowledge changes', e)
+    }
+  }
 }
 
 const getCountdown = expectedTime => {
   if (!expectedTime) return null
   const diff = new Date(expectedTime) - currentTime.value
   const mins = Math.floor(diff / 60000)
-  if (mins < -999) return null // Слишком старый
+  if (mins < -999) return null
   return mins
 }
 
@@ -413,7 +644,6 @@ const getCountdownColor = mins => {
 }
 
 const startTimers = () => {
-  // Обновление данных каждые 30 секунд
   refreshTimer.value = setInterval(() => {
     fetchData(true)
   }, 30000)
@@ -429,8 +659,30 @@ const callCustomer = phone => {
   window.location.href = `tel:${phone.replace(/[^\d+]/g, '')}`
 }
 
-watch(activeTab, () => {
-  fetchData()
+watch(activeTab, (val) => {
+  if (val === 'archive' && !archiveOrders.value.length) {
+    fetchOrders(true)
+  } else {
+    fetchData()
+  }
+})
+
+watch(archiveCourierFilter, () => {
+  archivePage.value = 1
+  userSelectedSpecificDate.value = false // Сброс при смене курьера
+  fetchCourierDates()
+  fetchOrders(true)
+})
+
+watch(selectedDate, () => {
+  if (activeTab.value === 'archive') {
+    archivePage.value = 1
+    fetchOrders(true)
+  }
+})
+
+watch(archivePage, () => {
+  fetchOrders(true)
 })
 
 onMounted(() => {
@@ -446,7 +698,7 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <VContainer class="pa-2 pa-sm-4 courier-app-wrapper">
+  <VContainer fluid class="pa-0 courier-app-wrapper bg-slate-50">
     <!-- Header -->
     <header class="app-header mb-4">
       <div class="d-flex align-center justify-space-between px-2">
@@ -458,37 +710,18 @@ onUnmounted(() => {
             Обновлено: {{ lastUpdated }}
           </p>
         </div>
-          <VBtn
-            icon="bx-refresh"
+        <VBtn
             variant="flat"
             color="primary"
-            :loading="loading"
             class="rounded-pill px-4"
-            @click="fetchData({ quiet: false, forceSync: true })"
+            @click="syncData"
+            :loading="loading"
           >
-            <VIcon icon="bx-refresh" class="me-1" />
-            Обновить
+            <VIcon icon="bx-sync" class="me-1" :class="{'bx-spin': loading}" />
+            Обновить из iiko
           </VBtn>
       </div>
 
-      <div class="d-flex align-center bg-white px-4 py-2 border-b">
-        <VIcon icon="bx-cog" size="20" color="grey" class="me-2" />
-        <span class="text-caption font-weight-medium text-grey-darken-1 me-3">Навигатор по умолчанию:</span>
-        <VSelect
-          v-model="preferredNavigator"
-          :items="[
-            { title: 'Яндекс', value: 'yandex' },
-            { title: '2ГИС', value: '2gis' },
-            { title: 'Google', value: 'google' },
-            { title: 'Petal', value: 'petal' }
-          ]"
-          variant="plain"
-          density="compact"
-          hide-details
-          class="navigator-select"
-          @update:model-value="setPreferredNavigator"
-        />
-      </div>
 
       <VTabs
         v-model="activeTab"
@@ -531,241 +764,334 @@ onUnmounted(() => {
           <VBtn variant="tonal" color="primary" class="mt-4 rounded-pill" @click="fetchOrders">Проверить</VBtn>
         </div>
 
-        <div v-else class="orders-list">
-          <VRow>
+        <div v-else class="orders-list px-2 px-md-4 py-4">
+          <VRow class="ma-0">
             <VCol
               v-for="order in orders"
               :key="order.id"
               cols="12"
-              md="6"
-              lg="4"
+              sm="6"
+              md="4"
+              lg="3"
+              class="pa-3"
             >
-              <VCard class="order-card-premium mb-4" elevation="0" border>
-                <div :class="`status-strip bg-${getStatusColor(order.status)}`" />
-                
-                <VCardItem class="pb-2">
-                  <div class="d-flex justify-space-between align-center mb-2">
-                    <div class="d-flex flex-column">
-                      <div class="d-flex align-center gap-2 mb-1">
-                        <VChip
-                          :color="getStatusColor(order.status)"
-                          size="x-small"
-                          variant="flat"
-                          class="font-weight-bold"
-                        >
-                          {{ getStatusText(order.status) }}
-                        </VChip>
-                        <VChip
-                          v-if="getCountdown(order.expected_time) !== null"
-                          :color="getCountdownColor(getCountdown(order.expected_time))"
-                          size="x-small"
-                          variant="tonal"
-                          class="font-weight-black"
-                        >
-                          <VIcon icon="bx-timer" size="14" class="me-1" />
-                          {{ getCountdown(order.expected_time) }} мин
-                        </VChip>
-                      </div>
-                      <div class="d-flex align-center gap-1">
-                        <VIcon 
-                          :icon="order.is_paid ? 'bx-check-shield' : 'bx-error-circle'" 
-                          :color="order.is_paid ? 'success' : 'warning'" 
-                          size="14" 
-                        />
-                        <span 
-                          class="text-caption font-weight-bold" 
-                          :class="order.is_paid ? 'text-success' : 'text-warning'"
-                        >
-                          {{ order.is_paid ? 'Оплачено' : 'Ожидает оплаты' }}
-                        </span>
-                      </div>
-                    </div>
-                    <div class="text-right">
-                      <div class="text-h5 font-weight-black text-primary">
-                        {{ order.sum }} ₽
-                      </div>
-                      <div class="text-caption text-grey-darken-1 font-weight-medium">
-                        {{ order.payment_method || 'Способ не указан' }}
-                      </div>
+              <VCard
+                class="delivery-card-premium d-flex flex-column"
+                variant="flat"
+              >
+                <!-- 1. Status Bar (Indicators) -->
+                <div class="change-indicators-bar">
+                  <template v-if="getActiveIndicators(order)">
+                    <div v-if="getActiveIndicators(order).items" class="bg-error flex-grow-1"></div>
+                    <div v-else-if="getActiveIndicators(order).amount" class="bg-warning flex-grow-1"></div>
+                    <div v-else-if="getActiveIndicators(order).address" class="bg-primary flex-grow-1"></div>
+                    <div v-else-if="getActiveIndicators(order).time" class="bg-info flex-grow-1"></div>
+                    <div v-else-if="getActiveIndicators(order).payment" class="bg-success flex-grow-1"></div>
+                  </template>
+                </div>
+
+                <!-- [NEW] Delivery Time Meta -->
+                <div class="px-5 pt-3 d-flex justify-space-between align-center">
+                  <div class="d-flex align-center ga-1">
+                    <VIcon :icon="order.is_asap ? 'bx-bolt-circle' : 'bx-calendar-event'" size="16" :color="order.is_asap ? 'warning' : 'primary'" />
+                    <span class="text-card-small font-weight-black" :class="order.is_asap ? 'text-amber-darken-3' : 'text-primary'">
+                      {{ order.is_asap ? 'КАК МОЖНО СКОРЕЕ' : 'ЗАКАЗ НА ВРЕМЯ' }}
+                    </span>
+                  </div>
+                  <div v-if="order.expected_time" class="text-card-small font-weight-black text-primary">
+                    <span v-if="!order.is_asap" class="me-1">{{ formatDate(order.expected_time) }}</span>
+                    <span>{{ formatTime(order.expected_time) }}</span>
+                  </div>
+                </div>
+
+                <!-- 2. Header: Status & Timers -->
+                <div class="card-header-status d-flex align-center justify-space-between">
+                  <div class="d-flex align-center ga-2">
+                    <VChip 
+                      :color="getStatusColor(order.status)" 
+                      size="x-small" 
+                      variant="flat" 
+                      class="text-uppercase font-weight-black"
+                      :style="{ color: 'white', textShadow: '0 1px 2px rgba(0,0,0,0.2)' }"
+                    >
+                      {{ getStatusText(order.status) }}
+                    </VChip>
+                    <div v-if="order.status === 'delivering' || order.status === 'onway'" class="d-flex align-center ga-1">
+                      <div class="pulse-dot"></div>
+                      <span class="text-card-small text-primary">{{ getDuration(order.on_the_way_time, currentTime) }}</span>
                     </div>
                   </div>
                   
-                  <VCardTitle class="text-h6 font-weight-bold mb-1">
-                    Заказ №{{ order.number || order.id.substring(0, 4) }}
-                  </VCardTitle>
-                  
-                  <div class="address-box pa-2 rounded-lg bg-grey-lighten-4 mb-3 d-flex align-center cursor-pointer" @click="openMaps(order)">
-                    <VIcon icon="bx-map" color="primary" class="me-2" />
-                    <span class="text-body-2 font-weight-medium text-truncate flex-grow-1">
-                      {{ formatAddress(order) }}
-                    </span>
+                  <div class="text-right">
+                    <div v-if="getCountdown(order.expected_time) !== null && getCountdown(order.expected_time) >= 0" class="d-flex align-center justify-end ga-1">
+                      <VIcon icon="bx-time" size="14" :color="getCountdownColor(getCountdown(order.expected_time))" />
+                      <span class="text-card-small font-weight-bold" :class="'text-' + getCountdownColor(getCountdown(order.expected_time))">
+                        До {{ formatTime(order.expected_time) }}
+                      </span>
+                    </div>
+                    <div v-if="getLateness(order)" class="d-flex align-center justify-end ga-1">
+                      <VIcon icon="bx-alarm-exclamation" size="14" color="error" />
+                      <span class="text-card-small text-error font-weight-black animate-pulse">
+                        +{{ getLateness(order) }} м
+                      </span>
+                    </div>
+                  </div>
+                </div>
+
+                <!-- 3. Urgent Indicators (Badges) -->
+                <div v-if="getActiveIndicators(order)" class="px-5 pt-3 d-flex flex-wrap ga-1">
+                  <VChip v-if="getActiveIndicators(order).items" color="error" size="x-small" variant="flat" class="animate-pulse">СОСТАВ!</VChip>
+                  <VChip v-if="getActiveIndicators(order).amount" color="warning" size="x-small" variant="flat" class="animate-pulse">СУММА!</VChip>
+                  <VChip v-if="getActiveIndicators(order).address" color="primary" size="x-small" variant="flat" class="animate-pulse">АДРЕС!</VChip>
+                  <VChip v-if="getActiveIndicators(order).time" color="info" size="x-small" variant="flat" class="animate-pulse">ВРЕМЯ!</VChip>
+                  <VChip v-if="getActiveIndicators(order).payment" color="success" size="x-small" variant="flat" class="animate-pulse">ОПЛАТА!</VChip>
+                </div>
+
+                <!-- 4. Identity -->
+                <div class="section-divider">
+                  <div class="d-flex justify-space-between align-center">
+                    <div>
+                      <div class="text-card-title">№{{ order.external_number || order.number || '???' }}</div>
+                      <div class="text-card-caption d-flex align-center ga-1 mt-1">
+                        <VIcon icon="bx-store-alt" size="14" />
+                        <span class="text-truncate">{{ order.organization_name || 'Основная' }}</span>
+                      </div>
+                    </div>
+                    <VBtn
+                      v-if="order.is_important"
+                      icon="bx-star"
+                      variant="text"
+                      color="warning"
+                      size="small"
+                    />
+                  </div>
+                </div>
+
+                <!-- 5. Client Info -->
+                <div class="section-divider d-flex align-center justify-space-between">
+                  <div class="d-flex align-center overflow-hidden">
+                    <VAvatar size="36" color="primary-lighten-5" class="me-3">
+                      <VIcon icon="bx-user" size="20" color="primary" />
+                    </VAvatar>
+                    <div class="d-flex flex-column overflow-hidden">
+                      <span class="text-card-body font-weight-bold text-truncate">
+                        {{ order.customer_name || order.customer?.name || 'Гость' }}
+                      </span>
+                      <div class="d-flex align-center ga-1">
+                        <VIcon 
+                          :icon="order.customer_info_details?.is_high_risk ? 'bx-shield-x' : 'bx-check-shield'" 
+                          size="12" 
+                          :color="order.customer_info_details?.is_high_risk ? 'error' : 'success'" 
+                        />
+                        <span class="text-card-small" :class="order.customer_info_details?.is_high_risk ? 'text-error' : 'text-success'">
+                          {{ order.customer_info_details?.is_high_risk ? 'Риск' : 'Надежный' }}
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+                  <VBtn
+                    icon="bx-phone"
+                    size="40"
+                    color="success"
+                    variant="tonal"
+                    class="rounded-xl shadow-sm"
+                    @click.stop="callCustomer(order.customer_phone || order.customer?.phone)"
+                  />
+                </div>
+
+                <!-- 6. Address -->
+                <div class="section-divider">
+                  <div class="address-premium-box d-flex align-start ga-2" @click="openMaps(order)">
+                    <VIcon icon="bx-map" color="primary" class="mt-1" size="18" />
+                    <div class="text-card-body font-weight-bold line-height-sm flex-grow-1">
+                      {{ order.delivery_address || formatAddress(order) }}
+                    </div>
                     <VBtn
                       icon="bx-copy"
                       variant="text"
                       size="x-small"
-                      color="grey-darken-1"
-                      @click.stop="copyToClipboard(formatAddress(order))"
-                      title="Копировать адрес"
+                      color="grey"
+                      class="ms-1"
+                      @click.stop="copyToClipboard(order.delivery_address || formatAddress(order))"
                     />
                   </div>
+                </div>
 
-                  <!-- Быстрая навигация -->
-                  <div class="d-flex align-center gap-2 mb-4 px-1">
-                    <span class="text-caption text-grey-darken-1 me-1">Навигатор:</span>
-                    <VBtn
-                      variant="tonal"
-                      size="x-small"
-                      color="warning"
-                      class="rounded-lg"
-                      @click.stop="openMaps(order, 'yandex')"
-                    >
-                      Яндекс
-                    </VBtn>
-                    <VBtn
-                      variant="tonal"
-                      size="x-small"
-                      color="info"
-                      class="rounded-lg"
-                      @click.stop="openMaps(order, '2gis')"
-                    >
-                      2ГИС
-                    </VBtn>
-                    <VBtn
-                      variant="tonal"
-                      size="x-small"
-                      color="success"
-                      class="rounded-lg"
-                      @click.stop="openMaps(order, 'google')"
-                    >
-                      Google
-                    </VBtn>
-                    <VBtn
-                      variant="tonal"
-                      size="x-small"
-                      color="secondary"
-                      class="rounded-lg"
-                      @click.stop="openMaps(order, 'petal')"
-                    >
-                      Petal
-                    </VBtn>
+                <!-- 7. Comments (Optional) -->
+                <div v-if="order.comment || order.courier_comment" class="section-divider bg-amber-50 py-2">
+                  <div v-if="order.comment" class="d-flex ga-2 mb-1">
+                    <VIcon icon="bx-comment" size="14" color="amber-darken-3" class="mt-1" />
+                    <div class="text-card-caption text-slate-700"><strong>Заказ:</strong> {{ order.comment }}</div>
                   </div>
-                </VCardItem>
-
-                <VCardText class="py-2">
-                  <div class="customer-info d-flex align-center justify-space-between mb-3">
-                    <div class="d-flex align-center">
-                      <VAvatar size="32" color="primary-lighten-5" class="me-2">
-                        <VIcon icon="bx-user" color="primary" size="18" />
-                      </VAvatar>
-                      <span class="font-weight-bold text-body-2">{{ order.customer?.name || 'Гость' }}</span>
-                    </div>
-                    <VBtn
-                      v-if="order.customer?.phone"
-                      icon="bx-phone"
-                      color="success"
-                      variant="tonal"
-                      size="small"
-                      density="comfortable"
-                      @click="callCustomer(order.customer.phone)"
-                    />
+                  <div v-if="order.courier_comment" class="d-flex ga-2">
+                    <VIcon icon="bx-info-circle" size="14" color="primary" class="mt-1" />
+                    <div class="text-card-caption text-slate-700"><strong>Курьеру:</strong> {{ order.courier_comment }}</div>
                   </div>
+                </div>
 
-                  <div v-if="order.items?.length" class="items-preview pa-3 rounded-lg bg-grey-lighten-5 mb-3 border">
-                    <p class="text-caption text-primary mb-2 font-weight-bold d-flex align-center">
-                      <VIcon icon="bx-list-ul" size="14" class="me-1" />
-                      СОСТАВ ЗАКАЗА:
-                    </p>
-                    <div class="order-items-list">
-                      <div 
-                        v-for="(item, idx) in order.items" 
-                        :key="idx"
-                        class="d-flex flex-column mb-1 pb-1"
-                        :class="idx < order.items.length - 1 ? 'border-bottom-dashed' : ''"
-                      >
-                        <div class="d-flex justify-space-between align-start">
-                          <span class="text-body-2 font-weight-medium flex-grow-1">
-                            {{ item.name }}
-                          </span>
-                          <span class="text-body-2 font-weight-bold text-no-wrap ms-2">
-                            {{ item.amount }} шт.
-                          </span>
-                        </div>
-                        <!-- Модификаторы -->
-                        <div v-if="item.modifiers?.length" class="modifiers-list ps-3">
-                          <div 
-                            v-for="(mod, midx) in item.modifiers" 
-                            :key="midx"
-                            class="text-caption text-grey-darken-1"
-                          >
-                            • {{ mod.name }} ({{ mod.amount }} шт.)
+                <!-- 8. Composition -->
+                <div class="composition-panel">
+                  <VExpansionPanels variant="accordion">
+                    <VExpansionPanel elevation="0" class="border-b rounded-0">
+                      <VExpansionPanelTitle class="px-5">
+                        <template #default="{ expanded }">
+                          <div class="d-flex align-center ga-2 w-100">
+                            <VIcon icon="bx-package" size="16" color="slate-400" />
+                            <span class="text-card-small text-slate-500">Состав ({{ order.items?.length || 0 }})</span>
+                            <VSpacer />
+                            <span v-if="!expanded" class="text-card-caption font-weight-bold text-truncate" style="max-width: 120px;">
+                              {{ order.items?.[0]?.name }}{{ order.items?.length > 1 ? '...' : '' }}
+                            </span>
                           </div>
+                        </template>
+                      </VExpansionPanelTitle>
+                      <VExpansionPanelText>
+                        <div
+                          v-for="item in order.items"
+                          :key="item.id"
+                          class="d-flex justify-space-between py-1 border-bottom-dashed text-card-caption"
+                        >
+                          <span class="text-truncate me-2">{{ item.name }}</span>
+                          <span class="font-weight-black flex-shrink-0 text-slate-900">{{ item.amount }} шт.</span>
                         </div>
+                      </VExpansionPanelText>
+                    </VExpansionPanel>
+                  </VExpansionPanels>
+                </div>
+
+                <!-- 9. Payment & Primary Actions -->
+                <div class="card-footer-payment">
+                  <div class="d-flex justify-space-between align-center mb-4">
+                    <div class="d-flex flex-column">
+                      <span class="text-card-small text-slate-400 leading-none mb-1">Сумма</span>
+                      <span class="text-h6 font-weight-black text-slate-900 leading-none">
+                        {{ (order.left_to_pay || order.total_with_discount || order.sum || 0).toLocaleString() }} ₽
+                      </span>
+                    </div>
+                    <div class="text-right">
+                      <div class="d-flex align-center justify-end ga-1 mb-1">
+                        <VIcon :icon="getPaymentTypeIcon(order.payment_method)" size="14" color="slate-400" />
+                        <span class="text-card-small text-slate-600">{{ order.payment_method || '—' }}</span>
                       </div>
+                      <VChip 
+                        :color="getPaymentStatusColor(order)" 
+                        size="x-small" 
+                        variant="flat" 
+                        class="font-weight-black"
+                      >
+                        {{ getPaymentStatusText(order) }}
+                      </VChip>
                     </div>
                   </div>
 
-                  <div v-if="isSuperAdmin && order.courier_name" class="admin-courier-tag pa-1 rounded d-flex align-center">
-                    <VIcon icon="bx-bicycle" size="14" color="primary" class="me-1" />
-                    <span class="text-caption font-weight-medium">Курьер: {{ order.courier_name }}</span>
-                  </div>
-                </VCardText>
+                  <!-- Buttons Row 1: Primary Action & Details -->
+                  <div class="d-flex ga-2 mb-3">
+                    <VBtn
+                      v-if="order.status.toLowerCase() === 'ready'"
+                      prepend-icon="bx-run"
+                      :color="isButtonLocked(order.id) ? 'secondary' : 'primary'"
+                      :disabled="isButtonLocked(order.id)"
+                      variant="flat"
+                      size="large"
+                      class="rounded-xl font-weight-black text-uppercase flex-grow-1"
+                      @click.stop="updateStatus(order.id, 'OnWay')"
+                    >
+                      Начать доставку
+                    </VBtn>
 
-                <VDivider class="mx-4" />
+                    <!-- ORANGE Delivered Button (60s after start) -->
+                    <VBtn
+                      v-else-if="(order.status.toLowerCase() === 'onway' || order.status.toLowerCase() === 'delivering') && canShowDelivered(order)"
+                      prepend-icon="bx-check-double"
+                      color="warning"
+                      variant="flat"
+                      size="large"
+                      class="rounded-xl font-weight-black text-uppercase flex-grow-1"
+                      @click.stop="updateStatus(order.id, 'Delivered', true)"
+                    >
+                      Доставлен
+                    </VBtn>
 
-                <VCardActions class="pa-4">
-                  <div class="w-100">
-                    <template v-if="!isSuperAdmin">
-                      <VBtn
-                        v-if="order.status?.toLowerCase() === 'ready'"
-                        block
-                        color="blue"
-                        variant="flat"
-                        size="large"
-                        prepend-icon="bx-navigation"
-                        class="mb-2"
-                        @click="updateStatus(order.id, 'OnWay')"
-                      >
-                        Взять в работу
-                      </VBtn>
-
-                      <VBtn
-                        v-if="order.status?.toLowerCase() === 'delivering'"
-                        block
-                        color="green-darken-1"
-                        variant="flat"
-                        size="large"
-                        prepend-icon="bx-check-double"
-                        class="mb-2"
-                        @click="updateStatus(order.id, 'Delivered')"
-                      >
-                        Доставил
-                      </VBtn>
-
-                      <VBtn
-                        v-if="order.status?.toLowerCase() === 'delivered'"
-                        block
-                        color="primary"
-                        variant="elevated"
-                        size="large"
-                        prepend-icon="bx-wallet"
-                        class="mb-2"
-                        @click="openCloseDialog(order)"
-                      >
-                        Оплатить и закрыть
-                      </VBtn>
-                    </template>
-                    
-                    <VBtn 
-                      block 
-                      variant="tonal" 
-                      color="primary" 
-                      prepend-icon="bx-detail"
-                      @click="openDetails(order)"
+                    <!-- Secondary Info Button (Before 60s passed) -->
+                    <VBtn
+                      v-else-if="order.status.toLowerCase() === 'onway' || order.status.toLowerCase() === 'delivering'"
+                      prepend-icon="bx-info-circle"
+                      variant="flat"
+                      color="secondary"
+                      size="large"
+                      class="rounded-xl font-weight-bold flex-grow-1"
+                      @click.stop="openDetails(order)"
                     >
                       Подробнее
                     </VBtn>
+                    <VBtn
+                      v-else-if="order.status.toLowerCase() === 'delivered'"
+                      prepend-icon="bx-wallet"
+                      color="slate-900"
+                      variant="flat"
+                      size="large"
+                      class="rounded-xl font-weight-black text-uppercase text-white flex-grow-1"
+                      @click.stop="openCloseDialog(order)"
+                    >
+                      Оплатить
+                    </VBtn>
+                    <VBtn
+                      v-else
+                      prepend-icon="bx-info-circle"
+                      variant="tonal"
+                      color="secondary"
+                      size="large"
+                      class="rounded-xl font-weight-bold flex-grow-1"
+                      @click.stop="openDetails(order)"
+                    >
+                      Подробнее
+                    </VBtn>
+
+                    <!-- Иконка подробнее если основная кнопка другая -->
+                    <VBtn
+                      v-if="order.status.toLowerCase() === 'ready' || order.status.toLowerCase() === 'delivered'"
+                      icon="bx-info-circle"
+                      variant="tonal"
+                      color="secondary"
+                      size="large"
+                      class="rounded-xl flex-shrink-0"
+                      style="width: 56px;"
+                      @click.stop="openDetails(order)"
+                    />
                   </div>
-                </VCardActions>
+
+                  <!-- Buttons Row 2: Secondary Actions (Maps) -->
+                  <div class="d-flex ga-2">
+                    <VMenu offset-y transition="scale-transition" location="top">
+                      <template #activator="{ props: menuProps }">
+                        <VBtn
+                          v-bind="menuProps"
+                          prepend-icon="bx-navigation"
+                          color="primary"
+                          variant="tonal"
+                          size="small"
+                          class="rounded-lg font-weight-bold flex-grow-1"
+                        >
+                          Открыть в навигаторе
+                        </VBtn>
+                      </template>
+                      <VList density="compact" class="rounded-xl py-2 border shadow-lg">
+                        <VListItem @click="openMaps(order, 'yandex')" class="py-2">
+                          <template #prepend><VIcon icon="bx-map" color="orange" /></template>
+                          <VListItemTitle class="font-weight-bold">Яндекс</VListItemTitle>
+                        </VListItem>
+                        <VListItem @click="openMaps(order, '2gis')" class="py-2">
+                          <template #prepend><VIcon icon="bx-navigation" color="blue" /></template>
+                          <VListItemTitle class="font-weight-bold">2ГИС</VListItemTitle>
+                        </VListItem>
+                        <VListItem @click="openMaps(order, 'google')" class="py-2">
+                          <template #prepend><VIcon icon="bx-globe" color="green" /></template>
+                          <VListItemTitle class="font-weight-bold">Google Maps</VListItemTitle>
+                        </VListItem>
+                      </VList>
+                    </VMenu>
+                  </div>
+                </div>
               </VCard>
             </VCol>
           </VRow>
@@ -818,7 +1144,7 @@ onUnmounted(() => {
               hide-details
               variant="outlined"
               class="max-width-200"
-              @update:model-value="fetchOrders(true)"
+              @update:model-value="() => { userSelectedSpecificDate = true; fetchOrders(true); }"
             />
 
             <VSelect
@@ -832,18 +1158,35 @@ onUnmounted(() => {
               class="max-width-200"
               clearable
               placeholder="Все курьеры"
-              @update:model-value="fetchOrders(true)"
             />
           </div>
+
+          <!-- Даты для выбранного курьера -->
+          <div v-if="archiveCourierFilter && courierDates.length" class="mt-3 overflow-x-auto pb-2">
+            <div class="d-flex gap-2" style="min-width: max-content;">
+              <span class="text-caption text-grey-darken-1 align-self-center me-1">Даты курьера:</span>
+              <VBtn
+                v-for="date in courierDates"
+                :key="date"
+                size="x-small"
+                variant="tonal"
+                :color="selectedDate === date.split('T')[0] ? 'primary' : 'secondary'"
+                class="rounded-lg"
+                @click="selectCourierDate(date)"
+              >
+                {{ formatDate(date) }}
+              </VBtn>
+            </div>
+          </div>
           
-          <div v-if="archiveOrders.length" class="archive-summary mt-3 text-caption text-grey-darken-1 d-flex align-center flex-wrap gap-x-4 gap-y-2">
+          <div v-if="filteredArchiveOrders.length" class="archive-summary mt-3 text-caption text-grey-darken-1 d-flex align-center flex-wrap gap-x-4 gap-y-2">
             <div class="d-flex align-center">
               <VIcon icon="bx-package" size="16" class="me-1" />
-              Заказов: <span class="font-weight-bold ms-1 text-primary">{{ archiveOrders.length }}</span>
+              Заказов: <span class="font-weight-bold ms-1 text-primary">{{ filteredArchiveOrders.length }}</span>
             </div>
             <div class="d-flex align-center">
               <VIcon icon="bx-wallet" size="16" class="me-1" />
-              Сумма: <span class="font-weight-bold ms-1 text-primary">{{ archiveOrders.reduce((sum, o) => sum + (o.sum || 0), 0).toFixed(2) }} ₽</span>
+              Сумма: <span class="font-weight-bold ms-1 text-primary">{{ filteredArchiveOrders.reduce((acc, o) => acc + parseFloat(o.total_with_discount || o.sum || 0), 0).toFixed(2) }} ₽</span>
             </div>
             <VSpacer />
             <div class="d-flex align-center">
@@ -871,7 +1214,7 @@ onUnmounted(() => {
           <VProgressCircular indeterminate color="primary" size="48" />
         </div>
         <div 
-          v-if="!archiveOrders.length" 
+          v-if="!filteredArchiveOrders.length && !loading" 
           class="empty-state text-center py-16"
         >
           <VIcon 
@@ -881,7 +1224,9 @@ onUnmounted(() => {
             class="mb-4" 
           />
           <h3 class="text-h6 font-weight-bold">Архив пуст</h3>
-          <p class="text-body-2 text-grey">Здесь будут отображаться завершенные доставки</p>
+          <p class="text-body-2 text-grey">
+            {{ selectedDate === new Date().toISOString().substr(0, 10) ? 'Доставок за сегодня еще не было' : 'За выбранный период доставок не найдено' }}
+          </p>
         </div>
         <!-- Список заказов (Обычный или Сгруппированный) -->
         <div v-if="archiveGroupByCourier && groupedArchiveOrders" class="pa-2">
@@ -911,7 +1256,7 @@ onUnmounted(() => {
                 md="6"
                 lg="4"
               >
-                <OrderArchiveCard :order="order" />
+                <OrderArchiveCard :order="order" @open-details="openDetails" />
               </VCol>
             </VRow>
           </div>
@@ -925,10 +1270,20 @@ onUnmounted(() => {
             md="6"
             lg="4"
           >
-            <OrderArchiveCard :order="order" />
+            <OrderArchiveCard :order="order" @open-details="openDetails" />
           </VCol>
         </VRow>
-        </VRow>
+
+        <!-- Пагинация -->
+        <div v-if="archiveTotalPages > 1" class="pa-4 d-flex justify-center">
+          <VPagination
+            v-model="archivePage"
+            :length="archiveTotalPages"
+            total-visible="5"
+            rounded="circle"
+            density="comfortable"
+          />
+        </div>
       </VWindowItem>
 
       <!-- Вкладка: Смены -->
@@ -988,98 +1343,14 @@ onUnmounted(() => {
       </VWindowItem>
     </VWindow>
 
-    <!-- Диалог деталей заказа -->
-    <VDialog 
-      v-model="showDetailsDialog" 
-      max-width="600px" 
-      scrollable
-    >
-      <VCard 
-        v-if="detailsOrder"
-        class="rounded-xl"
-      >
-        <VCardTitle class="d-flex justify-space-between align-center pa-4 bg-primary text-white">
-          <div class="d-flex align-center">
-            <VIcon icon="bx-receipt" class="me-2" />
-            <span>Детали заказа №{{ detailsOrder.number || detailsOrder.id.substring(0, 4) }}</span>
-          </div>
-          <VBtn icon="bx-x" variant="text" color="white" @click="showDetailsDialog = false" />
-        </VCardTitle>
-
-        <VCardText class="pa-4">
-          <div class="info-section mb-6">
-            <h4 class="text-overline text-grey-darken-1 mb-2">Информация о клиенте</h4>
-            <div class="d-flex align-center mb-2">
-              <VAvatar color="primary-lighten-5" size="40" class="me-3">
-                <VIcon icon="bx-user" color="primary" />
-              </VAvatar>
-              <div>
-                <div class="text-subtitle-1 font-weight-bold">{{ detailsOrder.customer?.name || 'Гость' }}</div>
-                <div class="text-body-2 text-grey-darken-1">{{ detailsOrder.customer?.phone || 'Телефон не указан' }}</div>
-              </div>
-            </div>
-            <div class="d-flex align-center pa-3 rounded-lg bg-grey-lighten-4 mt-2 cursor-pointer" @click="openMaps(detailsOrder)">
-              <VIcon icon="bx-map" color="primary" class="me-3" />
-              <div class="text-body-2 font-weight-medium flex-grow-1">{{ formatAddress(detailsOrder) }}</div>
-              <VBtn
-                icon="bx-copy"
-                variant="text"
-                size="small"
-                color="grey-darken-1"
-                @click.stop="copyToClipboard(formatAddress(detailsOrder))"
-              />
-            </div>
-            <div v-if="detailsOrder.comment" class="comment-box mt-3 pa-3 rounded-lg bg-amber-lighten-5 border-amber-lighten-3 border">
-              <div class="text-caption text-amber-darken-4 font-weight-bold mb-1">КОММЕНТАРИЙ:</div>
-              <div class="text-body-2">{{ detailsOrder.comment }}</div>
-            </div>
-          </div>
-
-          <div class="items-section mb-6">
-            <h4 class="text-overline text-grey-darken-1 mb-2">Состав заказа</h4>
-            <VList density="compact" class="bg-transparent pa-0">
-              <VListItem v-for="(item, idx) in detailsOrder.items" :key="idx" class="px-0 py-1">
-                <template v-slot:prepend>
-                  <VChip size="x-small" color="primary" variant="tonal" class="me-2">{{ item.amount }}x</VChip>
-                </template>
-                <VListItemTitle class="text-body-2 font-weight-bold">{{ item.name }}</VListItemTitle>
-                <template v-slot:append>
-                  <span class="text-body-2 font-weight-bold">{{ (item.price * item.amount).toFixed(2) }} ₽</span>
-                </template>
-              </VListItem>
-            </VList>
-          </div>
-
-          <div class="payment-section pa-4 rounded-xl bg-grey-lighten-4">
-            <h4 class="text-overline text-grey-darken-1 mb-3">Оплата и статус</h4>
-            <div class="d-flex justify-space-between align-center mb-2">
-              <span class="text-body-2">Сумма заказа:</span>
-              <span class="text-body-1 font-weight-black">{{ detailsOrder.sum }} ₽</span>
-            </div>
-            <div class="d-flex justify-space-between align-center mb-2">
-              <span class="text-body-2">Способ оплаты:</span>
-              <span class="text-body-2 font-weight-bold text-primary">{{ detailsOrder.payment_method || 'Не указан' }}</span>
-            </div>
-            <div class="d-flex justify-space-between align-center mb-2">
-              <span class="text-body-2">Статус оплаты:</span>
-              <VChip :color="detailsOrder.is_paid ? 'success' : 'warning'" size="x-small" variant="flat">
-                {{ detailsOrder.is_paid ? 'Оплачено' : 'Ожидает оплаты' }}
-              </VChip>
-            </div>
-            <div v-if="!detailsOrder.is_paid && detailsOrder.left_to_pay > 0" class="d-flex justify-space-between align-center mt-3 pt-3 border-t">
-              <span class="text-body-1 font-weight-bold text-error">К оплате:</span>
-              <span class="text-h6 font-weight-black text-error">{{ detailsOrder.left_to_pay }} ₽</span>
-            </div>
-          </div>
-        </VCardText>
-
-        <VCardActions class="pa-4">
-          <VBtn block color="primary" variant="flat" size="large" @click="showDetailsDialog = false">
-            Закрыть
-          </VBtn>
-        </VCardActions>
-      </VCard>
-    </VDialog>
+    <!-- Диалог деталей заказа (Стандартизированный) -->
+    <OrderDetailModal
+      v-if="detailsOrder"
+      v-model="showDetailsDialog"
+      :order="detailsOrder"
+      :is-read-only="false"
+      @status-updated="handleStatusUpdated"
+    />
 
     <!-- Диалог закрытия заказа -->
     <VDialog v-model="showCloseDialog" max-width="450px" persistent>
@@ -1143,84 +1414,5 @@ onUnmounted(() => {
 </template>
 
 <style scoped>
-.courier-app-wrapper {
-  max-width: 1200px;
-  margin: 0 auto;
-  min-height: 100vh;
-}
-
-.main-title {
-  color: #2c3e50;
-  letter-spacing: -0.5px;
-}
-
-.order-card-premium {
-  border-radius: 16px !important;
-  transition: transform 0.2s, box-shadow 0.2s;
-  background-color: #fff;
-}
-
-.order-card-premium:hover {
-  transform: translateY(-2px);
-  box-shadow: 0 8px 24px rgba(0,0,0,0.12) !important;
-}
-
-.status-strip {
-  height: 4px;
-  width: 100%;
-}
-
-.address-box {
-  transition: background-color 0.2s;
-}
-
-.address-box:hover {
-  background-color: #f0f0f0 !important;
-}
-
-.action-btn-main {
-  border-radius: 12px !important;
-  text-transform: none !important;
-  font-weight: 700 !important;
-  letter-spacing: 0;
-}
-
-.line-clamp-2 {
-  display: -webkit-box;
-  -webkit-line-clamp: 2;
-  -webkit-box-orient: vertical;
-  overflow: hidden;
-}
-
-.pulse-dot {
-  width: 8px;
-  height: 8px;
-  background-color: #4caf50;
-  border-radius: 50%;
-  display: inline-block;
-  box-shadow: 0 0 0 rgba(76, 175, 80, 0.4);
-  animation: pulse 2s infinite;
-}
-
-@keyframes pulse {
-  0% { transform: scale(0.95); box-shadow: 0 0 0 0 rgba(76, 175, 80, 0.7); }
-  70% { transform: scale(1); box-shadow: 0 0 0 10px rgba(76, 175, 80, 0); }
-  100% { transform: scale(0.95); box-shadow: 0 0 0 0 rgba(76, 175, 80, 0); }
-}
-
-.custom-tabs-nav :deep(.v-tab) {
-  font-weight: 700 !important;
-}
-
-.payment-type-list .v-list-item--active {
-  border: 2px solid rgb(var(--v-theme-primary)) !important;
-}
-  .border-bottom-dashed {
-    border-bottom: 1px dashed #e0e0e0;
-  }
-  
-  .modifiers-list {
-    border-left: 2px solid #eeeeee;
-    margin-top: 2px;
-  }
+@import "@styles/courier.css";
 </style>

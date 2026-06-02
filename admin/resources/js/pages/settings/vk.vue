@@ -1,123 +1,123 @@
 <script setup>
-import { ref, onMounted, computed } from "vue";
+import { ref, onMounted, computed } from "vue"
+import { formatDateTime } from "@/utils/date"
 
-const loading = ref(false);
-const saving = ref(false);
-const testingBot = ref(false);
-const snackbar = ref(false);
-const snackbarColor = ref("success");
-const snackbarText = ref("");
-const logs = ref([]);
-const loadingLogs = ref(false);
+const loading = ref(false)
+const saving = ref(false)
+const testingBot = ref(false)
+const snackbar = ref(false)
+const snackbarColor = ref("success")
+const snackbarText = ref("")
+const logs = ref([])
+const loadingLogs = ref(false)
 
 const settings = ref({
   vk_bot_token: "",
   vk_confirmation_code: "",
   vk_group_id: "",
   vk_secret_key: "",
-});
+})
 
-const API_BASE = "/api/v1/vk";
+const API_BASE = "/api/v1/vk"
 
 const webhookUrl = computed(() => {
-  const origin = window.location.origin;
-  return `${origin}/api/v1/vk/webhook`;
-});
+  const origin = window.location.origin
+  
+  return `${origin}/api/v1/vk/webhook`
+})
 
 const showMessage = (text, color = "success") => {
-  snackbarText.value = text;
-  snackbarColor.value = color;
-  snackbar.value = true;
-};
+  snackbarText.value = text
+  snackbarColor.value = color
+  snackbar.value = true
+}
 
 // Загрузка текущих настроек
 const loadSettings = async () => {
-  loading.value = true;
+  loading.value = true
   try {
-    const res = await fetch(`${API_BASE}/settings`);
+    const res = await fetch(`${API_BASE}/settings`)
     if (res.ok) {
-      const data = await res.json();
+      const data = await res.json()
       Object.keys(settings.value).forEach((key) => {
         if (data[key] !== undefined && data[key] !== null) {
-          settings.value[key] = data[key];
+          settings.value[key] = data[key]
         }
-      });
+      })
     }
   } catch (e) {
-    showMessage("Ошибка загрузки настроек", "error");
+    showMessage("Ошибка загрузки настроек", "error")
   } finally {
-    loading.value = false;
+    loading.value = false
   }
-};
+}
 
 // Сохранение настроек
 const saveSettings = async () => {
-  saving.value = true;
+  saving.value = true
   try {
     const res = await fetch(`${API_BASE}/settings`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(settings.value),
-    });
+    })
 
     if (res.ok) {
-      showMessage("Настройки успешно сохранены");
-      await loadLogs();
+      showMessage("Настройки успешно сохранены")
+      await loadLogs()
     } else {
-      const err = await res.json();
-      showMessage(err.detail || "Ошибка сохранения", "error");
+      const err = await res.json()
+      showMessage(err.detail || "Ошибка сохранения", "error")
     }
   } catch (e) {
-    showMessage("Ошибка подключения к серверу", "error");
+    showMessage("Ошибка подключения к серверу", "error")
   } finally {
-    saving.value = false;
+    saving.value = false
   }
-};
+}
 
 // Проверка соединения с ботом
 const testBotConnection = async () => {
-  testingBot.value = true;
+  testingBot.value = true
   try {
-    const res = await fetch(`${API_BASE}/test-connection`);
-    const data = await res.json();
+    const res = await fetch(`${API_BASE}/test-connection`)
+    const data = await res.json()
     
     if (data.status === "success") {
-      showMessage(data.message, "success");
+      showMessage(data.message, "success")
     } else {
-      showMessage(data.message || "Ошибка проверки", "error");
+      showMessage(data.message || "Ошибка проверки", "error")
     }
   } catch (e) {
-    showMessage("Ошибка при проверке соединения", "error");
+    showMessage("Ошибка при проверке соединения", "error")
   } finally {
-    testingBot.value = false;
+    testingBot.value = false
   }
-};
+}
 
 // Загрузка логов
 const loadLogs = async () => {
-  loadingLogs.value = true;
+  loadingLogs.value = true
   try {
-    const res = await fetch(`${API_BASE}/logs`);
+    const res = await fetch(`${API_BASE}/logs`)
     if (res.ok) {
-      logs.value = await res.json();
+      logs.value = await res.json()
     }
   } catch (e) {
-    console.error("Ошибка загрузки логов VK:", e);
+    console.error("Ошибка загрузки логов VK:", e)
   } finally {
-    loadingLogs.value = false;
+    loadingLogs.value = false
   }
-};
+}
 
 const formatDate = (dateStr) => {
-  if (!dateStr) return "";
-  const d = new Date(dateStr);
-  return d.toLocaleString("ru-RU");
-};
+  return formatDateTime(dateStr)
+}
 
 onMounted(async () => {
-  await loadSettings();
-  await loadLogs();
-});
+  await loadSettings()
+  await loadLogs()
+})
 </script>
 
 <template>

@@ -22,7 +22,7 @@ const handleLogin = async () => {
   isLoading.value = true
   loginError.value = ''
   try {
-    await login(form.value.username, form.value.password)
+    await login(form.value.username, form.value.password, form.value.remember)
     router.push('/')
   } catch (e) {
     loginError.value = e.message || 'Неверный логин или пароль'

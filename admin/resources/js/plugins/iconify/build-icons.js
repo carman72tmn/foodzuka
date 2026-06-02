@@ -45,6 +45,7 @@ const sources = {
         require.resolve('@iconify-json/bxs/icons.json'),
         require.resolve('@iconify-json/mdi/icons.json'),
         require.resolve('@iconify-json/ri/icons.json'),
+        require.resolve('@iconify-json/tabler/icons.json'),
         {
             filename: require.resolve('@iconify-json/fa/icons.json'),
             icons: [

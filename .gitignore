@@ -36,3 +36,10 @@ frontend/node_modules/
 # Backups and temp
 admin_backup_old/
 temp_sdk/
+*.tar.gz
+trash/
+backend/app/services/*.vps_current
+backend/app/services/*.broken_save
+
+
+

@@ -4,47 +4,45 @@
  */
 
 :root {
-    --soft-bg: #fdfdfd;
-    --soft-border: rgba(226, 232, 240, 0.5);
-    --soft-glass: rgba(255, 255, 255, 0.6);
-    --soft-shadow: 0 4px 20px -5px rgba(0, 0, 0, 0.03);
+    --soft-bg: #f9fbfe;
+    --soft-border: rgba(226, 232, 240, 0.4);
+    --soft-glass: rgba(255, 255, 255, 0.75);
+    --soft-shadow: 0 4px 25px -5px rgba(0, 0, 0, 0.04);
+    --premium-accent: #6366f1;
     
-    /* Restrained Soft Palette */
-    --muted-blue: #94a3b8;
-    --muted-green: #a3b18a;
-    --muted-orange: #e9c46a;
-    --muted-red: #e07a5f;
-    --muted-indigo: #818cf8;
-    --muted-teal: #99d98c;
+    /* Restrained Soft Palette (Pastels) */
+    --pastel-blue: #e0f2fe;
+    --pastel-green: #f0fdf4;
+    --pastel-orange: #fff7ed;
+    --pastel-red: #fef2f2;
+    --pastel-indigo: #eef2ff;
+    --pastel-teal: #f0fdfa;
+    --pastel-gray: #f8fafc;
     
-    /* Specific Status Shades (Restrained) */
-    --status-new: #94a3b8;
-    --status-pending: #f1b44c;
-    --status-active: #50a5f1;
-    --status-process: #34c38f;
-    --status-ready: #63d594;
-    --status-cancel: #f46a6a;
-    
-    --text-dark: #475569;
-    --text-muted: #94a3b8;
-    --text-light: #cbd5e1;
+    /* Text Colors (Removing pure black) */
+    --text-dark: #334155; /* Slate 700 - Deep, elegant gray */
+    --text-main: #475569; /* Slate 600 */
+    --text-muted: #64748b; /* Slate 500 */
+    --text-light: #94a3b8; /* Slate 400 */
 }
 
 .order-detail-card-soft {
     background-color: var(--soft-bg) !important;
-    border-radius: 20px !important;
+    border-radius: 24px !important;
+    box-shadow: 0 10px 40px rgba(0,0,0,0.06) !important;
+    color: var(--text-main);
 }
 
 .info-section-soft {
-    margin-bottom: 20px;
+    margin-bottom: 24px;
 }
 
 .section-label-soft {
-    font-size: 0.65rem;
+    font-size: 0.62rem;
     font-weight: 700;
-    letter-spacing: 0.04rem;
-    color: var(--text-muted);
-    margin-bottom: 6px;
+    letter-spacing: 0.06rem;
+    color: var(--text-light);
+    margin-bottom: 8px;
     display: flex;
     align-items: center;
     text-transform: uppercase;
@@ -52,23 +50,38 @@
 
 .glass-block-soft {
     background: var(--soft-glass);
-    backdrop-filter: blur(10px);
+    -webkit-backdrop-filter: blur(12px);
+    backdrop-filter: blur(12px);
     border: 1px solid var(--soft-border);
-    border-radius: 12px;
-    padding: 10px 14px;
+    border-radius: 16px;
+    padding: 12px 18px;
     box-shadow: var(--soft-shadow);
-    transition: all 0.25s ease-out;
+    transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
 }
 
 .glass-block-soft:hover {
-    border-color: rgba(148, 163, 184, 0.2);
-    transform: translateY(-1px);
-    box-shadow: 0 6px 15px -5px rgba(0, 0, 0, 0.05);
+    border-color: rgba(99, 102, 241, 0.15);
+    transform: translateY(-2px);
+    box-shadow: 0 10px 30px -5px rgba(0, 0, 0, 0.06);
+}
+
+/* Data rendering */
+.data-value-soft {
+    color: var(--text-dark);
+    font-weight: 600;
+    font-size: 0.92rem;
+    line-height: 1.4;
+}
+
+.data-sub-soft {
+    color: var(--text-muted);
+    font-size: 0.8rem;
+    margin-top: 2px;
 }
 
 /* Time Block Variants */
 .time-asap-soft {
-    background: linear-gradient(135deg, #fffdf5 0%, #fff9e6 100%);
+    background: linear-gradient(135deg, #fffcf0 0%, #fff9db 100%);
     border-color: #fef3c7;
 }
 
@@ -77,153 +90,233 @@
     border-color: #e2e8f0;
 }
 
-/* Пастельная палитра для статусов и кнопок */
-.status-indicator {
-    padding: 4px 12px;
-    border-radius: 20px;
-    font-size: 0.85rem;
-    font-weight: 500;
+/* Pastel Status Indicators */
+.status-indicator-soft {
+    padding: 6px 14px;
+    border-radius: 12px;
+    font-size: 0.78rem;
+    font-weight: 700;
     display: inline-flex;
     align-items: center;
-    gap: 6px;
+    gap: 8px;
+    letter-spacing: 0.02rem;
+    transition: transform 0.2s;
 }
 
-/* Мягкие пастельные цвета для состояний */
-.status-success {
-    background: rgba(232, 245, 233, 0.7) !important;
-    color: #2e7d32 !important;
-    border: 1px solid rgba(46, 125, 50, 0.2);
+/* Refined Pastel Palette for Statuses */
+.status-soft-success {
+    background: #ecfdf5 !important;
+    color: #059669 !important;
+    border: 1px solid rgba(5, 150, 105, 0.1);
 }
 
-.status-warning {
-    background: rgba(255, 243, 224, 0.7) !important;
-    color: #ef6c00 !important;
-    border: 1px solid rgba(239, 108, 0, 0.2);
+.status-soft-warning {
+    background: #fffbeb !important;
+    color: #d97706 !important;
+    border: 1px solid rgba(217, 119, 6, 0.1);
 }
 
-.status-error {
-    background: rgba(255, 235, 238, 0.7) !important;
-    color: #c62828 !important;
-    border: 1px solid rgba(198, 40, 40, 0.2);
+.status-soft-error {
+    background: #fef2f2 !important;
+    color: #dc2626 !important;
+    border: 1px solid rgba(220, 38, 38, 0.1);
 }
 
-.status-info {
-    background: rgba(227, 242, 253, 0.7) !important;
-    color: #1565c0 !important;
-    border: 1px solid rgba(21, 101, 192, 0.2);
+.status-soft-info {
+    background: #eff6ff !important;
+    color: #2563eb !important;
+    border: 1px solid rgba(37, 99, 235, 0.1);
 }
 
-/* Стили для кнопок в модальном окне */
-.soft-btn {
+.status-soft-neutral {
+    background: #f8fafc !important;
+    color: #64748b !important;
+    border: 1px solid rgba(100, 116, 139, 0.1);
+}
+
+/* Premium Buttons */
+.soft-btn-premium {
     text-transform: none !important;
-    letter-spacing: 0.3px !important;
-    border-radius: 12px !important;
-    font-weight: 500 !important;
-    transition: all 0.2s ease;
+    letter-spacing: 0 !important;
+    border-radius: 14px !important;
+    font-weight: 600 !important;
+    padding: 10px 20px !important;
+    transition: all 0.3s ease;
+    border: 1px solid transparent !important;
 }
 
-.soft-btn-primary {
-    background: linear-gradient(135deg, #e3f2fd 0%, #bbdefb 100%) !important;
-    color: #1976d2 !important;
-    box-shadow: 0 4px 12px rgba(25, 118, 210, 0.1) !important;
+.soft-btn-premium-primary {
+    background: linear-gradient(135deg, #6366f1 0%, #4f46e5 100%) !important;
+    color: white !important;
+    box-shadow: 0 4px 15px rgba(99, 102, 241, 0.2) !important;
 }
 
-.soft-btn-primary:hover {
-    transform: translateY(-1px);
-    box-shadow: 0 6px 16px rgba(25, 118, 210, 0.15) !important;
+.soft-btn-premium-primary:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 8px 25px rgba(99, 102, 241, 0.3) !important;
 }
 
-/* Индикаторы лояльности */
-.loyalty-indicator {
-    padding: 2px 8px;
-    border-radius: 6px;
-    font-size: 0.75rem;
-    font-weight: 600;
-    text-transform: uppercase;
+.soft-btn-premium-secondary {
+    background: white !important;
+    color: var(--text-dark) !important;
+    border: 1px solid var(--soft-border) !important;
+    box-shadow: var(--soft-shadow) !important;
 }
 
-.loyalty-new {
-    background: #fff8e1 !important;
-    color: #ffa000 !important;
+.soft-btn-premium-secondary:hover {
+    border-color: var(--premium-accent) !important;
+    color: var(--premium-accent) !important;
 }
 
-.loyalty-risk {
-    background: #fbe9e7 !important;
-    color: #d84315 !important;
-}
-
-/* Иконки с мягким цветом */
-.soft-icon-blue { color: #64b5f6 !important; }
-.soft-icon-green { color: #81c784 !important; }
-.soft-icon-orange { color: #ffb74d !important; }
-.soft-icon-red { color: #e57373 !important; }
-.soft-icon-purple { color: #9575cd !important; }
-.soft-icon-cyan { color: #4dd0e1 !important; }
-
-/* Financials Block Soft */
-.financial-panel-glass-soft {
-    background: #ffffff;
-    border: 1px solid var(--soft-border);
-    border-radius: 16px;
-    padding: 16px;
-    box-shadow: var(--soft-shadow);
-}
-
+/* Table Enhancements */
 .order-items-table-soft {
     border: 1px solid var(--soft-border) !important;
-    border-radius: 12px !important;
+    border-radius: 16px !important;
     overflow: hidden;
+    background: white !important;
 }
 
 .order-items-table-soft thead tr {
     background-color: #f8fafc !important;
+    border-bottom: 1px solid var(--soft-border) !important;
 }
 
 .order-items-table-soft th {
-    color: var(--text-muted) !important;
-    font-weight: 600 !important;
-    font-size: 0.7rem !important;
+    color: var(--text-light) !important;
+    font-weight: 700 !important;
+    font-size: 0.65rem !important;
     text-transform: uppercase;
-    padding: 12px 16px !important;
+    letter-spacing: 0.05rem;
+    padding: 16px 20px !important;
 }
 
 .order-items-table-soft td {
-    padding: 10px 16px !important;
+    padding: 14px 20px !important;
     border-bottom: 1px solid #f1f5f9 !important;
+    color: var(--text-main);
+    font-size: 0.88rem;
 }
 
-.modifier-soft {
-    font-size: 0.75rem;
-    color: var(--text-muted);
-    background-color: #fafafa;
+.order-items-table-soft tr:last-child td {
+    border-bottom: none !important;
 }
 
-/* Timeline Customization */
-.modern-timeline-soft :deep(.v-timeline-item__body) {
-    padding-bottom: 20px !important;
+/* Finance Panel */
+.financial-panel-glass-soft {
+    background: #f8fafc !important;
+    border: 1px solid var(--soft-border);
+    border-radius: 22px;
+    padding: 24px;
+    box-shadow: var(--soft-shadow);
 }
 
-.modern-timeline-soft :deep(.v-timeline-divider__dot) {
-    background: white !important;
-    border: 1.5px solid currentColor !important;
-    box-shadow: 0 2px 4px rgba(0,0,0,0.05);
+.finance-row-soft {
+    display: flex;
+    justify-content: space-between;
+    margin-bottom: 10px;
+    font-size: 0.88rem;
 }
 
-.timeline-time-soft {
-    font-size: 0.65rem;
-    color: var(--text-muted);
-    font-weight: 500;
+/* Loyalty Styles */
+.loyalty-new {
+    background-color: #fff1f2 !important;
+    color: #e11d48 !important;
+    border: 1px solid #fecdd3 !important;
+    font-size: 10px !important;
 }
 
-/* Buttons and UI elements */
-.soft-btn {
-    border-radius: 8px !important;
-    text-transform: none !important;
+.text-tiny {
+    font-size: 10px !important;
+    line-height: 1.2 !important;
+}
+
+.animate-pulse {
+    animation: pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+}
+
+@keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: .7; }
+}
+
+/* Icons */
+.premium-icon-box {
+    background: #f8fafc;
+    border-radius: 10px;
+    padding: 8px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    margin-right: 12px;
+}
+
+/* Custom Scrollbar for Modal */
+.custom-scroll-premium::-webkit-scrollbar {
+    width: 6px;
+}
+.custom-scroll-premium::-webkit-scrollbar-track {
+    background: transparent;
+}
+.custom-scroll-premium::-webkit-scrollbar-thumb {
+    background: #e2e8f0;
+    border-radius: 10px;
+}
+.custom-scroll-premium::-webkit-scrollbar-thumb:hover {
+    background: #cbd5e1;
+}
+
+/* Dotted Borders */
+.border-t-dotted {
+    border-top: 1px dotted rgba(148, 163, 184, 0.5) !important;
+}
+
+/* Deleted Items */
+.deleted-item-row {
+    background-color: rgba(254, 242, 242, 0.5) !important;
+}
+
+.deleted-item-row td {
+    border-bottom-color: rgba(254, 205, 211, 0.3) !important;
+}
+
+/* Financial adjustments */
+.financial-row-soft.total {
+    color: var(--text-dark) !important;
+    font-weight: 800 !important;
+    font-size: 1.1rem;
+}
+
+.payment-chip-soft {
+    border-radius: 10px !important;
+    font-size: 0.75rem !important;
+    font-weight: 700 !important;
+    transition: all 0.2s ease;
+    border: 1px solid transparent !important;
+    padding: 6px 12px !important;
+}
+
+.payment-chip-soft.processed {
+    background-color: #ecfdf5 !important;
+    color: #065f46 !important;
+    border-color: #d1fae5 !important;
+}
+
+.payment-chip-soft.pending {
+    background-color: #f8fafc !important;
+    color: #475569 !important;
+    border-color: #e2e8f0 !important;
+}
+
+.font-public-sans {
+    letter-spacing: 0.02em;
+}
+
+.text-uppercase-bold {
+    text-transform: uppercase !important;
     font-weight: 600 !important;
-    letter-spacing: 0 !important;
+    letter-spacing: 0.05em !important;
 }
 
-.soft-icon {
-    opacity: 0.7;
-}
+
+
 

@@ -13,9 +13,9 @@ from app.services.iiko_sync_service import iiko_sync_service
 from app.core.database import Session, engine, get_session
 from app.api import (
     categories, products, orders, companies, branches, iiko,
-    loyalty, promo_codes, actions, nps, customers, mailings,
-    stories, funnels, reports, employees, webhooks, vk, vk_bot_admin, bot_settings,
-    logs, yandex, auth, users, system
+    loyalty, promo_codes, actions, nps, customers, mailings, mailing_cascades,
+    stories, funnels, reports, employees, courier, webhooks, vk, vk_bot_admin, bot_settings,
+    logs, yandex, auth, users, system, chat, max
 )
 
 from app.services.revenue_sync import revenue_sync_service
@@ -47,8 +47,8 @@ from fastapi.exceptions import HTTPException
 from fastapi.exception_handlers import http_exception_handler
 @app.exception_handler(HTTPException)
 async def http_exception_db_handler(request, exc):
-    # Логируем ошибки API (кроме 404, если их слишком много)
-    if exc.status_code >= 400:
+    # Логируем ошибки API (кроме 401 и 404, чтобы не спамить логи при истекшей сессии)
+    if exc.status_code >= 400 and exc.status_code not in (401, 404):
         logger.warning(f"API Error {exc.status_code}: {exc.detail} at {request.url.path}")
     return await http_exception_handler(request, exc)
 
@@ -60,7 +60,7 @@ async def startup_event():
     # Инициализация ролей и супер-админа
     try:
         with Session(engine) as session:
-            iiko_sync_service.ensure_super_admin(session)
+            await iiko_sync_service.ensure_super_admin(session)
             logger.info("Системные роли и супер-админ проверены.")
     except Exception as e:
         logger.error(f"Ошибка при инициализации супер-админа: {e}")
@@ -71,6 +71,8 @@ app.add_middleware(
     allow_origins=[
         "http://localhost:5173", 
         "http://127.0.0.1:5173", 
+        "https://vezuroll.ru",
+        "http://vezuroll.ru",
         "https://72roll.ru",
         "http://72roll.ru",
         "*"
@@ -98,10 +100,12 @@ app.include_router(actions.router, prefix="/api/v1")
 app.include_router(nps.router, prefix="/api/v1")
 app.include_router(customers.router, prefix="/api/v1")
 app.include_router(mailings.router, prefix="/api/v1")
+app.include_router(mailing_cascades.router, prefix="/api/v1")
 app.include_router(stories.router, prefix="/api/v1")
 app.include_router(funnels.router, prefix="/api/v1")
 app.include_router(reports.router, prefix="/api/v1")
 app.include_router(employees.router, prefix="/api/v1/employees", tags=["Employees"])
+app.include_router(courier.router, prefix="/api/v1", tags=["Courier"])
 app.include_router(webhooks.router, prefix="/api/v1/webhooks", tags=["Webhooks"])
 app.include_router(vk.router, prefix="/api/v1/vk", tags=["VK"])
 app.include_router(vk_bot_admin.router, prefix="/api/v1/vk-bot", tags=["VK Bot Admin"])
@@ -109,6 +113,8 @@ app.include_router(bot_settings.router, prefix="/api/v1")
 app.include_router(logs.router, prefix="/api/v1")
 app.include_router(yandex.router, prefix="/api/v1")
 app.include_router(system.router, prefix="/api/v1")
+app.include_router(chat.router, prefix="/api/v1")
+app.include_router(max.router, prefix="/api/v1/max", tags=["MAX Integration"])
 
 
 # Алиас для настроек iiko (совместимость с фронтендом)

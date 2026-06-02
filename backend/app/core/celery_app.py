@@ -9,7 +9,7 @@ celery_app = Celery(
     "foodtech",
     broker=settings.REDIS_URL or "redis://localhost:6379/0",
     backend=settings.REDIS_URL or "redis://localhost:6379/0",
-    include=["app.tasks.customer_tasks", "app.tasks.general_tasks"]
+    include=["app.tasks.customer_tasks", "app.tasks.general_tasks", "app.tasks.mailing_tasks"]
 )
 
 # Настройки Celery

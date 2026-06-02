@@ -1,33 +1,47 @@
-"""
-Планировщик фоновых задач (APScheduler) с поддержкой базы данных
-"""
-import asyncio
 import logging
-import json
+import asyncio
 from datetime import datetime, timezone, timedelta
-from typing import Optional, List, Dict, Any
-
+from typing import List, Dict, Any, Optional
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.jobstores.sqlalchemy import SQLAlchemyJobStore
+from apscheduler.executors.asyncio import AsyncIOExecutor
+from apscheduler.executors.pool import ThreadPoolExecutor, ProcessPoolExecutor
 from apscheduler.events import EVENT_JOB_EXECUTED, EVENT_JOB_ERROR
 from sqlmodel import Session, select
-
-from app.core.config import settings
 from app.core.database import engine
 from app.models.scheduled_task import ScheduledTask
-from app.models.sync_log import SyncStatus
+from app.models.sync_log import SyncLog
 
 logger = logging.getLogger(__name__)
 
-# Настройка хранилища задач в БД
+# Конфигурация хранилища задач в БД
 jobstores = {
-    'default': SQLAlchemyJobStore(url=settings.DATABASE_URL)
+    'default': SQLAlchemyJobStore(engine=engine)
 }
 
-scheduler = AsyncIOScheduler(jobstores=jobstores)
+# Настройка исполнителей: AsyncIOExecutor для асинхронных задач, 
+# ThreadPoolExecutor для потенциально блокирующих синхронных задач
+executors = {
+    'default': AsyncIOExecutor(),
+    'threadpool': ThreadPoolExecutor(20)
+}
+
+job_defaults = {
+    'coalesce': False,
+    'max_instances': 3,
+    'misfire_grace_time': 300  # Увеличено до 5 минут для надежности
+}
+
+# Инициализация планировщика
+scheduler = AsyncIOScheduler(
+    jobstores=jobstores, 
+    executors=executors, 
+    job_defaults=job_defaults,
+    timezone='UTC' # Временное переключение на UTC для стабильности
+)
 
 def job_listener(event):
-    """Слушатель событий планировщика для обновления статусов и запуска зависимостей"""
+    """Слушатель событий планировщика для обновления статуса задач в нашей таблице"""
     with Session(engine) as session:
         task = session.exec(select(ScheduledTask).where(ScheduledTask.job_id == event.job_id)).first()
         if not task:
@@ -58,11 +72,8 @@ def job_listener(event):
                     module = importlib.import_module(module_path)
                     func = getattr(module, func_name)
                     
-                    # Если функция асинхронная, добавляем в цикл
-                    if asyncio.iscoroutinefunction(func):
-                        scheduler.add_job(func, args=dep.get_args(), kwargs=dep.get_kwargs())
-                    else:
-                        scheduler.add_job(func, args=dep.get_args(), kwargs=dep.get_kwargs())
+                    # AsyncIOScheduler умеет работать с async функциями
+                    scheduler.add_job(func, args=dep.get_args(), kwargs=dep.get_kwargs())
                 except Exception as e:
                     logger.error(f"Ошибка при запуске зависимой задачи {dep.name}: {e}")
 
@@ -89,11 +100,11 @@ def add_scheduled_job(task: ScheduledTask):
                 args=task.get_args(),
                 kwargs=task.get_kwargs(),
                 replace_existing=True,
+                misfire_grace_time=60,
                 **trigger_params
             )
         elif task.trigger_type == "cron":
             if isinstance(trigger_params, dict) and "expression" in trigger_params:
-                # Если это строка в формате crontab
                 from apscheduler.triggers.cron import CronTrigger
                 trigger = CronTrigger.from_crontab(trigger_params["expression"])
                 scheduler.add_job(
@@ -102,7 +113,8 @@ def add_scheduled_job(task: ScheduledTask):
                     id=task.job_id,
                     args=task.get_args(),
                     kwargs=task.get_kwargs(),
-                    replace_existing=True
+                    replace_existing=True,
+                    misfire_grace_time=60
                 )
             else:
                 scheduler.add_job(
@@ -112,11 +124,9 @@ def add_scheduled_job(task: ScheduledTask):
                     args=task.get_args(),
                     kwargs=task.get_kwargs(),
                     replace_existing=True,
+                    misfire_grace_time=60,
                     **trigger_params
                 )
-        # Тип 'dependency' не добавляется в планировщик как регулярный, 
-        # он запускается через listener
-        
         return True
     except Exception as e:
         logger.error(f"Ошибка при добавлении задачи {task.name} в планировщик: {e}")
@@ -124,19 +134,29 @@ def add_scheduled_job(task: ScheduledTask):
 
 def start_scheduler():
     """Инициализация и запуск планировщика"""
+    print("DEBUG: Calling start_scheduler()")
     if not scheduler.running:
-        # Сначала запускаем планировщик
-        scheduler.start()
-        logger.info("APScheduler запущен с SQLAlchemyJobStore")
-        
-        # Загружаем активные задачи из нашей таблицы
-        with Session(engine) as session:
-            tasks = session.exec(select(ScheduledTask).where(ScheduledTask.is_active == True)).all()
-            for task in tasks:
-                if task.trigger_type != "dependency":
-                    add_scheduled_job(task)
+        try:
+            # Запускаем планировщик
+            scheduler.start()
+            print("DEBUG: AsyncIOScheduler started")
+            logger.info("AsyncIOScheduler запущен")
             
-            logger.info(f"Загружено {len(tasks)} активных задач из базы данных")
+            # Загружаем активные задачи из нашей таблицы
+            with Session(engine) as session:
+                tasks = session.exec(select(ScheduledTask).where(ScheduledTask.is_active == True)).all()
+                print(f"DEBUG: Found {len(tasks)} active tasks in DB")
+                for task in tasks:
+                    if task.trigger_type != "dependency":
+                        success = add_scheduled_job(task)
+                        print(f"DEBUG: Adding job {task.name}: {'success' if success else 'FAILED'}")
+                
+                logger.info(f"Загружено {len(tasks)} активных задач из базы данных")
+        except Exception as e:
+            print(f"ERROR in start_scheduler: {e}")
+            logger.error(f"Ошибка при запуске планировщика: {e}")
+    else:
+        print("DEBUG: Scheduler is already running")
 
 async def get_scheduler_info():
     """Получение информации о текущих задачах в планировщике"""
@@ -148,6 +168,7 @@ async def get_scheduler_info():
         "trigger": str(job.trigger)
     } for job in jobs]
 
+# --- Wrappers for tasks ---
 
 async def sync_all():
     """Полная синхронизация всего из iiko (Меню + Категории + Стоп-листы)"""
@@ -173,7 +194,15 @@ async def sync_shifts_task():
     from app.services.iiko_sync_service import iiko_sync_service
     from app.core.database import Session, engine
     with Session(engine) as session:
+        # Используем sync_employees_full который включает смены
         await iiko_sync_service.sync_employees_full(session)
+
+async def sync_customers_task():
+    """Ночная синхронизация гостей (обертка)"""
+    from app.tasks.customer_tasks import sync_customers_batch
+    # Это Celery задача, но мы можем вызвать её синхронно/асинхронно через Celery или напрямую
+    # Для простоты вызываем сервис напрямую если возможно, или через delay
+    sync_customers_batch.delay()
 
 async def vk_digest_task():
     """Рассылка дайджестов VK (обертка)"""
@@ -183,7 +212,13 @@ async def vk_digest_task():
 async def sync_revenue_task():
     """Синхронизация выручки и OLAP данных (обертка)"""
     from app.services.revenue_sync import revenue_sync_service
-    await revenue_sync_service.sync_revenue()
+    await revenue_sync_service.sync_today_revenue()
+
+async def sync_yesterday_revenue_task():
+    """Синхронизация выручки за вчерашний день (обертка)"""
+    from app.services.revenue_sync import revenue_sync_service
+    await revenue_sync_service.sync_yesterday_revenue()
+
 
 async def sync_courier_task():
     """Синхронизация доставок курьеров (обертка)"""
@@ -191,3 +226,14 @@ async def sync_courier_task():
     from app.core.database import Session, engine
     with Session(engine) as session:
         await iiko_sync_service.sync_courier_deliveries(session)
+
+async def cleanup_logs_task():
+    """Очистка старых логов"""
+    from app.services.system_service import cleanup_old_logs
+    await cleanup_old_logs()
+
+async def cleanup_vk_messages_task_wrapper():
+    """Очистка старых сообщений ВК (старше 90 дней)"""
+    from app.tasks.vk_parser_tasks import cleanup_vk_messages_task
+    # Вызываем через delay для выполнения в воркере
+    cleanup_vk_messages_task.delay()

@@ -1,0 +1,16 @@
+Log: Implementation of Cascade Mailings
+Date: 13.05.2026
+Task: Create interface and logic for cascading mailings (VK, MAX, Telegram).
+
+Action Taken:
+1. Created SQLAlchemy models MailingCascade and MailingCascadeStep.
+2. Created Pydantic schemas for API.
+3. Created API router app/api/mailing_cascades.py.
+4. Registered router in backend/app/api/__init__.py and backend/main.py.
+5. Created Celery tasks in app/tasks/mailing_tasks.py.
+6. Registered tasks in app/core/celery_app.py.
+7. Implemented MailingCascadeService in app/services/mailing_cascade_service.py.
+8. Integrated service into iiko_sync_service.py.
+9. Added route and menu item in admin frontend.
+10. Created cascades.vue component with full management logic.
+11. Updated documentation files (system_faq.md, sql_faq.md, sitenav.md).

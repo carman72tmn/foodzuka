@@ -8,6 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, BackgroundTasks,
 from sqlmodel import Session, select
 from app.core.database import get_session
 from app.models.iiko_settings import IikoSettings
+from app.models.iiko_loyalty import IikoLoyaltyItem
 from app.models.sync_log import SyncLog
 from pydantic import BaseModel
 from app.models.payment_type import PaymentType
@@ -23,6 +24,12 @@ from app.schemas import (
 
 class MapSyncRequest(BaseModel):
     url: Optional[str] = None
+
+class IikoLoyaltyItemUpdate(BaseModel):
+    name: Optional[str] = None
+    description: Optional[Any] = None
+    content: Optional[Dict[str, Any]] = None
+    is_active: Optional[bool] = None
 
 from app.models.iiko_webhook_event import IikoWebhookEvent
 from app.services.iiko_service import iiko_service
@@ -326,7 +333,7 @@ def get_payment_types(session: Session = Depends(get_session)):
     """Получить типы оплаты из локальной БД"""
     types = session.exec(select(PaymentType).where(PaymentType.is_active == True)).all()
     return [{
-        "id": t.iiko_id, 
+        "id": str(t.iiko_id), 
         "name": t.name, 
         "paymentTypeKind": t.kind,
         "mapping_type": t.mapping_type,
@@ -454,8 +461,11 @@ async def sync_stop_lists(session: Session = Depends(get_session)):
     """Синхронизация стоп-листов (недоступные позиции)"""
     try:
         result = await iiko_sync_service.sync_stop_lists(session)
+        if not result:
+            return IikoSyncResponse(success=False, error="Sync returned no result", stopped_count=0)
         return IikoSyncResponse(**result)
     except Exception as e:
+        logger.error(f"Stop-list API error: {e}")
         raise HTTPException(status_code=500, detail=f"Stop-list sync error: {str(e)}")
 
 
@@ -471,6 +481,53 @@ async def sync_payment_types(session: Session = Depends(get_session)):
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Ошибка синхронизации типов оплаты: {str(e)}")
+
+
+@router.get("/loyalty/items")
+async def get_loyalty_items(
+    type: Optional[str] = None,
+    session: Session = Depends(get_session),
+    current_user: Any = Depends(iiko_service.get_current_active_user if hasattr(iiko_service, "get_current_active_user") else lambda: None)
+):
+    """Получение кэшированных элементов лояльности iiko"""
+    statement = select(IikoLoyaltyItem)
+    if type:
+        statement = statement.where(IikoLoyaltyItem.type == type)
+    
+    items = session.exec(statement.order_by(IikoLoyaltyItem.name)).all()
+    return items
+
+
+@router.post("/loyalty/sync")
+async def sync_loyalty_items_route(
+    session: Session = Depends(get_session)
+):
+    """Ручной запуск синхронизации элементов лояльности"""
+    result = await iiko_sync_service.sync_loyalty_items(session)
+    return result
+
+
+@router.put("/loyalty/items/{item_id}")
+async def update_loyalty_item(
+    item_id: int,
+    data: IikoLoyaltyItemUpdate,
+    session: Session = Depends(get_session),
+    current_user: Any = Depends(iiko_service.get_current_active_user if hasattr(iiko_service, "get_current_active_user") else lambda: None)
+):
+    """Обновление элемента лояльности (ручное редактирование)"""
+    item = session.get(IikoLoyaltyItem, item_id)
+    if not item:
+        raise HTTPException(status_code=404, detail="Loyalty item not found")
+    
+    update_data = data.model_dump(exclude_unset=True)
+    for key, value in update_data.items():
+        setattr(item, key, value)
+    
+    item.updated_at = datetime.now(timezone.utc).replace(tzinfo=None)
+    session.add(item)
+    session.commit()
+    session.refresh(item)
+    return item
 
 
 @router.post("/save-delivery-zones")
@@ -625,7 +682,7 @@ def get_delivery_zones(session: Session = Depends(get_session)):
     return [
         {
             "id": z.id,
-            "iiko_id": z.iiko_id,
+            "iiko_id": str(z.iiko_id) if z.iiko_id else None,
             "name": z.name,
             "min_order_amount": z.min_order_amount,
             "delivery_cost": z.delivery_cost,
@@ -769,32 +826,31 @@ async def register_webhook(
     
     try:
         if not webhook_url:
-            # Пытаемся определить базовый URL (приоритет у настройки APP_PUBLIC_URL из конфига)
-            base_url = global_settings.APP_PUBLIC_URL or str(request.base_url)
-            
-            # Автоматическая регистрация
+            # Используем автоматическую регистрацию с умным определением URL
+            logger.info(f"Auto-registration triggered. Request base_url: {request.base_url}")
             result = await iiko_service.auto_register_webhook(
-                request_url=base_url,
+                session=session,
+                request_url=str(request.base_url),
                 api_login=settings_db.api_login,
                 organization_id=settings_db.organization_id
             )
             
-            # Сохраняем сгенерированные данные в БД
+            if not result.get("success"):
+                error_msg = result.get("error", "Unknown error during registration")
+                logger.error(f"Webhook auto-registration failed: {error_msg}")
+                raise HTTPException(status_code=400, detail=f"Ошибка регистрации в iiko: {error_msg}")
+
+            # Данные уже сохранены в БД внутри сервиса (т.к. мы передали session)
             new_url = result.get("webhook_url")
             new_token = result.get("auth_token")
             
-            logger.info(f"Auto-registering webhook: URL={new_url}, Token={new_token}")
-            
-            settings_db.webhook_url = new_url
-            settings_db.webhook_auth_token = new_token
-            session.add(settings_db)
-            session.commit()
+            logger.info(f"Auto-registered webhook: URL={new_url}, Token={new_token}")
             
             return {
                 "success": True, 
                 "webhook_url": new_url, 
                 "auth_token": new_token,
-                "iiko_response": result
+                "iiko_response": result.get("iiko_response")
             }
         else:
             # Ручная регистрация (ИСПРАВЛЕНО: сначала iiko, потом БД)
@@ -823,7 +879,10 @@ async def register_webhook(
             
     except Exception as e:
         logger.error(f"Webhook registration error: {e}")
-        raise HTTPException(status_code=400, detail=f"iiko API error: {str(e)}")
+        status_code = 400
+        if "429" in str(e) or (hasattr(e, "response") and hasattr(e.response, "status_code") and e.response.status_code == 429):
+            status_code = 429
+        raise HTTPException(status_code=status_code, detail=f"iiko API error: {str(e)}")
 
 
 @router.post("/webhooks/test")

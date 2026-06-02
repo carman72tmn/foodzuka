@@ -38,16 +38,6 @@
 
         <div class="d-flex ga-2">
           <VChip
-            v-if="customer?.is_new_guest && (customer?.total_orders_count || 0) <= 1"
-            color="success"
-            size="small"
-            class="font-weight-bold"
-            variant="elevated"
-          >
-            НОВЫЙ ГОСТЬ
-          </VChip>
-
-          <VChip
             v-if="isLongTimeAgo(customer?.last_order_date)"
             color="warning"
             size="small"
@@ -56,6 +46,16 @@
             prepend-icon="ri-history-line"
           >
             ВЕРНУЛСЯ
+          </VChip>
+
+          <VChip
+            v-else-if="customer?.is_new_guest && (customer?.total_orders_count || 0) <= 1"
+            color="success"
+            size="small"
+            class="font-weight-bold"
+            variant="elevated"
+          >
+            НОВЫЙ ГОСТЬ
           </VChip>
 
           <VChip
@@ -97,29 +97,33 @@
                 <div class="text-caption text-muted">
                   LTV (Выручка)
                 </div>
-                <div class="text-h6 font-weight-bold text-primary">
-                  {{ formatPrice(customer?.total_purchases_sum || customer?.total_orders_amount || 0) }}
+                <div class="text-h6 font-weight-bold text-primary d-flex align-center">
+                  {{ formatPrice(analytics?.total_sum || customer?.total_purchases_sum || customer?.total_orders_amount || 0) }}
+                  <VProgressCircular v-if="olapLoading" indeterminate size="14" width="2" color="primary" class="ms-2" />
                 </div>
               </div>
 
               <div class="mb-4">
                 <div class="text-caption text-muted">Средний чек</div>
-                <div class="text-h6 font-weight-bold">
-                  {{ formatPrice(analytics?.average_check || 0) }}
+                <div class="text-h6 font-weight-bold d-flex align-center">
+                  {{ formatPrice(analytics?.average_check || customer?.average_check || 0) }}
+                  <VProgressCircular v-if="olapLoading" indeterminate size="14" width="2" color="grey" class="ms-2" />
                 </div>
               </div>
 
               <div class="mb-4">
                 <div class="text-caption text-muted">Всего заказов</div>
-                <div class="text-h6 font-weight-bold">
-                  {{ customer?.total_orders_count || 0 }}
+                <div class="text-h6 font-weight-bold d-flex align-center">
+                  {{ analytics?.total_count || customer?.total_orders_count || 0 }}
+                  <VProgressCircular v-if="olapLoading" indeterminate size="14" width="2" color="grey" class="ms-2" />
                 </div>
               </div>
 
               <div v-if="customer?.last_order_date">
                 <div class="text-caption text-muted">Последний визит</div>
-                <div class="text-body-2 font-weight-medium">
-                  {{ formatDate(customer?.last_order_date) }}
+                <div class="text-body-2 font-weight-medium d-flex align-center">
+                  {{ formatDate(analytics?.last_order_date || customer?.last_order_date) }}
+                  <VProgressCircular v-if="olapLoading" indeterminate size="12" width="2" color="grey" class="ms-2" />
                 </div>
               </div>
 
@@ -519,17 +523,21 @@
               <!-- 4. Аналитика -->
               <VWindowItem value="analytics">
                 <VContainer class="pa-6">
-                  <VRow v-if="!olapLoading && !olapError">
+                  <VRow v-if="!olapError">
                     <VCol cols="12" md="4" v-for="(stat, idx) in [
-                      { label: 'Всего выручка (LTV)', value: formatPrice(analytics.total_sum || 0) },
-                      { label: 'Средний чек', value: formatPrice(analytics.average_check || 0) },
-                      { label: 'Заказов всего', value: analytics.total_count || 0 },
-                      { label: 'Частота заказов (дн)', value: analytics.frequency_days || '-' },
-                      { label: 'Дней с последнего заказа', value: analytics.days_since_last_order || '-' }
+                      { label: 'Всего выручка (LTV)', value: formatPrice(analytics?.total_sum || customer?.total_purchases_sum || 0) },
+                      { label: 'Средний чек', value: formatPrice(analytics?.average_check || customer?.average_check || 0) },
+                      { label: 'Заказов всего', value: analytics?.total_count || customer?.total_orders_count || 0 },
+                      { label: 'Частота заказов (дн)', value: analytics?.frequency_days || customer?.frequency_days || '-' },
+                      { label: 'Дней с последнего заказа', value: analytics?.days_since_last_order ?? customer?.days_since_last_order ?? '-' },
+                      { label: 'Сумма скидок', value: formatPrice(analytics?.total_discount || customer?.total_discount || 0) }
                     ]" :key="idx">
-                      <VCard variant="outlined" class="pa-4">
+                      <VCard variant="outlined" class="pa-4 relative">
                         <div class="text-caption text-muted">{{ stat.label }}</div>
-                        <div class="text-h6 font-weight-bold">{{ stat.value }}</div>
+                        <div class="text-h6 font-weight-bold d-flex align-center">
+                          {{ stat.value }}
+                          <VProgressCircular v-if="olapLoading" indeterminate size="14" width="2" color="primary" class="ms-2" />
+                        </div>
                       </VCard>
                     </VCol>
                   </VRow>
@@ -574,10 +582,29 @@
                       Обновить из iiko
                     </VBtn>
                   </div>
-                  <VList v-if="guestAddresses.length" density="compact">
-                    <VListItem v-for="(addr, idx) in guestAddresses" :key="idx" :title="addr.address || addr" prepend-icon="ri-map-pin-2-line">
-                      <template #subtitle v-if="addr.last_used_at">
-                        Использован: {{ formatDate(addr.last_used_at) }}
+                  <VList v-if="guestAddresses.length" density="compact" class="addresses-list">
+                    <VListItem 
+                      v-for="(addr, idx) in guestAddresses" 
+                      :key="idx" 
+                      prepend-icon="ri-map-pin-2-line"
+                      class="mb-2 border rounded"
+                    >
+                      <VListItemTitle class="text-wrap">
+                        {{ typeof addr === 'object' ? addr.address : addr }}
+                      </VListItemTitle>
+                      
+                      <template #subtitle>
+                        <div v-if="typeof addr === 'object'" class="d-flex flex-wrap gap-2 mt-1">
+                          <VChip v-if="addr.city" size="x-small" variant="tonal">г. {{ addr.city }}</VChip>
+                          <VChip v-if="addr.street" size="x-small" variant="tonal">ул. {{ addr.street }}</VChip>
+                          <VChip v-if="addr.house" size="x-small" variant="tonal">д. {{ addr.house }}</VChip>
+                          <VChip v-if="addr.entrance" size="x-small" variant="tonal" color="primary">под. {{ addr.entrance }}</VChip>
+                          <VChip v-if="addr.apartment" size="x-small" variant="tonal" color="primary">кв. {{ addr.apartment }}</VChip>
+                          <VChip v-if="addr.doorphone" size="x-small" variant="tonal" color="secondary">дом. {{ addr.doorphone }}</VChip>
+                        </div>
+                        <div v-if="addr.last_used_at" class="text-caption mt-1">
+                          Использован: {{ formatDate(addr.last_used_at) }}
+                        </div>
                       </template>
                     </VListItem>
                   </VList>
@@ -971,6 +998,16 @@ const removeCategory = (name) => {
 
 const initData = async () => {
   if (!props.customer?.id) return
+
+  // Очистка старых данных от предыдущего гостя
+  analytics.value = {}
+  ordersHistory.value = []
+  bonusHistory.value = []
+  localOrders.value = []
+  localPhones.value = []
+  guestAddresses.value = []
+  localOrdersPage.value = 0
+  activeTab.value = 'profile'
 
   form.value = {
     name: props.customer.name || '',

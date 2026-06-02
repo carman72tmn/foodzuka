@@ -1,0 +1,176 @@
+/* Courier Dashboard Styles - Premium Redesign */
+:root {
+  --courier-primary: hsl(217, 91%, 60%);
+  --courier-primary-soft: hsl(217, 91%, 95%);
+  --courier-success: hsl(150, 60%, 45%);
+  --courier-success-soft: hsl(150, 60%, 96%);
+  --courier-error: hsl(0, 72%, 60%);
+  --courier-error-soft: hsl(0, 72%, 97%);
+  --courier-warning: hsl(38, 92%, 50%);
+  --courier-warning-soft: hsl(38, 92%, 96%);
+  --courier-slate-900: hsl(222, 47%, 11%);
+  --courier-slate-600: hsl(215, 16%, 47%);
+  --courier-slate-100: hsl(210, 40%, 96%);
+  --courier-card-bg: #ffffff;
+  --courier-shadow-sm: 0 1px 2px 0 rgb(0 0 0 / 0.05);
+  --courier-shadow-md: 0 4px 6px -1px rgb(0 0 0 / 0.1), 0 2px 4px -2px rgb(0 0 0 / 0.1);
+  --courier-radius: 1.25rem;
+}
+
+.courier-app-wrapper {
+  margin: 0;
+  min-height: 100vh;
+  width: 100%;
+  background: #fdfdfe;
+  font-family: 'Inter', system-ui, -apple-system, sans-serif;
+}
+
+.main-title {
+  color: var(--courier-slate-900);
+  letter-spacing: -0.025em;
+  font-weight: 800;
+}
+
+/* Delivery Card Premium */
+.delivery-card-premium {
+  border-radius: var(--courier-radius) !important;
+  transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+  background: var(--courier-card-bg);
+  border: 1px solid hsl(214, 32%, 91%) !important;
+  box-shadow: var(--courier-shadow-sm) !important;
+  overflow: hidden;
+  position: relative;
+}
+
+.delivery-card-premium:hover {
+  transform: translateY(-4px);
+  box-shadow: var(--courier-shadow-md) !important;
+  border-color: hsla(217, 91%, 60%, 0.2) !important;
+}
+
+/* Card Header Status */
+.card-header-status {
+  padding: 1rem 1.25rem;
+  background: linear-gradient(to bottom, #ffffff, #fafafa);
+  border-bottom: 1px solid hsl(214, 32%, 96%);
+}
+
+.change-indicators-bar {
+  height: 4px;
+  width: 100%;
+  position: absolute;
+  top: 0;
+  left: 0;
+  z-index: 10;
+  display: flex;
+}
+
+/* Sections */
+.section-divider {
+  padding: 1rem 1.25rem;
+  border-bottom: 1px solid hsl(214, 32%, 96%);
+}
+
+.section-divider:last-child {
+  border-bottom: none;
+}
+
+/* Typography & Labels */
+.text-card-title {
+  font-size: 1.125rem !important;
+  font-weight: 800;
+  color: var(--courier-slate-900);
+  letter-spacing: -0.01em;
+}
+
+.text-card-body {
+  font-size: 0.9375rem !important;
+  line-height: 1.5;
+  color: var(--courier-slate-900);
+}
+
+.text-card-caption {
+  font-size: 0.8125rem !important;
+  color: var(--courier-slate-600);
+}
+
+.text-card-small {
+  font-size: 0.75rem !important;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.025em;
+}
+
+/* Address Box */
+.address-premium-box {
+  padding: 0.75rem;
+  border-radius: 0.75rem;
+  background: var(--courier-slate-100);
+  border: 1px solid transparent;
+  transition: all 0.2s;
+  cursor: pointer;
+}
+
+.address-premium-box:hover {
+  background: hsl(210, 40%, 93%);
+  border-color: hsla(217, 91%, 60%, 0.1);
+}
+
+/* Composition Panel */
+.composition-panel :deep(.v-expansion-panel) {
+  background: transparent !important;
+}
+
+.composition-panel :deep(.v-expansion-panel-title) {
+  padding: 0.75rem 1.25rem !important;
+  min-height: auto !important;
+  font-weight: 700 !important;
+}
+
+.composition-panel :deep(.v-expansion-panel-text__wrapper) {
+  padding: 0 1.25rem 1rem !important;
+}
+
+/* Footer & Actions */
+.card-footer-payment {
+  padding: 1.25rem;
+  background: linear-gradient(to top, #ffffff, #fafafa);
+  margin-top: auto;
+}
+
+/* Animations */
+.animate-pulse {
+  animation: soft-pulse 2s infinite;
+}
+
+@keyframes soft-pulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.8; transform: scale(1.02); }
+}
+
+.pulse-dot {
+  width: 8px;
+  height: 8px;
+  background: var(--courier-primary);
+  border-radius: 50%;
+  animation: dot-pulse 1.5s infinite;
+}
+
+@keyframes dot-pulse {
+  0% { transform: scale(0.95); box-shadow: 0 0 0 0 rgba(37, 99, 235, 0.7); }
+  70% { transform: scale(1); box-shadow: 0 0 0 6px rgba(37, 99, 235, 0); }
+  100% { transform: scale(0.95); box-shadow: 0 0 0 0 rgba(37, 99, 235, 0); }
+}
+
+.ga-1 { gap: 0.25rem; }
+.ga-2 { gap: 0.5rem; }
+.ga-3 { gap: 0.75rem; }
+
+/* Custom Tabs */
+.custom-tabs-nav :deep(.v-tab) {
+  font-weight: 700 !important;
+  font-size: 0.8125rem !important;
+  letter-spacing: 0.025em;
+}
+
+.leading-none { line-height: 1 !important; }

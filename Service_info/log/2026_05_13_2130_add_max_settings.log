@@ -1,0 +1,10 @@
+# Log: Add MAX Settings page
+Date: 2026-05-13 21:30
+Task: Implement "Настройка MAX" tab with dynamic bot configuration.
+
+## Changes planned:
+- `backend/app/models/max_settings.py` (New)
+- `backend/app/api/max.py` (New)
+- `admin/resources/js/pages/settings/max.vue` (New)
+- `admin/resources/js/layouts/components/NavItems.vue` (Modify)
+- `Service_info/sql_faq.md`, `sitenav.md`, `system_faq.md` (Modify)

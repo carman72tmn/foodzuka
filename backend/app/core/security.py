@@ -10,8 +10,12 @@ from app.core.config import settings
 pwd_context = CryptContext(schemes=["pbkdf2_sha256"], deprecated="auto")
 
 
-def create_access_token(subject: Union[str, Any], expires_delta: timedelta = None) -> str:
-    """Создание JWT токена доступа"""
+def create_access_token(
+    subject: Union[str, Any], 
+    expires_delta: timedelta = None,
+    fingerprint: str = None
+) -> str:
+    """Создание JWT токена доступа с привязкой к устройству (fp)"""
     if expires_delta:
         expire = datetime.now(timezone.utc) + expires_delta
     else:
@@ -19,6 +23,9 @@ def create_access_token(subject: Union[str, Any], expires_delta: timedelta = Non
             minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES
         )
     to_encode = {"exp": expire, "sub": str(subject)}
+    if fingerprint:
+        to_encode["fp"] = fingerprint
+        
     encoded_jwt = jwt.encode(
         to_encode, settings.SECRET_KEY, algorithm=settings.ALGORITHM
     )

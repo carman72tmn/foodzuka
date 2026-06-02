@@ -26,7 +26,7 @@ export default defineConfig({
   }),
   vueJsx(),
   laravel({
-    input: ['resources/js/main.js'],
+    input: ['resources/js/main.js', 'resources/js/employee_main.js'],
     refresh: true,
   }), // Docs: https://github.com/vuetifyjs/vuetify-loader/tree/master/packages/vite-plugin
   vuetify({

@@ -1,6 +1,7 @@
 <script setup>
 import { ref, computed, onMounted, onUnmounted } from "vue"
-import { formatDateTime } from "@/utils/date"
+import { formatDateTime, formatDate } from "@/utils/date"
+import { getAuthHeaders } from "@/utils/auth"
 import OrderDetailModal from "../../components/OrderDetailModal.vue"
 
 const loading = ref(false)
@@ -30,7 +31,8 @@ const headers = [
   { title: "Адрес", key: "delivery_address", sortable: false },
   { title: "Зона", key: "resolved_delivery_zone_name", sortable: true, width: 120 },
   { title: "Курьер", key: "courier_name", sortable: true, width: 130 },
-  { title: "Сумма", key: "total_amount", sortable: true, width: 90 },
+  { title: "К ОПЛАТЕ", key: "total_with_discount", sortable: true, width: 110 },
+  { title: "ОПЛАЧЕНО", key: "total_paid", sortable: true, width: 100 },
   { title: "Скидка", key: "total_discount", sortable: true, width: 100 },
   { title: "ОЖИДАЕМ", key: "expected_time", sortable: true, width: 80 },
   { title: "Статус", key: "status", sortable: true, width: 130 },
@@ -45,7 +47,7 @@ const statusColorsMap = {
   preparing: "#E0F2F1",
   cooking: "#FFF8E1",
   ready: "#E8F5E9",
-  readyForPickup: "#E8F5E9",
+  ready_for_pickup: "#E8F5E9",
   delivering: "#E8EAF6",
   delivered: "#F1F8E9",
   closed: "#F5F5F5",
@@ -67,6 +69,10 @@ const statusNames = {
   cancelled: "Отменен",
 }
 
+const getStatusColor = status => {
+  return statusColorsMap[status] || "#F5F5F5"
+}
+
 let updateInterval = null
 
 const showMessage = (text, color = "success") => {
@@ -79,7 +85,7 @@ const loadOrders = async (silent = false) => {
   if (!silent) loading.value = true
 
   try {
-    const res = await fetch(`${API_BASE}/`)
+    const res = await fetch(`${API_BASE}/`, { headers: getAuthHeaders() })
     if (res.ok) {
       const data = await res.json()
 
@@ -88,6 +94,9 @@ const loadOrders = async (silent = false) => {
         ...o,
         orderItemsCount: o.order_items_details?.length || o.items?.length || 0,
       }))
+    } else if (res.status === 401) {
+      if (updateInterval) clearInterval(updateInterval)
+      // Сессия истекла, прекращаем автоматическое обновление
     }
   } catch (e) {
     if (!silent) showMessage("Ошибка загрузки заказов", "error")
@@ -116,7 +125,10 @@ const sortedOrders = computed(() => {
 const syncRecentOrders = async () => {
   syncing.value = true
   try {
-    const res = await fetch(`${API_BASE}/sync`, { method: "POST" })
+    const res = await fetch(`${API_BASE}/sync`, { 
+      method: "POST",
+      headers: getAuthHeaders() 
+    })
     if (res.ok) {
       showMessage("Синхронизация запущена в фоновом режиме", "info")
 
@@ -262,11 +274,28 @@ const getRowProps = ({ item }) => {
   }
 }
 
-const getStatusColor = status => {
-  if (!status) return "#F5F5F5"
-  const key = status.replace(/_([a-z])/g, g => g[1].toUpperCase())
+const getPaymentIcon = kind => {
+  const icons = {
+    cash: 'bx-money',
+    card: 'bx-credit-card',
+    online: 'bx-globe',
+    external: 'bx-link-external',
+    iikocard: 'bx-gift',
+  }
 
-  return statusColorsMap[key] || "#F5F5F5"
+  return icons[kind] || 'bx-wallet'
+}
+
+const getPaymentLabel = kind => {
+  const labels = {
+    cash: 'Наличные',
+    card: 'Карта',
+    online: 'Онлайн',
+    external: 'Внешняя',
+    iikocard: 'Бонусы/Карта',
+  }
+
+  return labels[kind] || kind || 'Оплата'
 }
 </script>
 
@@ -403,13 +432,36 @@ const getStatusColor = status => {
               <span class="text-caption">{{ item.city || '—' }}</span>
             </template>
 
-            <template #item.total_amount="{ item }">
-              <span
-                :class="(item.status === 'closed' || item.status.toLowerCase().includes('cancel')) ? 'font-weight-regular' : 'font-weight-bold'"
-                :style="{ color: (item.status === 'closed' || item.status.toLowerCase().includes('cancel')) ? '#000000' : 'inherit' }"
-              >
-                {{ formatPrice(item.total_amount) }} ₽
-              </span>
+            <template #item.total_with_discount="{ item }">
+              <div class="d-flex flex-column align-end">
+                <span
+                  class="text-subtitle-2"
+                  :class="(item.status === 'closed' || (item.status && item.status.toLowerCase().includes('cancel'))) ? 'font-weight-regular' : 'font-weight-bold'"
+                  :style="{ color: (item.status === 'closed' || (item.status && item.status.toLowerCase().includes('cancel'))) ? '#000000' : 'inherit' }"
+                >
+                  {{ formatPrice(item.total_with_discount || item.total_amount || item.sum || 0) }} ₽
+                </span>
+                
+                <div v-if="parseFloat(item.left_to_pay) > 0" class="mt-n1">
+                  <span class="text-tiny font-weight-bold text-error">
+                    ост. {{ formatPrice(item.left_to_pay) }} ₽
+                  </span>
+                </div>
+              </div>
+            </template>
+
+            <template #item.total_paid="{ item }">
+              <div class="d-flex flex-column align-end">
+                <span
+                  class="text-subtitle-2 font-weight-bold"
+                  :style="{ color: (parseFloat(item.total_paid) > 0 || (parseFloat(item.total_with_discount || 0) - parseFloat(item.left_to_pay || 0)) > 0) ? '#2e7d32' : '#455a64' }"
+                >
+                  {{ formatPrice(parseFloat(item.total_paid) > 0 ? item.total_paid : (parseFloat(item.total_with_discount || item.total_amount || item.sum || 0) - parseFloat(item.left_to_pay || 0))) }} ₽
+                </span>
+                <span v-if="item.is_paid && parseFloat(item.left_to_pay) <= 0" class="text-tiny text-success font-weight-black">
+                  ОПЛАЧЕНО
+                </span>
+              </div>
             </template>
 
             <template #item.resolved_delivery_zone_name="{ item }">
@@ -458,7 +510,76 @@ const getStatusColor = status => {
             </template>
 
             <template #item.external_number="{ item }">
-              <span class="font-weight-bold">{{ item.external_number || '—' }}</span>
+              <div class="d-flex flex-column">
+                <span class="font-weight-bold">{{ item.external_number || '—' }}</span>
+                <div v-if="item.change_indicators && Object.values(item.change_indicators).some(v => v)" class="d-flex flex-wrap ga-1 mt-1">
+                  <VTooltip
+                    v-if="item.change_indicators.items"
+                    text="Состав изменен"
+                  >
+                    <template #activator="{ props: ttProps }">
+                      <VIcon
+                        v-bind="ttProps"
+                        icon="bx-list-plus"
+                        color="error"
+                        size="14"
+                      />
+                    </template>
+                  </VTooltip>
+                  <VTooltip
+                    v-if="item.change_indicators.amount"
+                    text="Сумма изменена"
+                  >
+                    <template #activator="{ props: ttProps }">
+                      <VIcon
+                        v-bind="ttProps"
+                        icon="bx-ruble"
+                        color="error"
+                        size="14"
+                      />
+                    </template>
+                  </VTooltip>
+                  <VTooltip
+                    v-if="item.change_indicators.address"
+                    text="Адрес изменен"
+                  >
+                    <template #activator="{ props: ttProps }">
+                      <VIcon
+                        v-bind="ttProps"
+                        icon="bx-map-alt"
+                        color="error"
+                        size="14"
+                      />
+                    </template>
+                  </VTooltip>
+                  <VTooltip
+                    v-if="item.change_indicators.time"
+                    text="Время изменено"
+                  >
+                    <template #activator="{ props: ttProps }">
+                      <VIcon
+                        v-bind="ttProps"
+                        icon="bx-time"
+                        color="error"
+                        size="14"
+                      />
+                    </template>
+                  </VTooltip>
+                  <VTooltip
+                    v-if="item.change_indicators.payment"
+                    text="Оплата изменена"
+                  >
+                    <template #activator="{ props: ttProps }">
+                      <VIcon
+                        v-bind="ttProps"
+                        icon="bx-credit-card"
+                        color="error"
+                        size="14"
+                      />
+                    </template>
+                  </VTooltip>
+                </div>
+              </div>
             </template>
 
             <template #item.delivery_address="{ item }">
@@ -476,11 +597,11 @@ const getStatusColor = status => {
                   :color="getStatusColor(item.status)"
                   size="small"
                   class="text-uppercase"
-                  :class="(item.status === 'closed' || item.status.toLowerCase().includes('cancel')) ? 'font-weight-regular' : 'font-weight-bold'"
-                  :variant="(item.status === 'closed' || item.status.toLowerCase().includes('cancel')) ? 'flat' : 'tonal'"
+                  :class="(item.status === 'closed' || (item.status && item.status.toLowerCase().includes('cancel'))) ? 'font-weight-regular' : 'font-weight-bold'"
+                  :variant="(item.status === 'closed' || (item.status && item.status.toLowerCase().includes('cancel'))) ? 'flat' : 'tonal'"
                   :style="{
-                    color: (item.status === 'closed' || item.status.toLowerCase().includes('cancel')) ? '#000000 !important' : 'inherit',
-                    backgroundColor: (item.status === 'closed' || item.status.toLowerCase().includes('cancel')) ? 'transparent !important' : ''
+                    color: (item.status === 'closed' || (item.status && item.status.toLowerCase().includes('cancel'))) ? '#000000 !important' : 'inherit',
+                    backgroundColor: (item.status === 'closed' || (item.status && item.status.toLowerCase().includes('cancel'))) ? 'transparent !important' : ''
                   }"
                 >
                   {{ statusNames[item.status] || item.status }}
@@ -521,7 +642,7 @@ const getStatusColor = status => {
 
                       <!-- НОВОЕ: Дата для предзаказов на будущие дни -->
                       <div
-                        v-if="!item.is_asap && item.expected_time && new Date(item.expected_time).toDateString() !== new Date().toDateString()"
+                        v-if="!item.is_asap && item.expected_time && formatDate(item.expected_time) !== formatDate(new Date())"
                         class="text-caption font-weight-bold mt-n1"
                         :style="{ color: (item.status === 'closed' || item.status.toLowerCase().includes('cancel')) ? '#666' : '#1565C0', fontSize: '0.65rem' }"
                       >
@@ -535,9 +656,10 @@ const getStatusColor = status => {
             </template>
 
             <template #item.created_at="{ item }">
-              <span class="text-caption">
+              <span v-if="item.iiko_creation_time || item.created_at" class="text-caption">
                 {{ formatDateTime(item.iiko_creation_time || item.created_at) }}
               </span>
+              <span v-else class="text-caption text-grey">Нет данных</span>
             </template>
           </VDataTable>
         </VCardText>

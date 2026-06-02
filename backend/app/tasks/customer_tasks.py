@@ -57,19 +57,35 @@ async def _sync_guest_addresses(session: Session, customer_id: int, addresses_da
     for addr in addresses_data:
         # Сборка адреса из компонентов iiko
         city = addr.get("city", "")
+        settlement = addr.get("settlement", "") # iiko иногда отдает населенный пункт
         street = addr.get("street", "")
         house = addr.get("house", "")
         flat = addr.get("flat", "")
         entrance = addr.get("entrance", "")
         floor = addr.get("floor", "")
+        doorphone = addr.get("doorphone", "") # домофон
         
         parts = []
         if city: parts.append(city)
-        if street: parts.append(street)
-        if house: parts.append(f"д. {house}")
-        if flat: parts.append(f"кв. {flat}")
-        if entrance: parts.append(f"под. {entrance}")
-        if floor: parts.append(f"эт. {floor}")
+        if settlement: parts.append(settlement)
+        if street: 
+            s_val = f"ул. {street}" if not any(k in street.lower() for k in ['ул.', 'пр.', 'б-р', 'пер.']) else street
+            parts.append(s_val)
+        if house: 
+            h_val = f"д. {house}" if "д." not in house.lower() else house
+            parts.append(h_val)
+        if entrance: 
+            en_val = f"под. {entrance}" if "под." not in entrance.lower() else entrance
+            parts.append(en_val)
+        if floor: 
+            fl_val = f"эт. {floor}" if "эт." not in floor.lower() else floor
+            parts.append(fl_val)
+        if flat: 
+            apt_val = f"кв. {flat}" if not any(k in flat.lower() for k in ['кв.', 'офис']) else flat
+            parts.append(apt_val)
+        if doorphone: 
+            dp_val = f"дом. {doorphone}" if "дом." not in doorphone.lower() else doorphone
+            parts.append(dp_val)
         
         full_address = ", ".join(parts)
         
@@ -86,33 +102,46 @@ async def _sync_guest_addresses(session: Session, customer_id: int, addresses_da
         # Наполнение новой таблицы client_addresses_history (Laravel)
         from app.models.customer import ClientAddressHistory
         
+        street_normalized = street or ""
+        city_normalized = city or "Тюмень"
+        house_normalized = house or "-"
+        settlement_normalized = settlement or ""
+
         # Ищем, есть ли уже такой адрес по компонентам
         existing_history = session.exec(
             select(ClientAddressHistory).where(
                 ClientAddressHistory.client_id == customer_id,
-                ClientAddressHistory.city == city,
-                ClientAddressHistory.street == street,
-                ClientAddressHistory.house == house
+                ClientAddressHistory.city == city_normalized,
+                ClientAddressHistory.street == street_normalized,
+                ClientAddressHistory.house == house_normalized
             )
         ).first()
         
-        if not existing_history:
-            new_history = ClientAddressHistory(
-                client_id=customer_id,
-                city=city,
-                street=street,
-                house=house,
-                apartment=flat,
-                address=full_address,
-                last_used_at=datetime.now(timezone.utc).replace(tzinfo=None),
-                orders_count=1
-            )
-            session.add(new_history)
-        else:
-            existing_history.last_used_at = datetime.now(timezone.utc).replace(tzinfo=None)
-            existing_history.orders_count += 1
-            existing_history.address = full_address
-            session.add(existing_history)
+        try:
+            with session.begin_nested():
+                if not existing_history:
+                    new_history = ClientAddressHistory(
+                        client_id=customer_id,
+                        city=city_normalized,
+                        settlement=settlement_normalized,
+                        street=street_normalized,
+                        house=house_normalized,
+                        entrance=entrance or "",
+                        floor=floor or "",
+                        apartment=flat or "",
+                        doorphone=doorphone or "",
+                        address=full_address or "",
+                        last_used_at=datetime.now(timezone.utc).replace(tzinfo=None),
+                        orders_count=1
+                    )
+                    session.add(new_history)
+                else:
+                    existing_history.last_used_at = datetime.now(timezone.utc).replace(tzinfo=None)
+                    existing_history.orders_count += 1
+                    existing_history.address = full_address
+                    session.add(existing_history)
+        except Exception as e:
+            logger.warning(f"Failed to sync ClientAddressHistory for customer {customer_id}: {e}")
 
         existing_strs.add(full_address)
 
@@ -204,10 +233,10 @@ async def _sync_bonus_history(session: Session, customer_id: int, iiko_customer_
     except Exception as e:
         logger.error(f"Error syncing bonus history for {iiko_customer_id}: {e}")
 
-async def _sync_single_customer(session: Session, phone: str, organization_id: Optional[str] = None, order_id: Optional[int] = None) -> bool:
+async def _sync_single_customer(session: Session, phone: str, organization_id: Optional[str] = None, order_id: Optional[int] = None, fast_sync: bool = False) -> bool:
     """Прокси для вызова синхронизации из iiko_sync_service"""
     from app.services.iiko_sync_service import iiko_sync_service
-    return await iiko_sync_service.sync_single_customer(session, phone, organization_id, order_id)
+    return await iiko_sync_service.sync_single_customer(session, phone, organization_id, order_id, fast_sync=fast_sync)
 
 
 
@@ -278,7 +307,7 @@ def sync_customers_batch(self, skip: int, status_id: int, force_update: bool = F
                     skipped += 1
                     continue
                 
-                if loop.run_until_complete(_sync_single_customer(session, clean_phone)):
+                if loop.run_until_complete(_sync_single_customer(session, clean_phone, fast_sync=True)):
                     if existing:
                         updated += 1
                     else:
@@ -502,29 +531,44 @@ def import_customers_from_file_task(self, file_path: str, status_id: int):
                                 ClientAddressHistory.address == addr_str
                             )).first()
                             if not existing_cah:
-                                # Простой парсинг адреса для заполнения обязательных полей Laravel
-                                city, street, house, apartment = "Не указан", "Не указана", "-", ""
+                                # Более детальный парсинг адреса для заполнения обязательных полей Laravel
+                                city, settlement, street, house, apartment, entrance, floor, doorphone = "Тюмень", None, "Не указана", "-", "", "", "", ""
                                 try:
+                                    # Пытаемся разбить по запятой
                                     parts = [p.strip() for p in addr_str.split(',')]
-                                    if len(parts) > 0: city = parts[0]
-                                    if len(parts) > 1: street = parts[1]
-                                    if len(parts) > 2: house = parts[2]
-                                    for p in parts[3:]:
-                                        if any(k in p.lower() for k in ['кв', 'офис', 'ап']):
-                                            apartment = p
-                                            break
+                                    # Пример: Тюмень, ул. Ленина, д. 1, под. 1, эт. 2, кв. 3
+                                    for p in parts:
+                                        p_low = p.lower()
+                                        if any(k in p_low for k in ['тюмень', 'г.', 'город']): city = p
+                                        elif any(k in p_low for k in ['ул.', 'пр-кт', 'проезд', 'бульвар']): street = p
+                                        elif any(k in p_low for k in ['д.', 'дом']): house = p
+                                        elif any(k in p_low for k in ['кв.', 'офис', 'квартира']): apartment = p
+                                        elif any(k in p_low for k in ['под.', 'подъезд']): entrance = p
+                                        elif any(k in p_low for k in ['эт.', 'этаж']): floor = p
+                                        elif any(k in p_low for k in ['дом.', 'домофон']): doorphone = p
+                                        elif not street and not any(k in p_low for k in ['д.', 'дом', 'под.', 'кв.']):
+                                            # Если еще не нашли улицу и нет маркеров дома/подъезда - это может быть населенный пункт или улица
+                                            if city and p != city: settlement = p
                                 except: pass
 
-                                session.add(ClientAddressHistory(
-                                    client_id=customer.id,
-                                    city=city,
-                                    street=street,
-                                    house=house,
-                                    apartment=apartment,
-                                    address=addr_str,
-                                    last_used_at=datetime.now(),
-                                    orders_count=1
-                                ))
+                                try:
+                                    with session.begin_nested():
+                                        session.add(ClientAddressHistory(
+                                            client_id=customer.id,
+                                            city=city or "Тюмень",
+                                            settlement=settlement or "",
+                                            street=street or "",
+                                            house=house or "-",
+                                            entrance=entrance or "",
+                                            floor=floor or "",
+                                            apartment=apartment or "",
+                                            doorphone=doorphone or "",
+                                            address=addr_str or "",
+                                            last_used_at=datetime.now(timezone.utc).replace(tzinfo=None),
+                                            orders_count=1
+                                        ))
+                                except Exception as e:
+                                    logger.warning(f"Failed to add ClientAddressHistory during import: {e}")
                 
                 # Обновление статуса после чанка
                 status = session.get(SyncStatus, status_id)
@@ -584,21 +628,21 @@ def import_customers_from_file_task(self, file_path: str, status_id: int):
         raise e
 
 @celery_app.task(name="app.tasks.customer_tasks.sync_single_customer_task")
-def sync_single_customer_task(phone: str, order_id: Optional[int] = None):
+def sync_single_customer_task(phone: str, order_id: Optional[int] = None, fast_sync: bool = False):
     """Задача для синхронизации одного клиента (вызывается при новом заказе)"""
     loop = asyncio.get_event_loop()
     with Session(engine) as session:
-        loop.run_until_complete(_sync_single_customer(session, phone, order_id=order_id))
+        loop.run_until_complete(_sync_single_customer(session, phone, order_id=order_id, fast_sync=fast_sync))
     return f"Synced {phone} (Order: {order_id})"
 
 @celery_app.task(name="app.tasks.customer_tasks.sync_guest_data_task")
-def sync_guest_data_task(customer_id: int):
+def sync_guest_data_task(customer_id: int, fast_sync: bool = False):
     """Задача для полной синхронизации по ID клиента"""
     loop = asyncio.get_event_loop()
     with Session(engine) as session:
         customer = session.get(Customer, customer_id)
         if customer and customer.phone:
-            loop.run_until_complete(_sync_single_customer(session, customer.phone))
+            loop.run_until_complete(_sync_single_customer(session, customer.phone, fast_sync=fast_sync))
     return f"Synced customer {customer_id}"
 
 @celery_app.task(name="app.tasks.customer_tasks.export_customer_to_iiko_task")

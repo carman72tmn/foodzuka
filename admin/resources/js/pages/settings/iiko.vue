@@ -58,6 +58,9 @@ const settings = ref({
 
   // Гео
   delivery_zones_map_url: "",
+
+  // Список ID бонусных программ
+  bonus_program_ids: [],
 })
 
 // Справочники (загружаются из iiko)
@@ -83,6 +86,30 @@ const syncingPayments = ref(false)
 const savingZones = ref(false)
 const savingPaymentMapping = ref(false)
 const clearingZones = ref(false)
+const syncingLoyalty = ref(false)
+const loyaltyItems = ref([])
+const activeLoyaltyTab = ref('programs')
+const loyaltyEditDialog = ref(false)
+const editingLoyaltyItem = ref(null)
+const savingLoyaltyItem = ref(false)
+const jsonError = ref(null)
+
+const loyaltyContentJson = computed({
+  get: () => {
+    if (!editingLoyaltyItem.value || !editingLoyaltyItem.value.content) return ''
+    return JSON.stringify(editingLoyaltyItem.value.content, null, 2)
+  },
+  set: (val) => {
+    try {
+      editingLoyaltyItem.value.content = JSON.parse(val)
+      jsonError.value = null
+    } catch (e) {
+      jsonError.value = 'Некорректный JSON: ' + e.message
+    }
+  }
+})
+
+
 
 // Статус подключения
 const connectionStatus = ref(null) // null, 'success', 'error'
@@ -95,6 +122,8 @@ const loyaltyCategories = ref([])
 const loadingLoyaltyData = ref(false)
 
 const activeTab = ref("general")
+const itemDetailsDialog = ref(false)
+const selectedItem = ref(null)
 const webhookLogs = ref([])
 const loadingLogs = ref(false)
 const registeringWebhook = ref(false)
@@ -217,6 +246,19 @@ const loadSettings = async () => {
     if (res.ok) {
       const data = await res.json()
       settings.value = { ...settings.value, ...data }
+      
+      // Гарантируем, что бонусные программы это массив
+      if (!settings.value.bonus_program_ids || typeof settings.value.bonus_program_ids === 'string') {
+        try {
+          if (typeof settings.value.bonus_program_ids === 'string') {
+            settings.value.bonus_program_ids = JSON.parse(settings.value.bonus_program_ids || '[]')
+          } else {
+            settings.value.bonus_program_ids = []
+          }
+        } catch (e) {
+          settings.value.bonus_program_ids = []
+        }
+      }
 
       // Синхронизируем локальное состояние времени
       if (data.timezone_name) {
@@ -264,7 +306,16 @@ const saveSettings = async () => {
         }
       }
     } else {
-      showMessage("Ошибка при сохранении", "error")
+      const errorData = await res.json().catch(() => ({}))
+      const detail = errorData.detail
+      
+      if (Array.isArray(detail)) {
+        // Ошибки валидации Pydantic
+        const msg = detail.map(d => `${d.loc.join('.')}: ${d.msg}`).join('; ')
+        showMessage(`Ошибка валидации: ${msg}`, "error")
+      } else {
+        showMessage(detail || "Ошибка при сохранении", "error")
+      }
     }
   } catch (e) {
     showMessage("Ошибка сети", "error")
@@ -676,18 +727,18 @@ const testWebhook = async () => {
     const data = await res.json()
     if (res.ok) {
       if (data.success) {
-        showMessage("РўРµСЃС‚ РІРµР±С…СѓРєР° РїСЂРѕР№РґРµРЅ: РЅР°СЃС‚СЂРѕР№РєРё РІ iiko Cloud Рё Р‘Р” СЃРѕРІРїР°РґР°СЋС‚")
+        showMessage("Тест вебхука пройден: настройки в iiko Cloud и БД совпадают")
       } else {
-        let msg = "Р Р°СЃСЃРёРЅС…СЂРѕРЅРёР·Р°С†РёСЏ: "
-        if (!data.url_match) msg += "URL РЅРµ СЃРѕРІРїР°РґР°РµС‚. "
-        if (!data.token_match) msg += "РўРѕРєРµРЅ РЅРµ СЃРѕРІРїР°РґР°РµС‚. "
+        let msg = "Рассинхронизация: "
+        if (!data.url_match) msg += "URL не совпадает. "
+        if (!data.token_match) msg += "Токен не совпадает. "
         showMessage(msg, "warning")
       }
     } else {
-      showMessage(data.detail || data.error || "РћС€РёР±РєР° РїСЂРё С‚РµСЃС‚РёСЂРѕРІР°РЅРёРё", "error")
+      showMessage(data.detail || data.error || "Ошибка при тестировании", "error")
     }
   } catch (e) {
-    showMessage("РћС€РёР±РєР° СЃРµС‚Рё РїСЂРё С‚РµСЃС‚РёСЂРѕРІР°РЅРёРё РІРµР±С…СѓРєР°", "error")
+    showMessage("Ошибка сети при тестировании вебхука", "error")
   } finally {
     testingWebhook.value = false
   }
@@ -809,11 +860,86 @@ const updateTimezoneOffset = (tzName) => {
   }
 }
 
+
+
+const fetchLoyaltyItems = async () => {
+  try {
+    const response = await fetch(`${API_BASE}/loyalty/items`)
+    if (response.ok) {
+      loyaltyItems.value = await response.json()
+    }
+  } catch (error) {
+    console.error('Error fetching loyalty items:', error)
+  }
+}
+
+const syncLoyalty = async () => {
+  syncingLoyalty.value = true
+  try {
+    const res = await fetch(`${API_BASE}/loyalty/sync`, { method: 'POST' })
+    if (res.ok) {
+      showMessage('Синхронизация запущена')
+      await fetchLoyaltyItems()
+    } else {
+      showMessage('Ошибка синхронизации', 'error')
+    }
+  } catch (error) {
+    console.error('Error syncing loyalty:', error)
+    showMessage('Ошибка синхронизации', 'error')
+  } finally {
+    syncingLoyalty.value = false
+  }
+}
+
+const getItemsByType = (type) => {
+  return loyaltyItems.value.filter(item => item.type === type)
+}
+
+const showItemDetails = (item) => {
+  editingLoyaltyItem.value = JSON.parse(JSON.stringify(item))
+  loyaltyEditDialog.value = true
+}
+
+const saveLoyaltyItem = async () => {
+  if (!editingLoyaltyItem.value) return
+  
+  savingLoyaltyItem.value = true
+  try {
+    const res = await fetch(`${API_BASE}/loyalty/items/${editingLoyaltyItem.value.id}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        name: editingLoyaltyItem.value.name,
+        description: editingLoyaltyItem.value.description,
+        is_active: editingLoyaltyItem.value.is_active,
+        content: editingLoyaltyItem.value.content
+      })
+    })
+    
+    if (res.ok) {
+      showMessage('Изменения сохранены')
+      await fetchLoyaltyItems()
+      loyaltyEditDialog.value = false
+    } else {
+      const data = await res.json()
+      showMessage(data.detail || 'Ошибка при сохранении', 'error')
+    }
+  } catch (error) {
+    console.error('Error saving loyalty item:', error)
+    showMessage('Ошибка при сохранении', 'error')
+  } finally {
+    savingLoyaltyItem.value = false
+  }
+}
+
+
+
 onMounted(async () => {
   await loadSettings()
   await fetchYandexSettings()
   if (settings.value.api_login) {
     loadAllReferences()
+    fetchLoyaltyItems()
   }
 })
 </script>
@@ -826,7 +952,8 @@ onMounted(async () => {
         <VTab value="payment">Оплата</VTab>
         <VTab value="zones">Зоны доставки</VTab>
         <VTab value="companies">Мои компании</VTab>
-        <VTab value="loyalty">Лояльность (POS)</VTab>
+        <VTab value="pos_loyalty">Лояльность (POS)</VTab>
+        <VTab value="loyalty">Лояльность iiko Card</VTab>
         <VTab value="management">Управление</VTab>
         <VTab value="webhooks">Вебхуки</VTab>
         <VTab value="yandex">Яндекс Карты</VTab>
@@ -1176,7 +1303,287 @@ onMounted(async () => {
           </VCard>
         </VWindowItem>
 
-        <!-- ==================== Вкладка Лояльность ==================== -->
+        <!-- ==================== Вкладка Лояльность iiko Card ==================== -->
+        <VWindowItem value="loyalty">
+          <VCard class="mb-6">
+            <VCardTitle class="d-flex align-center justify-space-between py-4 px-6">
+              <span>Система лояльности iiko</span>
+              <VBtn
+                color="primary"
+                :loading="syncingLoyalty"
+                prepend-icon="mdi-sync"
+                @click="syncLoyalty"
+              >
+                Синхронизировать с iiko
+              </VBtn>
+            </VCardTitle>
+
+            <VCardText>
+              <!-- Блок настройки бонусных программ -->
+              <VCard class="mb-6 border-primary border-opacity-25" elevation="1" variant="outlined">
+                <VCardTitle class="text-subtitle-1 font-weight-bold d-flex align-center py-3 px-6 bg-grey-lighten-4">
+                  <VIcon icon="mdi-gift-outline" color="primary" class="me-2" />
+                  Настройка бонусных программ
+                </VCardTitle>
+                <VCardText class="pa-6">
+                  <p class="text-caption text-disabled mb-4">
+                    Выберите программы лояльности iiko Card, которые должны учитываться как <b>списание бонусов</b>, а не как маркетинговая скидка. 
+                    Это необходимо для корректного разделения в финансовых отчетах и карточке заказа.
+                  </p>
+                  <VSelect
+                    v-model="settings.bonus_program_ids"
+                    :items="getItemsByType('program')"
+                    item-title="name"
+                    item-value="iiko_id"
+                    label="Бонусные программы (списание баллов)"
+                    multiple
+                    chips
+                    closable-chips
+                    persistent-hint
+                    hint="Программы, выбранные здесь, будут записываться в поле 'Бонусы' в заказе"
+                    variant="outlined"
+                    density="comfortable"
+                  />
+                  <div class="mt-4 d-flex justify-end">
+                    <VBtn color="success" prepend-icon="mdi-check" :loading="saving" @click="saveSettings">
+                      Применить выбор программ
+                    </VBtn>
+                  </div>
+                </VCardText>
+              </VCard>
+
+              <VTabs v-model="activeLoyaltyTab" grow class="mb-4">
+                <VTab value="programs">
+                  Программы
+                </VTab>
+                <VTab value="coupons">
+                  Купоны
+                </VTab>
+                <VTab value="manual">
+                  Ручные условия
+                </VTab>
+                <VTab value="promotions">
+                  Скидки и акции (Card 5)
+                </VTab>
+                <VTab value="certificates">
+                  Сертификаты
+                </VTab>
+              </VTabs>
+
+              <VWindow v-model="activeLoyaltyTab">
+                <!-- Программы лояльности -->
+                <VWindowItem value="programs">
+                  <VTable density="compact" class="text-no-wrap">
+                    <thead>
+                      <tr>
+                        <th>Название</th>
+                        <th>ID</th>
+                        <th>Описание</th>
+                        <th>Тип</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      <tr v-for="item in getItemsByType('program')" :key="item.id">
+                        <td>{{ item.name }}</td>
+                        <td><code class="text-caption">{{ item.iiko_id }}</code></td>
+                        <td class="text-truncate" style="max-width: 300px">
+                          {{ item.description || '-' }}
+                        </td>
+                        <td>{{ item.content?.programType || '-' }}</td>
+                        <td>
+                          <VBtn icon="mdi-information" variant="text" size="small" @click="showItemDetails(item)" />
+                        </td>
+                      </tr>
+                    </tbody>
+                  </VTable>
+                </VWindowItem>
+
+                <!-- Купоны -->
+                <VWindowItem value="coupons">
+                  <VTable density="compact" class="text-no-wrap">
+                    <thead>
+                      <tr>
+                        <th>Название</th>
+                        <th>Серия</th>
+                        <th>Промокод</th>
+                        <th>Описание</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      <tr v-for="item in getItemsByType('coupon_series')" :key="item.id">
+                        <td>{{ item.name }}</td>
+                        <td><code class="text-caption">{{ item.iiko_id }}</code></td>
+                        <td>
+                          <VChip size="small" label color="primary">
+                            {{ item.content?.number || item.content?.promoCode || '-' }}
+                          </VChip>
+                        </td>
+                        <td class="text-truncate" style="max-width: 300px">
+                          {{ item.description || '-' }}
+                        </td>
+                        <td>
+                          <VBtn icon="mdi-information" variant="text" size="small" @click="showItemDetails(item)" />
+                        </td>
+                      </tr>
+                    </tbody>
+                  </VTable>
+                </VWindowItem>
+
+                <!-- Ручные условия -->
+                <VWindowItem value="manual">
+                  <VTable density="compact" class="text-no-wrap">
+                    <thead>
+                      <tr>
+                        <th>Название</th>
+                        <th>ID</th>
+                        <th>Тип</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      <tr v-for="item in getItemsByType('manual_condition')" :key="item.id">
+                        <td>{{ item.name }}</td>
+                        <td><code class="text-caption">{{ item.iiko_id }}</code></td>
+                        <td>{{ item.content?.type || '-' }}</td>
+                        <td>
+                          <VBtn icon="mdi-information" variant="text" size="small" @click="showItemDetails(item)" />
+                        </td>
+                      </tr>
+                    </tbody>
+                  </VTable>
+                </VWindowItem>
+
+                <!-- Скидки и акции (Маркетинговые кампании) -->
+                <VWindowItem value="promotions">
+                  <VTable density="compact" class="text-no-wrap">
+                    <thead>
+                      <tr>
+                        <th>Название</th>
+                        <th>ID</th>
+                        <th>ID Программы</th>
+                        <th>Активна</th>
+                        <th>Инфо</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      <tr v-for="item in getItemsByType('promotion')" :key="item.id">
+                        <td>{{ item.name }}</td>
+                        <td><code class="text-caption">{{ item.iiko_id }}</code></td>
+                        <td><code class="text-caption">{{ item.content?.parent_program_id || item.content?.programId }}</code></td>
+                        <td>
+                          <VIcon :color="item.content?.isActive ? 'success' : 'error'">
+                            {{ item.content?.isActive ? 'mdi-check-circle' : 'mdi-close-circle' }}
+                          </VIcon>
+                        </td>
+                        <td>
+                          <VBtn icon="mdi-information" variant="text" size="small" @click="showItemDetails(item)" />
+                        </td>
+                      </tr>
+                      <!-- Обычные скидки (legacy) -->
+                      <tr v-for="item in getItemsByType('discount')" :key="item.id">
+                        <td>{{ item.name }} (Скидка)</td>
+                        <td><code class="text-caption">{{ item.iiko_id }}</code></td>
+                        <td>-</td>
+                        <td>-</td>
+                        <td>
+                          <VBtn icon="mdi-information" variant="text" size="small" @click="showItemDetails(item)" />
+                        </td>
+                      </tr>
+                    </tbody>
+                  </VTable>
+                </VWindowItem>
+
+                <!-- Сертификаты -->
+                <VWindowItem value="certificates">
+                  <VTable density="compact" class="text-no-wrap">
+                    <thead>
+                      <tr>
+                        <th>Название</th>
+                        <th>ID</th>
+                        <th>Тип</th>
+                        <th>Инфо</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      <tr v-for="item in loyaltyItems.filter(i => i.type === 'certificate')" :key="item.id">
+                        <td>{{ item.name }}</td>
+                        <td><code class="text-caption">{{ item.iiko_id }}</code></td>
+                        <td>{{ item.content?.programType || 'Сертификат' }}</td>
+                        <td>
+                          <VBtn icon="mdi-information" variant="text" size="small" @click="showItemDetails(item)" />
+                        </td>
+                      </tr>
+                      <tr v-if="!loyaltyItems.filter(i => i.type === 'certificate').length">
+                        <td colspan="4" class="text-center text-grey py-4">Сертификаты не найдены</td>
+                      </tr>
+                    </tbody>
+                  </VTable>
+                </VWindowItem>
+              </VWindow>
+            </VCardText>
+          </VCard>
+        </VWindowItem>
+
+        <!-- Диалог редактирования лояльности -->
+        <VDialog v-model="loyaltyEditDialog" max-width="800px">
+          <VCard v-if="editingLoyaltyItem">
+            <VCardTitle class="d-flex justify-space-between align-center">
+              <span>Редактирование: {{ editingLoyaltyItem.name }}</span>
+              <VBtn icon="mdi-close" variant="text" @click="loyaltyEditDialog = false" />
+            </VCardTitle>
+            <VDivider />
+            <VCardText>
+              <VRow>
+                <VCol cols="12" md="8">
+                  <VTextField
+                    v-model="editingLoyaltyItem.name"
+                    label="Название"
+                    hint="Отображаемое название акции"
+                    persistent-hint
+                  />
+                </VCol>
+                <VCol cols="12" md="4">
+                  <VSwitch
+                    v-model="editingLoyaltyItem.is_active"
+                    label="Активна"
+                    color="success"
+                    hide-details
+                  />
+                </VCol>
+                <VCol cols="12">
+                  <VTextarea
+                    v-model="editingLoyaltyItem.description"
+                    label="Описание"
+                    rows="2"
+                    auto-grow
+                  />
+                </VCol>
+                <VCol cols="12">
+                  <div class="text-subtitle-2 mb-2">Технические данные (JSON)</div>
+                  <VTextarea
+                    v-model="loyaltyContentJson"
+                    label="Content JSON"
+                    rows="10"
+                    family="monospace"
+                    :error-messages="jsonError"
+                  />
+                </VCol>
+              </VRow>
+            </VCardText>
+            <VDivider />
+            <VCardActions>
+              <VSpacer />
+              <VBtn color="grey" variant="text" @click="loyaltyEditDialog = false">Отмена</VBtn>
+              <VBtn 
+                color="primary" 
+                :loading="savingLoyaltyItem" 
+                @click="saveLoyaltyItem"
+                :disabled="!!jsonError"
+              >
+                Сохранить
+              </VBtn>
+            </VCardActions>
+          </VCard>
+        </VDialog>
         <!-- ==================== Вкладка Мои компании ==================== -->
         <VWindowItem value="companies">
           <VCard class="mb-6">
@@ -1351,7 +1758,8 @@ onMounted(async () => {
           </VCard>
         </VWindowItem>
 
-        <VWindowItem value="loyalty">
+        <!-- ==================== Вкладка iiko POS (Старая) ==================== -->
+        <VWindowItem value="pos_loyalty">
           <VCard>
             <VCardTitle class="d-flex align-center">
               <VIcon icon="mdi-star-circle" class="me-2" />
@@ -1678,6 +2086,42 @@ onMounted(async () => {
   <VSnackbar v-model="snackbar" :color="snackbarColor" :timeout="3000">
     {{ snackbarText }}
   </VSnackbar>
+
+  <!-- Диалог деталей элемента лояльности -->
+  <VDialog v-model="itemDetailsDialog" max-width="800px">
+    <VCard v-if="selectedItem">
+      <VCardTitle class="d-flex align-center justify-space-between">
+        <span>Детали: {{ selectedItem.name }}</span>
+        <VBtn icon="mdi-close" variant="text" @click="itemDetailsDialog = false" />
+      </VCardTitle>
+      <VDivider />
+      <VCardText class="pa-0">
+        <div class="bg-grey-lighten-4 pa-4">
+          <div class="mb-4">
+            <div class="text-caption text-grey">iiko ID</div>
+            <code>{{ selectedItem.iiko_id }}</code>
+          </div>
+          <div class="mb-4">
+            <div class="text-caption text-grey">Тип</div>
+            <VChip size="small" color="primary">{{ selectedItem.type }}</VChip>
+          </div>
+          <div v-if="selectedItem.description" class="mb-4">
+            <div class="text-caption text-grey">Описание</div>
+            <p class="text-body-2">{{ selectedItem.description }}</p>
+          </div>
+          <div>
+            <div class="text-caption text-grey mb-2">Полное содержание (JSON)</div>
+            <pre class="text-caption pa-4 bg-shades-black text-white rounded overflow-auto" style="max-height: 400px">{{ JSON.stringify(selectedItem.content, null, 2) }}</pre>
+          </div>
+        </div>
+      </VCardText>
+      <VDivider />
+      <VCardActions>
+        <VSpacer />
+        <VBtn color="primary" @click="itemDetailsDialog = false">Закрыть</VBtn>
+      </VCardActions>
+    </VCard>
+  </VDialog>
 </template>
 
 <style scoped>

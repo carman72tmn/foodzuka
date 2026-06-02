@@ -1,9 +1,10 @@
 """
 Модель настроек интеграции с iiko
 """
-from typing import Optional
+from typing import Optional, List
 from datetime import datetime, timezone
-from sqlmodel import Field, SQLModel
+from sqlmodel import Field, SQLModel, Column
+from sqlalchemy.dialects.postgresql import JSONB
 
 
 class IikoSettings(SQLModel, table=True):
@@ -72,6 +73,11 @@ class IikoSettings(SQLModel, table=True):
     no_use_iiko_promo: bool = Field(
         default=False,
         description="Не использовать промокоды из iiko"
+    )
+
+    use_v2_menu: bool = Field(
+        default=False,
+        description="Использовать API v2 (Cloud Menu) вместо Nomenclature"
     )
 
     # Резервные каналы для ошибок
@@ -152,6 +158,16 @@ class IikoSettings(SQLModel, table=True):
     last_order_revision: int = Field(
         default=0,
         description="Номер последней успешно обработанной ревизии заказов"
+    )
+
+    # Кэширование токенов доступа (для всех процессов)
+    access_token: Optional[str] = Field(default=None, max_length=1000)
+    token_expires_at: Optional[datetime] = Field(default=None)
+
+    # Список UUID бонусных программ (для разделения Скидок и Бонусов)
+    bonus_program_ids: List[str] = Field(
+        sa_column=Column(JSONB, default=[], server_default='[]'),
+        description="Массив UUID акций из iikoCard, которые считаются оплатой бонусами"
     )
 
     # Метаданные
