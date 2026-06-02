@@ -40,6 +40,7 @@ services:
       - "8000"
     volumes:
       - ./backend:/app
+      - /root/foodzuka/admin/public/media:/app/media
     depends_on:
       db:
         condition: service_healthy
@@ -58,6 +59,7 @@ services:
       - REDIS_URL=redis://redis:6379/0
     volumes:
       - ./backend:/app
+      - /root/foodzuka/admin/public/media:/app/media
     depends_on:
       - db
       - redis

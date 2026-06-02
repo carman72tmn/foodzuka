@@ -488,6 +488,15 @@ class IikoSyncService:
                 log_audit(action="manual_sync", resource_type="menu", message=response["message"])
 
             await asyncio.to_thread(_final_success)
+            
+            # Запуск фонового скачивания изображений товаров
+            try:
+                from app.tasks.general_tasks import download_product_images_task
+                download_product_images_task.delay()
+                logger.info("Запущена фоновая задача скачивания картинок товаров")
+            except Exception as task_err:
+                logger.error(f"Не удалось запустить задачу скачивания картинок: {task_err}")
+                
             return response
 
         except Exception as e:
@@ -799,6 +808,7 @@ class IikoSyncService:
                     "proteins": float(nutritions.get("proteins") or 0) or None,
                     "fats": float(nutritions.get("fats") or 0) or None,
                     "carbohydrates": float(nutritions.get("carbs") or 0) or None,
+                    "image_url": item_data.get("buttonImageUrl"),
                     "updated_at": datetime.now(timezone.utc).replace(tzinfo=None)
                 }
 
@@ -913,6 +923,7 @@ class IikoSyncService:
                     "article": p.get("code") or "",
                     "category_id": category_id,
                     "is_available": not p.get("isDeleted", False),
+                    "image_url": p.get("buttonImageUrl") or (p.get("imageLinks")[0] if p.get("imageLinks") else None),
                     "updated_at": datetime.now(timezone.utc).replace(tzinfo=None)
                 }
 
