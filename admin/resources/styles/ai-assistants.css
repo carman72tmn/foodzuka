@@ -1,0 +1,417 @@
+/* ==========================================================================
+   AI Site Assistants & Floating Interactive Avatar Styles
+   FoodTech Admin Panel - VezuRoll
+   ========================================================================== */
+
+/* 1. АНИМАЦИИ АВАТАРА */
+@keyframes avatarBreathe {
+  0%, 100% {
+    transform: translateY(0) scale(1);
+  }
+  50% {
+    transform: translateY(-4px) scale(1.02);
+  }
+}
+
+@keyframes avatarFloat {
+  0%, 100% {
+    transform: translateY(0px) rotate(0deg);
+  }
+  25% {
+    transform: translateY(-6px) rotate(1deg);
+  }
+  75% {
+    transform: translateY(4px) rotate(-1deg);
+  }
+}
+
+@keyframes avatarPulse {
+  0%, 100% {
+    box-shadow: 0 8px 24px rgba(115, 103, 240, 0.35);
+  }
+  50% {
+    box-shadow: 0 12px 32px rgba(115, 103, 240, 0.65);
+  }
+}
+
+@keyframes statusRipple {
+  0% {
+    transform: scale(0.9);
+    opacity: 0.9;
+  }
+  100% {
+    transform: scale(2.2);
+    opacity: 0;
+  }
+}
+
+@keyframes tipSlideIn {
+  from {
+    opacity: 0;
+    transform: translateY(10px) scale(0.95);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+/* 2. ПЛАВАЮЩИЙ ВИДЖЕТ НА СТРАНИЦАХ */
+.floating-assistant-wrapper {
+  position: fixed;
+  z-index: 9999;
+  user-select: none;
+  touch-action: none;
+  transition: transform 0.15s ease-out;
+}
+
+.floating-assistant-avatar {
+  position: relative;
+  width: 64px;
+  height: 64px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: grab;
+  background: linear-gradient(135deg, #1e1e2d 0%, #2b2b40 100%);
+  border: 2px solid rgba(255, 255, 255, 0.15);
+  box-shadow: 0 10px 25px rgba(0, 0, 0, 0.4);
+  transition: transform 0.2s cubic-bezier(0.34, 1.56, 0.64, 1), box-shadow 0.2s ease;
+}
+
+.floating-assistant-avatar:hover {
+  transform: scale(1.08);
+  box-shadow: 0 14px 30px rgba(115, 103, 240, 0.5);
+}
+
+.floating-assistant-avatar:active {
+  cursor: grabbing;
+  transform: scale(0.95);
+}
+
+/* Стили движения */
+.avatar-anim-alive {
+  animation: avatarBreathe 3.5s ease-in-out infinite;
+}
+
+.avatar-anim-float {
+  animation: avatarFloat 4s ease-in-out infinite;
+}
+
+.avatar-anim-pulse {
+  animation: avatarPulse 2.5s ease-in-out infinite;
+}
+
+/* Индикатор статуса */
+.avatar-status-badge {
+  position: absolute;
+  top: -2px;
+  right: -2px;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  border: 2px solid #1e1e2d;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 10px;
+  font-weight: 700;
+  color: #fff;
+  z-index: 2;
+}
+
+.avatar-status-badge.status-ok {
+  background-color: #28c76f;
+}
+
+.avatar-status-badge.status-attention {
+  background-color: #ff9f43;
+}
+
+.avatar-status-badge.status-warning {
+  background-color: #ea5455;
+  box-shadow: 0 0 10px rgba(234, 84, 85, 0.8);
+}
+
+.avatar-status-badge.status-warning::after {
+  content: '';
+  position: absolute;
+  width: 100%;
+  height: 100%;
+  border-radius: 50%;
+  background: inherit;
+  animation: statusRipple 1.6s infinite ease-out;
+  z-index: -1;
+}
+
+/* 3. ВСПЛЫВАЮЩИЙ ЧАТ-ДИАЛОГ */
+.assistant-chat-panel {
+  position: absolute;
+  bottom: 74px;
+  right: 0;
+  width: 380px;
+  max-width: calc(100vw - 32px);
+  max-height: 580px;
+  height: 520px;
+  border-radius: 20px;
+  background: rgba(30, 30, 45, 0.94);
+  backdrop-filter: blur(20px);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  box-shadow: 0 20px 45px rgba(0, 0, 0, 0.5), 0 0 1px rgba(255, 255, 255, 0.2);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  animation: tipSlideIn 0.25s cubic-bezier(0.16, 1, 0.3, 1);
+  z-index: 10000;
+}
+
+.assistant-chat-header {
+  padding: 12px 16px;
+  background: rgba(255, 255, 255, 0.03);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.assistant-header-info {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.assistant-header-title {
+  font-weight: 700;
+  font-size: 14px;
+  color: #fff;
+  line-height: 1.2;
+}
+
+.assistant-header-subtitle {
+  font-size: 11px;
+  color: rgba(255, 255, 255, 0.6);
+}
+
+/* Оперативные метрики в чате */
+.assistant-metrics-bar {
+  display: flex;
+  gap: 6px;
+  padding: 8px 14px;
+  background: rgba(0, 0, 0, 0.2);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+  overflow-x: auto;
+}
+
+.assistant-metric-chip {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  padding: 3px 8px;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.06);
+  white-space: nowrap;
+}
+
+/* Лента подсказок и сообщений */
+.assistant-chat-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.assistant-tip-alert {
+  padding: 10px 12px;
+  border-radius: 12px;
+  font-size: 12px;
+  line-height: 1.4;
+  border-left: 4px solid;
+  animation: tipSlideIn 0.3s ease;
+}
+
+.assistant-tip-alert.severity-high {
+  background: rgba(234, 84, 85, 0.12);
+  border-color: #ea5455;
+  color: #ff9f9f;
+}
+
+.assistant-tip-alert.severity-medium {
+  background: rgba(255, 159, 67, 0.12);
+  border-color: #ff9f43;
+  color: #ffd09f;
+}
+
+.assistant-tip-alert.severity-low {
+  background: rgba(0, 207, 232, 0.12);
+  border-color: #00cfe8;
+  color: #9feeff;
+}
+
+.assistant-tip-btn {
+  margin-top: 6px;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  font-weight: 600;
+  text-decoration: none;
+  padding: 2px 8px;
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.1);
+  color: #fff;
+  transition: background 0.15s;
+}
+
+.assistant-tip-btn:hover {
+  background: rgba(255, 255, 255, 0.2);
+}
+
+/* Пузыри сообщений */
+.assistant-msg {
+  max-width: 88%;
+  padding: 10px 12px;
+  border-radius: 14px;
+  font-size: 12.5px;
+  line-height: 1.45;
+  word-break: break-word;
+}
+
+.assistant-msg-user {
+  align-self: flex-end;
+  background: linear-gradient(135deg, #7367f0 0%, #9055fd 100%);
+  color: #fff;
+  border-bottom-right-radius: 2px;
+}
+
+.assistant-msg-bot {
+  align-self: flex-start;
+  background: rgba(255, 255, 255, 0.07);
+  color: #e2e8f0;
+  border-bottom-left-radius: 2px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+/* Нижняя панель ввода */
+.assistant-chat-footer {
+  padding: 10px 14px;
+  background: rgba(0, 0, 0, 0.25);
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.assistant-quick-tags {
+  display: flex;
+  gap: 6px;
+  overflow-x: auto;
+  padding-bottom: 2px;
+}
+
+.assistant-quick-tag {
+  font-size: 10.5px;
+  padding: 2px 8px;
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.06);
+  color: rgba(255, 255, 255, 0.7);
+  white-space: nowrap;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.assistant-quick-tag:hover {
+  background: rgba(115, 103, 240, 0.3);
+  color: #fff;
+}
+
+.assistant-input-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.assistant-input-field {
+  flex: 1;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  border-radius: 10px;
+  padding: 8px 12px;
+  color: #fff;
+  font-size: 13px;
+  outline: none;
+  transition: border-color 0.2s;
+}
+
+.assistant-input-field:focus {
+  border-color: #7367f0;
+  box-shadow: 0 0 8px rgba(115, 103, 240, 0.3);
+}
+
+/* 4. СТРАНИЦА НАСТРОЕК (/settings/ai-assistants) */
+.skin-card-item {
+  border: 2px solid transparent;
+  border-radius: 16px;
+  padding: 16px;
+  cursor: pointer;
+  background: rgba(255, 255, 255, 0.03);
+  transition: all 0.2s ease;
+  text-align: center;
+}
+
+.skin-card-item:hover {
+  background: rgba(255, 255, 255, 0.06);
+  transform: translateY(-2px);
+}
+
+.skin-card-item.selected {
+  border-color: #7367f0;
+  background: rgba(115, 103, 240, 0.08);
+  box-shadow: 0 4px 20px rgba(115, 103, 240, 0.2);
+}
+
+.skin-avatar-preview {
+  width: 72px;
+  height: 72px;
+  margin: 0 auto 10px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: linear-gradient(135deg, #2a2a40 0%, #1e1e2d 100%);
+  border: 2px solid rgba(255, 255, 255, 0.12);
+  box-shadow: 0 6px 16px rgba(0, 0, 0, 0.3);
+}
+
+.assistant-card {
+  border-radius: 16px;
+  transition: all 0.2s ease;
+  overflow: hidden;
+}
+
+.assistant-card:hover {
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.2);
+}
+
+.zone-badge-kitchen {
+  background: rgba(255, 159, 67, 0.15);
+  color: #ff9f43;
+}
+
+.zone-badge-delivery {
+  background: rgba(0, 207, 232, 0.15);
+  color: #00cfe8;
+}
+
+.zone-badge-cashier {
+  background: rgba(40, 199, 111, 0.15);
+  color: #28c76f;
+}
+
+.zone-badge-full {
+  background: rgba(115, 103, 240, 0.15);
+  color: #7367f0;
+}
