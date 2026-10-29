@@ -395,6 +395,7 @@ class BackupService:
         # Поиск файла документации в возможных путях
         doc_filename = f"{doc_name}.md" if not doc_name.endswith(".md") else doc_name
         search_paths = [
+            f"/host_foodzuka/Service_info/{doc_filename}",
             os.path.join(PROJECT_ROOT, "..", "Service_info", doc_filename),
             os.path.join(PROJECT_ROOT, "Service_info", doc_filename),
             f"/root/foodzuka/Service_info/{doc_filename}",
@@ -427,6 +428,7 @@ class BackupService:
         """Сохранить обновленное содержимое документа"""
         doc_filename = f"{doc_name}.md" if not doc_name.endswith(".md") else doc_name
         search_paths = [
+            f"/host_foodzuka/Service_info/{doc_filename}",
             os.path.join(PROJECT_ROOT, "..", "Service_info", doc_filename),
             os.path.join(PROJECT_ROOT, "Service_info", doc_filename),
             f"/root/foodzuka/Service_info/{doc_filename}",
