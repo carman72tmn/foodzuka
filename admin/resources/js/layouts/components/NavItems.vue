@@ -251,6 +251,10 @@ import { hasPermission, authState } from "@/utils/auth"
   >
     <VerticalNavLink
       v-if="hasPermission('system_server_view') || hasPermission('settings_view')"
+      :item="{ title: 'Модули системы', icon: 'bx-extension', to: '/system/modules' }"
+    />
+    <VerticalNavLink
+      v-if="hasPermission('system_server_view') || hasPermission('settings_view')"
       :item="{ title: 'Бэкапы и ИИ', icon: 'bx-shield-quarter', to: '/system/backups' }"
     />
     <VerticalNavLink

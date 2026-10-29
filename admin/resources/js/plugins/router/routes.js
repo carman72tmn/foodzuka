@@ -197,6 +197,12 @@ export const routes = [
         meta: { permission: 'system_tasks_view' }
       },
       {
+        path: 'system/modules',
+        name: 'system-modules',
+        component: () => import('@/pages/system/modules.vue'),
+        meta: { permission: 'system_server_view' }
+      },
+      {
         path: 'system/backups',
         name: 'system-backups',
         component: () => import('@/pages/system/backups.vue'),
