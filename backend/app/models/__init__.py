@@ -66,6 +66,7 @@ from .vk_first_comment_settings import VkFirstCommentSettings
 from .senler import SenlerSettings, SenlerSubscriber
 from .ai_agent import AiProxy, AiProviderConnection, AiSiteAgent
 from .ai_assistant import AiSiteAssistant, AiAssistantMessage
+from .backup_settings import BackupSettings, AiPromptInstruction
 from .validation_settings import ValidationSettings
 from .vk_post_scheduler import VkPostScheduler
 from .mango_settings import MangoSettings, MangoCallLog
@@ -174,6 +175,8 @@ __all__ = [
     "AiSiteAgent",
     "AiSiteAssistant",
     "AiAssistantMessage",
+    "BackupSettings",
+    "AiPromptInstruction",
     "MangoSettings",
     "MangoCallLog",
 ]
