@@ -332,4 +332,27 @@ otify_admin_panel| Уведомления | Оповещение в админк
 | is_active | Активен | Статус активности | True / False |
 | priority | Приоритет | Порядок отображения | Число (по умолчанию 10) |
 
-_Последнее обновление: 29.10.2026 14:05 (UTC+5)_
+## Таблица `ai_site_assistants` (Виртуальные Помощники ИИ) [NEW 29.10.2026]
+
+| Поле | Название | За что отвечает | Пояснения |
+| :--- | :--- | :--- | :--- |
+| `id` | ID | Первичный ключ | Автоинкремент |
+| `name` | Имя | Имя персонажа | Напр. 'Шеф Марк', 'Анна' |
+| `code` | Код | Уникальный slug | kitchen_chef, admin_anna |
+| `role_title` | Роль/Должность | Название должности | 'Шеф-Повар / Контроль кухни' |
+| `avatar_skin` | Скин аватара | Внешний вид | chef_male, admin_female, courier_male, cyber_bot, fox_mascot |
+| `avatar_animation_mode` | Анимация | Стиль движения | alive, float, pulse, static |
+| `character_tone` | Характер | Тон общения | professional, strict_supervisor, caring_mentor, friendly, humorous |
+| `assigned_pages` | Привязка страниц | JSONB список | Все 34 маршрута админки или `['*']` |
+| `zone_of_responsibility`| Зона ответственности | Фокус проверок | kitchen_control, delivery_control, admin_cashier, full_control |
+| `is_active` | Активен | Вкл / Выкл | True / False |
+| `daily_token_limit` | Лимит токенов | Суточный расход | По умолчанию 50000 |
+| `daily_requests_limit` | Лимит запросов | Макс. сообщений | По умолчанию 100 |
+| `allow_external_queries` | Сторонние ресурсы | Погода, внешний поиск | True / False [NEW] |
+| `allow_iiko_api_queries` | Запросы к iiko | Доступ к iiko API | True / False [NEW] |
+| `allow_iiko_export` | Выгрузки iiko | Право выгружать отчеты | True / False [NEW] |
+| `allowed_external_tools` | Внешние инструменты | JSONB массив | weather, general_search, consulting [NEW] |
+| `iiko_allowed_actions` | Действия в iiko | JSONB массив | read_orders, read_menu, read_stop_list, export_reports [NEW] |
+| `enable_analytics_learning`| Наблюдения и аналитика | Zero-Token mode | True / False [NEW] |
+
+_Последнее обновление: 29.10.2026 15:30 (UTC+5)_
