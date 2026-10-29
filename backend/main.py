@@ -15,7 +15,12 @@ from app.api import (
     categories, products, orders, companies, branches, iiko,
     loyalty, promo_codes, actions, nps, customers, mailings, mailing_cascades,
     stories, funnels, reports, employees, courier, webhooks, vk, vk_bot_admin, bot_settings,
-    logs, yandex, auth, users, system, chat, max
+    logs, yandex, auth, users, system, chat, max, notifications, ai_agents, ai_assistants,
+    tbank, tbank_webhooks, bank, mango, senler, validation, multichat, kitchen, purchase, bot_commands,
+    reviews, reminders, broadcasts, message_logs, vk_marketing_endpoints, link_tracker,
+    system_modules,
+    vk_birthday_bots, vk_cover_bots, vk_contests, vk_activity_bots,
+    vk_first_comment_bots, vk_group_posting, vk_scheduler
 )
 
 from app.services.revenue_sync import revenue_sync_service
@@ -65,6 +70,15 @@ async def startup_event():
     except Exception as e:
         logger.error(f"Ошибка при инициализации супер-админа: {e}")
 
+    # Инициализация модульной подсистемы (Modular Monolith) если доступна
+    try:
+        from app.modules.manager import module_manager
+        module_manager.init_app(app)
+        logger.info("Системные модули успешно инициализированы.")
+    except Exception as e:
+        logger.warning(f"Модульный менеджер не запущен или отсутствует: {e}")
+
+
 # Настройка CORS для работы с фронтендом и Telegram Bot
 app.add_middleware(
     CORSMiddleware,
@@ -85,7 +99,7 @@ app.add_middleware(
 # Поддержка заголовков прокси (X-Forwarded-Proto и т.д.)
 app.add_middleware(ProxyHeadersMiddleware, trusted_hosts="*")
 
-# Подключение роутеров
+# Подключение базовых роутеров (100% обратная совместимость)
 app.include_router(auth.router, prefix="/api/v1")
 app.include_router(users.router, prefix="/api/v1")
 app.include_router(categories.router, prefix="/api/v1")
@@ -99,8 +113,12 @@ app.include_router(promo_codes.router, prefix="/api/v1")
 app.include_router(actions.router, prefix="/api/v1")
 app.include_router(nps.router, prefix="/api/v1")
 app.include_router(customers.router, prefix="/api/v1")
-app.include_router(mailings.router, prefix="/api/v1")
 app.include_router(mailing_cascades.router, prefix="/api/v1")
+app.include_router(reviews.router, prefix="/api/v1")
+app.include_router(reminders.router, prefix="/api/v1")
+app.include_router(broadcasts.router, prefix="/api/v1")
+app.include_router(message_logs.router, prefix="/api/v1")
+app.include_router(mailings.router, prefix="/api/v1")
 app.include_router(stories.router, prefix="/api/v1")
 app.include_router(funnels.router, prefix="/api/v1")
 app.include_router(reports.router, prefix="/api/v1")
@@ -115,6 +133,30 @@ app.include_router(yandex.router, prefix="/api/v1")
 app.include_router(system.router, prefix="/api/v1")
 app.include_router(chat.router, prefix="/api/v1")
 app.include_router(max.router, prefix="/api/v1/max", tags=["MAX Integration"])
+app.include_router(notifications.router, prefix="/api/v1")
+app.include_router(ai_agents.router, prefix="/api/v1")
+app.include_router(ai_assistants.router, prefix="/api/v1")
+app.include_router(bank.router, prefix="/api/v1")
+app.include_router(tbank.router, prefix="/api/v1")
+app.include_router(tbank_webhooks.router, prefix="/api/v1")
+app.include_router(mango.router, prefix="/api/v1")
+app.include_router(senler.router, prefix="/api/v1")
+app.include_router(validation.router, prefix="/api/v1")
+app.include_router(validation.router, prefix="/api/v1/validation")
+app.include_router(bot_commands.router, prefix="/api/v1")
+app.include_router(multichat.router, prefix="/api/v1")
+app.include_router(kitchen.router, prefix="/api/v1")
+app.include_router(purchase.router, prefix="/api/v1")
+app.include_router(vk_marketing_endpoints.router, prefix="/api/v1/vk")
+app.include_router(link_tracker.router, prefix="/api/v1")
+app.include_router(system_modules.router, prefix="/api/v1")
+app.include_router(vk_birthday_bots.router, prefix="/api/v1/vk-birthday-bots", tags=["VK Birthday Bots"])
+app.include_router(vk_cover_bots.router, prefix="/api/v1/vk-cover-bots", tags=["VK Cover Bots"])
+app.include_router(vk_contests.router, prefix="/api/v1/vk-contests", tags=["VK Contests"])
+app.include_router(vk_activity_bots.router, prefix="/api/v1/vk-activity-settings", tags=["VK Activity Settings"])
+app.include_router(vk_first_comment_bots.router, prefix="/api/v1/vk-first-comment-settings", tags=["VK First Comment"])
+app.include_router(vk_group_posting.router, prefix="/api/v1")
+app.include_router(vk_scheduler.router, prefix="/api/v1/vk-scheduler", tags=["VK Scheduler"])
 
 
 # Алиас для настроек iiko (совместимость с фронтендом)
@@ -123,7 +165,6 @@ def get_iiko_settings_legacy(session: Session = Depends(get_session)):
     """Алиас для /api/v1/iiko/settings"""
     from app.api.iiko import get_settings
     return get_settings(session)
-
 
 
 @app.get("/")
