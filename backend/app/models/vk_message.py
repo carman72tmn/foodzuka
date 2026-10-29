@@ -9,6 +9,7 @@ class VkMessage(SQLModel, table=True):
 
     id: Optional[int] = Field(default=None, primary_key=True)
     vk_message_id: int = Field(index=True, description="ID сообщения в VK API")
+    vk_group_id: Optional[int] = Field(default=None, index=True, description="ID группы VK")
     peer_id: int = Field(index=True, description="ID собеседника (пользователя или чата)")
     from_id: int = Field(index=True, description="ID отправителя (может быть ID группы)")
     text: str = Field(description="Текст сообщения")

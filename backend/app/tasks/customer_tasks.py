@@ -9,7 +9,7 @@ from typing import List, Optional, Dict, Any
 from decimal import Decimal
 import time
 
-from sqlmodel import Session, select
+from sqlmodel import Session, select, func
 from app.core.celery_app import celery_app
 from app.core.database import engine
 from app.models.customer import Customer
@@ -233,10 +233,10 @@ async def _sync_bonus_history(session: Session, customer_id: int, iiko_customer_
     except Exception as e:
         logger.error(f"Error syncing bonus history for {iiko_customer_id}: {e}")
 
-async def _sync_single_customer(session: Session, phone: str, organization_id: Optional[str] = None, order_id: Optional[int] = None, fast_sync: bool = False) -> bool:
+async def _sync_single_customer(session: Session, phone: str, organization_id: Optional[str] = None, order_id: Optional[int] = None, fast_sync: bool = False, bypass_cache: bool = False) -> bool:
     """Прокси для вызова синхронизации из iiko_sync_service"""
     from app.services.iiko_sync_service import iiko_sync_service
-    return await iiko_sync_service.sync_single_customer(session, phone, organization_id, order_id, fast_sync=fast_sync)
+    return await iiko_sync_service.sync_single_customer(session, phone, organization_id, order_id, fast_sync=fast_sync, bypass_cache=bypass_cache)
 
 
 
@@ -271,47 +271,37 @@ def sync_customers_batch(self, skip: int, status_id: int, force_update: bool = F
                 )
                 return f"Paused at skip {skip}"
 
-        # 1. Получаем пачку клиентов из iiko
-        logger.info(f"Fetching customers from iiko: skip={skip}, take={take}")
-        iiko_data = loop.run_until_complete(iiko_service.get_customers(skip=skip, take=take))
-        
-        customers_from_iiko = iiko_data.get("customers", [])
-        if not isinstance(customers_from_iiko, list):
-            logger.warning(f"Unexpected response format from iiko get_customers: {type(customers_from_iiko)}")
-            customers_from_iiko = []
-            
-        count_received = len(customers_from_iiko)
-        logger.info(f"Received {count_received} customers from iiko")
-        
+        # 1. Получаем пачку клиентов из локальной базы данных
+        logger.info(f"Fetching customers from DB: skip={skip}, take={take}")
         added = 0
         updated = 0
         skipped = 0
+        count_received = 0
         
-        # 2. Обрабатываем полученных клиентов
         with Session(engine) as session:
-            for c_data in customers_from_iiko:
-                phone = c_data.get("phone")
-                if not phone:
-                    continue
-                
-                # Нормализация телефона через единую утилиту
-                from app.utils.phone_utils import normalize_phone
-                clean_phone = normalize_phone(phone)
-                
+            # При первом батче выставляем общее число клиентов
+            if skip == 0:
+                total_cust = session.exec(select(func.count(Customer.id))).one()
+                status = session.get(SyncStatus, status_id)
+                if status:
+                    status.total_count = total_cust
+                    session.add(status)
+                    session.commit()
+            
+            stmt = select(Customer).order_by(Customer.id).offset(skip).limit(take)
+            batch_customers = session.exec(stmt).all()
+            count_received = len(batch_customers)
+            logger.info(f"Loaded {count_received} customers from DB for synchronization")
+
+            for cust in batch_customers:
+                clean_phone = cust.phone
                 if not clean_phone:
                     continue
-                
-                existing = session.exec(select(Customer).where(Customer.phone == clean_phone)).first()
-                
-                if existing and not force_update:
-                    skipped += 1
-                    continue
-                
-                if loop.run_until_complete(_sync_single_customer(session, clean_phone, fast_sync=True)):
-                    if existing:
+                try:
+                    if loop.run_until_complete(_sync_single_customer(session, clean_phone, fast_sync=True)):
                         updated += 1
-                    else:
-                        added += 1
+                except Exception as e:
+                    logger.warning(f"Error syncing customer {clean_phone}: {e}")
             
             # 3. Обновляем статус
             status = session.get(SyncStatus, status_id)
@@ -627,22 +617,35 @@ def import_customers_from_file_task(self, file_path: str, status_id: int):
             os.remove(file_path)
         raise e
 
+def _get_or_create_event_loop() -> asyncio.AbstractEventLoop:
+    """Безопасное получение или создание активного event loop для Celery воркера"""
+    try:
+        loop = asyncio.get_event_loop()
+        if loop.is_closed():
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+        return loop
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        return loop
+
 @celery_app.task(name="app.tasks.customer_tasks.sync_single_customer_task")
-def sync_single_customer_task(phone: str, order_id: Optional[int] = None, fast_sync: bool = False):
+def sync_single_customer_task(phone: str, order_id: Optional[int] = None, fast_sync: bool = False, bypass_cache: bool = False):
     """Задача для синхронизации одного клиента (вызывается при новом заказе)"""
-    loop = asyncio.get_event_loop()
+    loop = _get_or_create_event_loop()
     with Session(engine) as session:
-        loop.run_until_complete(_sync_single_customer(session, phone, order_id=order_id, fast_sync=fast_sync))
+        loop.run_until_complete(_sync_single_customer(session, phone, order_id=order_id, fast_sync=fast_sync, bypass_cache=bypass_cache))
     return f"Synced {phone} (Order: {order_id})"
 
 @celery_app.task(name="app.tasks.customer_tasks.sync_guest_data_task")
-def sync_guest_data_task(customer_id: int, fast_sync: bool = False):
+def sync_guest_data_task(customer_id: int, fast_sync: bool = False, bypass_cache: bool = False):
     """Задача для полной синхронизации по ID клиента"""
-    loop = asyncio.get_event_loop()
+    loop = _get_or_create_event_loop()
     with Session(engine) as session:
         customer = session.get(Customer, customer_id)
         if customer and customer.phone:
-            loop.run_until_complete(_sync_single_customer(session, customer.phone, fast_sync=fast_sync))
+            loop.run_until_complete(_sync_single_customer(session, customer.phone, fast_sync=fast_sync, bypass_cache=bypass_cache))
     return f"Synced customer {customer_id}"
 
 @celery_app.task(name="app.tasks.customer_tasks.export_customer_to_iiko_task")
@@ -650,7 +653,7 @@ def export_customer_to_iiko_task(customer_id: int):
     """
     Экспорт данных клиента из локальной БД в iiko Cloud.
     """
-    loop = asyncio.get_event_loop()
+    loop = _get_or_create_event_loop()
     with Session(engine) as session:
         customer = session.get(Customer, customer_id)
         if not customer:
@@ -746,3 +749,32 @@ def export_customer_to_iiko_task(customer_id: int):
             
         except Exception as e:
             logger.error(f"Failed to export customer {customer.phone} to iiko: {e}")
+
+
+@celery_app.task(bind=True, name="app.tasks.customer_tasks.link_customer_max_task", max_retries=2, default_retry_delay=5)
+def link_customer_max_task(self, customer_id: int):
+    """
+    Фоновый поиск клиента в мессенджере MAX по номеру телефона
+    и автоматическая привязка max_user_id к анкете гостя.
+    """
+    with Session(engine) as db:
+        customer = db.get(Customer, customer_id)
+        if not customer or not customer.phone:
+            logger.info(f"link_customer_max_task: Customer #{customer_id} not found or phone is empty")
+            return {"status": "skipped", "reason": "Customer or phone missing"}
+        if customer.max_user_id:
+            return {"status": "already_linked", "max_user_id": customer.max_user_id}
+            
+        loop = _get_or_create_event_loop()
+        try:
+            from app.services.max_bridge_service import max_bridge_service
+            res = loop.run_until_complete(max_bridge_service.link_customer_by_phone(customer.phone, customer.id, db))
+            if res:
+                logger.info(f"link_customer_max_task: Customer #{customer_id} successfully linked to MAX ID {res}")
+                return {"status": "linked", "customer_id": customer.id, "max_user_id": res}
+            logger.info(f"link_customer_max_task: Customer #{customer_id} ({customer.phone}) not registered in MAX")
+            return {"status": "not_found", "customer_id": customer.id, "phone": customer.phone}
+        except Exception as e:
+            logger.error(f"Error in link_customer_max_task for customer #{customer_id}: {e}")
+            raise e
+

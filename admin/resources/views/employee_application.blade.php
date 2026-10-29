@@ -4,8 +4,9 @@
 <head>
   <meta charset="UTF-8" />
   <link rel="icon" href="{{ asset('favicon.ico') }}" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
   <title>Vezuroll - Панель Сотрудников</title>
+  <link rel="manifest" href="{{ asset('manifest.json') }}" />
   <link rel="stylesheet" type="text/css" href="{{ asset('loader.css') }}" />
   @vite(['resources/js/employee_main.js'])
 </head>
@@ -66,6 +67,39 @@
 
     if (primaryColor)
       document.documentElement.style.setProperty('--initial-loader-color', primaryColor)
+  </script>
+
+  <script>
+    (function() {
+      // Проверяем наличие VK-параметров в URL (VK Mini Apps передает их при запуске)
+      const urlParams = new URLSearchParams(window.location.search);
+      const isVk = urlParams.has('vk_app_id') || urlParams.has('vk_user_id') || window.location.href.indexOf('vk_') !== -1;
+      
+      if (isVk) {
+        console.log('[VK WebView] Detected VK environment. Loading VK Bridge...');
+        const script = document.createElement('script');
+        script.src = 'https://unpkg.com/@vkontakte/vk-bridge/dist/browser.min.js';
+        script.async = true;
+        script.onload = function() {
+          if (typeof vkBridge !== 'undefined') {
+            console.log('[VK WebView] VK Bridge loaded. Initializing...');
+            vkBridge.send('VKWebAppInit')
+              .then((data) => {
+                console.log('[VK WebView] VK Bridge initialized successfully:', data);
+              })
+              .catch((err) => {
+                console.error('[VK WebView] VK Bridge initialization failed:', err);
+              });
+          } else {
+            console.error('[VK WebView] vkBridge is undefined after loading script');
+          }
+        };
+        script.onerror = function() {
+          console.error('[VK WebView] Failed to load VK Bridge script from CDN');
+        };
+        document.head.appendChild(script);
+      }
+    })();
   </script>
 </body>
 

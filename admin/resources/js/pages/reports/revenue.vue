@@ -201,6 +201,7 @@
 <script setup>
 import { ref, computed, onMounted } from 'vue'
 import { formatDateTime } from '@/utils/date'
+import { getAuthHeaders } from '@/utils/auth'
 
 const BACKEND_URL = '' // Используем относительные пути для проксирования
 
@@ -291,7 +292,9 @@ async function fetchReport(forceRefresh = false) {
       params.set('date_to', customTo.value)
     }
 
-    const resp = await fetch(`${BACKEND_URL}/api/v1/reports/olap/revenue?${params}`)
+    const resp = await fetch(`${BACKEND_URL}/api/v1/reports/olap/revenue?${params}`, {
+      headers: getAuthHeaders()
+    })
     if (!resp.ok) {
       const errData = await resp.json().catch(() => ({}))
       throw new Error(errData.detail || `Ошибка ${resp.status}`)

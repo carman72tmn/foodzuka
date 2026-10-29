@@ -93,6 +93,53 @@ const openEdit = (item) => {
   editDialog.value = true
 }
 
+const singleDeleteDialog = ref(false)
+const singleDeleteLoading = ref(false)
+const categoryToDelete = ref(null)
+
+const confirmDelete = (item) => {
+  categoryToDelete.value = item
+  singleDeleteDialog.value = true
+}
+
+const deleteCategory = async (id) => {
+  singleDeleteLoading.value = true
+  try {
+    const res = await fetch(`${API_BASE}/categories/${id}`, { method: 'DELETE' })
+    if (res.ok) {
+      showMessage("Категория удалена")
+      singleDeleteDialog.value = false
+      loadCategories()
+    } else {
+      showMessage("Ошибка удаления", "error")
+    }
+  } catch (e) {
+    showMessage("Ошибка сети", "error")
+  } finally {
+    singleDeleteLoading.value = false
+  }
+}
+
+const deleteEmptyLoading = ref(false)
+const deleteEmptyCategories = async () => {
+  if (!confirm("Вы уверены, что хотите удалить все разделы, в которых нет товаров и подкатегорий?")) return
+  deleteEmptyLoading.value = true
+  try {
+    const res = await fetch(`${API_BASE}/categories/empty`, { method: 'DELETE' })
+    if (res.ok) {
+      const data = await res.json()
+      showMessage(`Удалено пустых разделов: ${data.deleted_count}`)
+      loadCategories()
+    } else {
+      showMessage("Ошибка удаления пустых разделов", "error")
+    }
+  } catch (e) {
+    showMessage("Ошибка сети", "error")
+  } finally {
+    deleteEmptyLoading.value = false
+  }
+}
+
 const saveCategory = async () => {
   if (!editingCategory.value) return
   saveLoading.value = true
@@ -104,7 +151,14 @@ const saveCategory = async () => {
         name: editingCategory.value.name,
         description: editingCategory.value.description,
         is_active: editingCategory.value.is_active,
-        sort_order: editingCategory.value.sort_order
+        sort_order: editingCategory.value.sort_order,
+        lock_name: editingCategory.value.lock_name,
+        lock_description: editingCategory.value.lock_description,
+        lock_image: editingCategory.value.lock_image,
+        lock_parent: editingCategory.value.lock_parent,
+        hide_category_only: editingCategory.value.hide_category_only,
+        hide_category_and_products: editingCategory.value.hide_category_and_products,
+        parent_id: editingCategory.value.parent_id
       })
     })
     if (res.ok) {
@@ -144,6 +198,18 @@ onMounted(loadCategories)
             class="me-4"
             style="max-width: 300px"
           />
+
+          <VBtn
+            v-if="categories.length > 0"
+            color="warning"
+            variant="tonal"
+            prepend-icon="mdi-delete-outline"
+            class="me-2 rounded-pill"
+            :loading="deleteEmptyLoading"
+            @click="deleteEmptyCategories"
+          >
+            Удалить пустые
+          </VBtn>
 
           <VBtn
             v-if="categories.length > 0"
@@ -225,7 +291,8 @@ onMounted(loadCategories)
 
             <!-- Действия -->
             <template #item.actions="{ item }">
-              <VBtn icon="mdi-pencil-outline" variant="text" size="small" color="primary" @click="openEdit(item)" />
+              <VBtn icon="mdi-pencil-outline" variant="text" size="small" color="primary" @click="openEdit(item)" class="me-1" />
+              <VBtn icon="mdi-delete-outline" variant="text" size="small" color="error" @click="confirmDelete(item)" />
             </template>
           </VDataTable>
         </VCardText>
@@ -240,13 +307,65 @@ onMounted(loadCategories)
       <VCardText class="pa-4 pt-6">
         <VTextField v-model="editingCategory.name" label="Название" variant="outlined" class="mb-4" />
         <VTextarea v-model="editingCategory.description" label="Описание" variant="outlined" rows="3" class="mb-4" />
+        
+        <!-- Выбор родительской категории -->
+        <VSelect
+          v-model="editingCategory.parent_id"
+          :items="categories.filter(c => c.id !== editingCategory.id)"
+          item-title="name"
+          item-value="id"
+          label="Родительская категория"
+          variant="outlined"
+          density="compact"
+          clearable
+          class="mb-4"
+        />
+
         <VTextField v-model.number="editingCategory.sort_order" label="Порядок сортировки" type="number" variant="outlined" class="mb-4" />
-        <VSwitch v-model="editingCategory.is_active" label="Активна" color="success" />
+        
+        <div class="text-subtitle-2 font-weight-bold text-grey-darken-1 mb-2">Отображение на сайте:</div>
+        <VSwitch v-model="editingCategory.is_active" label="Активна (is_active)" color="success" density="compact" class="mb-1" />
+        <VSwitch v-model="editingCategory.hide_category_only" label="Скрыть только раздел (hide_category_only)" color="primary" density="compact" class="mb-1" />
+        <VSwitch v-model="editingCategory.hide_category_and_products" label="Скрыть раздел и все товары (hide_category_and_products)" color="primary" density="compact" class="mb-1" />
+
+        <div class="text-subtitle-2 font-weight-bold text-grey-darken-1 mb-2 mt-3">Настройки синхронизации IIKO:</div>
+        <VSwitch v-model="editingCategory.lock_name" label="Защитить название от перезаписи из iiko" color="warning" density="compact" class="mb-1" />
+        <VSwitch v-model="editingCategory.lock_description" label="Защитить описание от перезаписи из iiko" color="warning" density="compact" class="mb-1" />
+        <VSwitch v-model="editingCategory.lock_image" label="Защитить изображение от перезаписи из iiko" color="warning" density="compact" class="mb-1" />
+        <VSwitch v-model="editingCategory.lock_parent" label="Защитить родительскую категорию от iiko" color="warning" density="compact" class="mb-1" />
       </VCardText>
       <VCardActions class="pa-4 bg-grey-lighten-4">
         <VSpacer />
         <VBtn variant="text" @click="editDialog = false">Отмена</VBtn>
         <VBtn color="primary" variant="flat" :loading="saveLoading" @click="saveCategory">Сохранить</VBtn>
+      </VCardActions>
+    </VCard>
+  </VDialog>
+
+  <!-- Диалог подтверждения удаления одной категории -->
+  <VDialog v-model="singleDeleteDialog" max-width="400">
+    <VCard v-if="categoryToDelete">
+      <VCardTitle class="pa-4 bg-error text-white d-flex align-center">
+        <VIcon icon="mdi-alert-thick" class="me-2" />
+        Удаление категории
+      </VCardTitle>
+      <VCardText class="pa-4 pt-6 text-center">
+        Вы действительно хотите удалить категорию <b>{{ categoryToDelete.name }}</b>?
+        <div class="text-caption text-error mt-2">
+          Товары останутся в базе, но потеряют привязку к этой категории.
+        </div>
+      </VCardText>
+      <VCardActions class="pa-4">
+        <VSpacer />
+        <VBtn variant="text" @click="singleDeleteDialog = false">Отмена</VBtn>
+        <VBtn
+          color="error"
+          variant="flat"
+          :loading="singleDeleteLoading"
+          @click="deleteCategory(categoryToDelete.id)"
+        >
+          Да, удалить
+        </VBtn>
       </VCardActions>
     </VCard>
   </VDialog>

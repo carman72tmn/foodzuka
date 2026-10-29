@@ -9,7 +9,20 @@ celery_app = Celery(
     "foodtech",
     broker=settings.REDIS_URL or "redis://localhost:6379/0",
     backend=settings.REDIS_URL or "redis://localhost:6379/0",
-    include=["app.tasks.customer_tasks", "app.tasks.general_tasks", "app.tasks.mailing_tasks"]
+    include=[
+        "app.tasks.customer_tasks",
+        "app.tasks.general_tasks",
+        "app.tasks.mailing_tasks",
+        "app.tasks.tbank_tasks",
+        "app.tasks.vk_birthday_task",
+        "app.tasks.vk_cover_task",
+        "app.tasks.vk_contest_reminders_task",
+        "app.tasks.vk_scheduler_task",
+        "app.tasks.vk_parser_tasks",
+        "app.tasks.senler_tasks",
+        "app.tasks.vk_digest_task",
+        "app.tasks.vk_marketing_tasks",
+    ]
 )
 
 # Настройки Celery
@@ -44,12 +57,26 @@ def handle_task_failure(sender=None, exception=None, task_id=None, traceback=Non
 
 @task_postrun.connect
 def handle_task_postrun(sender=None, task_id=None, state=None, **kwargs):
-    """Логирование завершения задач Celery (успех/ошибка)"""
+    """Логирование завершения значимых задач Celery (рутинные минутные тикеры пропускаем)"""
     if state == 'SUCCESS':
+        task_name = sender.name if sender else ''
+        # Пропускаем минутные рутинные тикеры, чтобы не раздувать system_logs
+        skip_tasks = (
+            'vk_birthday',
+            'vk_cover',
+            'tbank',
+            'multichat_sync',
+            'contest_reminder',
+            'vk_scheduler',
+            'run_vk_post_scheduler'
+        )
+        if any(s in task_name for s in skip_tasks):
+            return
+
         with SessionLocal() as session:
             log = SystemLog(
                 level="INFO",
-                module=f"Celery:{sender.name if sender else 'unknown'}",
+                module=f"Celery:{task_name or 'unknown'}",
                 message=f"Задача завершена успешно: {task_id}"
             )
             session.add(log)

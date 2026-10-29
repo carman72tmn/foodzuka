@@ -1,0 +1,28 @@
+Session Date: 2026-06-10 23:15
+Task Name: Integration of Social Icons, Filters, and Sorting in Clients List
+Status: COMPLETED
+
+=== Changes Made ===
+1. schemas/__init__.py:
+   - Added `social_channels: Optional[dict] = None` to `CustomerResponse` schema.
+
+2. api/customers.py:
+   - Added parameters `social_channel` and `sort_social` to `get_customers` API.
+   - Implemented SQL filters for VK, Telegram, WhatsApp, MAX, and SMS.
+   - Implemented SQL sorting by case statements on vk_user_id and telegram_id.
+   - Added efficient batch loading of `VkUser` to prevent N+1 queries.
+   - Added generation of `social_channels` dictionary with connected, active, and blocked states.
+
+3. admin/resources/js/pages/clients/index.vue:
+   - Added column `social_channels` to headers table with `ri-mail-line` header icon slot.
+   - Implemented template slot `#item.social_channels` using brand icons with dynamic coloring (#4c75a3 for VK, #0088cc for Telegram, #25D366 for WhatsApp, #7360F2 for MAX, #FF9800 for SMS).
+   - Implemented red color indicator (#ff4d4f) if channel has block/opt-out active status.
+   - Implemented select filter for Social Channels in the filters bar.
+   - Integrated Vue reactivity and updated fetchClients to support options.sortBy and filter parameter.
+
+=== Verification & Deployment ===
+- Executed `python sync_to_vps.py`.
+- Vite production build finished successfully.
+- Server cache cleared: `php artisan optimize:clear`.
+- Database migrations verified.
+- Backend, worker, nginx docker containers restarted successfully.

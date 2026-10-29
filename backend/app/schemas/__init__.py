@@ -159,6 +159,12 @@ class CategoryBase(BaseModel):
     description: Optional[str] = None
     sort_order: int = 0
     is_active: bool = True
+    lock_name: bool = False
+    lock_description: bool = False
+    lock_image: bool = False
+    lock_parent: bool = False
+    hide_category_only: bool = False
+    hide_category_and_products: bool = False
 
 
 class CategoryCreate(CategoryBase):
@@ -172,6 +178,13 @@ class CategoryUpdate(BaseModel):
     description: Optional[str] = None
     sort_order: Optional[int] = None
     is_active: Optional[bool] = None
+    lock_name: Optional[bool] = None
+    lock_description: Optional[bool] = None
+    lock_image: Optional[bool] = None
+    lock_parent: Optional[bool] = None
+    hide_category_only: Optional[bool] = None
+    hide_category_and_products: Optional[bool] = None
+    parent_id: Optional[int] = None
 
 
 class CategoryResponse(CategoryBase):
@@ -204,6 +217,7 @@ class ProductSizeResponse(BaseModel):
     iiko_id: str
     name: str
     price: Decimal
+    weight_grams: Optional[int] = None
     is_default: bool
 
     model_config = ConfigDict(from_attributes=True)
@@ -225,6 +239,7 @@ class ProductModifierResponse(BaseModel):
     default_amount: int
     min_amount: int
     max_amount: int
+    is_visible: bool = True
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -275,6 +290,7 @@ class ProductBase(BaseModel):
     old_price: Optional[Decimal] = Field(None, ge=0)
     max_discount_percent: Optional[int] = Field(None, ge=0, le=100)
     bonus_accrual_percent: Optional[int] = Field(None, ge=0, le=100)
+    tags: Optional[str] = None
     stop_list_branch_ids: List[int] = []
     is_stopped: bool = False
     stopped_at: Optional[datetime] = None
@@ -304,6 +320,7 @@ class ProductUpdate(BaseModel):
     old_price: Optional[Decimal] = Field(None, ge=0)
     max_discount_percent: Optional[int] = Field(None, ge=0, le=100)
     bonus_accrual_percent: Optional[int] = Field(None, ge=0, le=100)
+    tags: Optional[str] = None
     stop_list_branch_ids: Optional[List[int]] = None
     is_stopped: Optional[bool] = None
     stopped_at: Optional[datetime] = None
@@ -336,6 +353,7 @@ class ProductResponse(BaseModel):
     old_price: Optional[Decimal] = None
     max_discount_percent: Optional[int] = None
     bonus_accrual_percent: Optional[int] = None
+    tags: Optional[str] = None
 
     # Стоп-листы (список ID филиалов где в стопе)
     stop_list_branch_ids: List[int] = []
@@ -370,6 +388,8 @@ class OrderItemCreate(BaseModel):
     """Позиция в новом заказе"""
     product_id: int
     quantity: int = Field(ge=1)
+    product_size_id: Optional[int] = None
+    modifiers: Optional[List[Dict[str, Any]]] = []
 
 
 class OrderItemResponse(BaseModel):
@@ -384,6 +404,10 @@ class OrderItemResponse(BaseModel):
     size_iiko_id: Optional[str] = None
     comment: Optional[str] = None
     modifiers: Optional[List[Dict[str, Any]]] = []
+    kitchen_status: Optional[str] = "pending"
+    kitchen_started_at: Optional[datetime] = None
+    kitchen_ready_at: Optional[datetime] = None
+    kitchen_zone_id: Optional[int] = None
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -443,6 +467,7 @@ class OrderResponse(BaseModel):
     payment_method: Optional[str] = None
     order_type: Optional[str] = None
     courier_name: Optional[str] = None
+    courier_user: Optional[Dict[str, Any]] = None
     delivery_zone: Optional[str] = None
     city: Optional[str] = None
     street: Optional[str] = None
@@ -456,6 +481,9 @@ class OrderResponse(BaseModel):
     spam_score: Optional[int] = None
     spam_info: Optional[str] = None
     comment: Optional[str] = None
+    address_comment: Optional[str] = None
+    additional_info: Optional[str] = None
+    other_info: Optional[str] = None
     cancellation_reason: Optional[str] = None
     cancelled_by: Optional[str] = None
     promo_code_id: Optional[int] = None
@@ -465,6 +493,8 @@ class OrderResponse(BaseModel):
     # Индикаторы клиента
     customer_is_new: bool = False
     customer_is_risk: bool = False
+    customer_social_channels: Optional[Dict[str, bool]] = None
+    status_notification: Optional[Dict[str, Any]] = None
 
     
     # Расширенные данные
@@ -484,11 +514,20 @@ class OrderResponse(BaseModel):
     order_items_details: Optional[List[Dict[str, Any]]] = None
     customer_info_details: Optional[Dict[str, Any]] = None
     status_history: Optional[List[Dict[str, Any]]] = None
-    discounts_details: Optional[Dict[str, Any]] = None
-    payments_details: Optional[Dict[str, Any]] = None
+    discounts_details: Optional[Any] = None
+    payments_details: Optional[Any] = None
     left_to_pay: Decimal = Decimal("0.00")
     change_indicators: Optional[Dict[str, Any]] = None
     acknowledged: bool = False
+    cooking_time_minutes: int = 0
+
+    # Статусы уведомлений курьера и обратной связи
+    courier_notification_status: Optional[str] = None
+    courier_accepted_at: Optional[datetime] = None
+    courier_accepted_source: Optional[str] = None
+    courier_read_at: Optional[datetime] = None
+    courier_notification_channel: Optional[str] = None
+    courier_last_message_text: Optional[str] = None
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -533,20 +572,28 @@ class IikoSettingsCreate(BaseModel):
     model_config = ConfigDict(extra='ignore')
     
     api_login: str = Field(max_length=500)
+    app_id: Optional[str] = None
+    client_secret: Optional[str] = None
     organization_id: Optional[str] = None
     external_menu_id: Optional[str] = None
     terminal_group_id: Optional[str] = None
     price_category_id: Optional[str] = None  # ИСПРАВЛЕНИЕ: поле отсутствовало в схеме
+    price_source: str = "category"
+
     payment_type_cash: Optional[str] = None
     payment_type_card: Optional[str] = None
     payment_type_online: Optional[str] = None
     payment_type_bonus: Optional[str] = None
+    payment_type_courier_cash: Optional[str] = None
+    payment_type_courier_card: Optional[str] = None
     bonus_limit_percent: int = Field(default=0, ge=0, le=100)
     discount_id: Optional[str] = None
     no_pass_promo: bool = False
     no_use_bonus: bool = False
     no_use_iiko_promo: bool = False
     use_v2_menu: bool = False
+    hide_empty_categories: bool = False
+    hide_stopped_products: bool = False
     fallback_email: Optional[str] = None
     fallback_telegram_id: Optional[str] = None
     webhook_url: Optional[str] = None
@@ -741,6 +788,7 @@ class CustomerBase(BaseModel):
     categories: Optional[str] = None
     wallet_balances: Optional[str] = None
     is_blocked: bool = False
+    max_user_id: Optional[str] = None
 
 class CustomerCreate(CustomerBase):
     pass
@@ -771,6 +819,7 @@ class CustomerUpdate(BaseModel):
     referrer: Optional[str] = None
     registration_source: Optional[str] = None
     registered_organization: Optional[str] = None
+    max_user_id: Optional[str] = None
 
     model_config = ConfigDict(populate_by_name=True)
 
@@ -832,6 +881,7 @@ class CustomerResponse(CustomerBase):
     is_new_guest: bool = True
     card_number: Optional[str] = None
     orders_history: Optional[List[dict]] = []
+    social_channels: Optional[dict] = None
     
     created_at: datetime
     updated_at: datetime
@@ -986,3 +1036,148 @@ class FunnelResponse(FunnelBase):
     created_at: datetime
     updated_at: datetime
     model_config = ConfigDict(from_attributes=True)
+
+
+# ============= Схемы закупа =============
+
+# --- Поставщики ---
+class SupplierBase(BaseModel):
+    name: str = Field(..., max_length=255)
+    phone: Optional[str] = Field(None, max_length=50)
+    email: Optional[str] = Field(None, max_length=100)
+    comment: Optional[str] = None
+    is_active: bool = True
+
+class SupplierCreate(SupplierBase):
+    pass
+
+class SupplierUpdate(BaseModel):
+    name: Optional[str] = Field(None, max_length=255)
+    phone: Optional[str] = Field(None, max_length=50)
+    email: Optional[str] = Field(None, max_length=100)
+    comment: Optional[str] = None
+    is_active: Optional[bool] = None
+
+class SupplierResponse(SupplierBase):
+    id: int
+    created_at: datetime
+    updated_at: datetime
+    model_config = ConfigDict(from_attributes=True)
+
+
+# --- Позиции закупа ---
+class PurchasePositionBase(BaseModel):
+    name: str = Field(..., max_length=255)
+    category: str = Field(..., max_length=50) # 'supply', 'shop', 'household'
+    subcategory: Optional[str] = Field(None, max_length=255)
+    unit: Optional[str] = "шт"
+    supplier_id: Optional[int] = None
+    is_active: bool = True
+
+class PurchasePositionCreate(PurchasePositionBase):
+    pass
+
+class PurchasePositionUpdate(BaseModel):
+    name: Optional[str] = Field(None, max_length=255)
+    category: Optional[str] = Field(None, max_length=50)
+    subcategory: Optional[str] = None
+    unit: Optional[str] = None
+    supplier_id: Optional[int] = None
+    is_active: Optional[bool] = None
+
+class PurchasePositionResponse(PurchasePositionBase):
+    id: int
+    created_at: datetime
+    updated_at: datetime
+    supplier: Optional[SupplierResponse] = None
+    model_config = ConfigDict(from_attributes=True)
+
+
+# --- Элементы списка закупа ---
+class PurchaseListItemBase(BaseModel):
+    position_id: int
+    quantity: float = 0.0
+    comment: Optional[str] = None
+    is_urgent: bool = False
+    is_bought: bool = False
+
+class PurchaseListItemCreate(PurchaseListItemBase):
+    pass
+
+class PurchaseListItemUpdate(BaseModel):
+    quantity: Optional[float] = None
+    comment: Optional[str] = None
+    is_urgent: Optional[bool] = None
+    is_bought: Optional[bool] = None
+
+class PurchaseListItemResponse(PurchaseListItemBase):
+    id: int
+    list_id: int
+    created_at: datetime
+    updated_at: datetime
+    position: Optional[PurchasePositionResponse] = None
+    model_config = ConfigDict(from_attributes=True)
+
+
+# --- Списки закупа ---
+class PurchaseListBase(BaseModel):
+    name: str = Field(..., max_length=255)
+    category: str = Field(..., max_length=50) # 'supply', 'shop', 'household'
+    date: date
+    status: str = "draft" # 'draft', 'sent'
+
+class PurchaseListCreate(PurchaseListBase):
+    pass
+
+class PurchaseListUpdate(BaseModel):
+    name: Optional[str] = Field(None, max_length=255)
+    category: Optional[str] = Field(None, max_length=50)
+    date: Optional[date] = None
+    status: Optional[str] = None
+
+class UserShortResponse(BaseModel):
+    id: int
+    username: str
+    full_name: Optional[str] = None
+    model_config = ConfigDict(from_attributes=True)
+
+class PurchaseListResponse(PurchaseListBase):
+    id: int
+    created_at: datetime
+    updated_at: datetime
+    created_by_id: Optional[int] = None
+    updated_by_id: Optional[int] = None
+    created_by: Optional[UserShortResponse] = None
+    updated_by: Optional[UserShortResponse] = None
+    items: List[PurchaseListItemResponse] = []
+    items_count: Optional[int] = None # Вычисляемое на лету
+    model_config = ConfigDict(from_attributes=True)
+
+class PurchaseListChangeResponse(BaseModel):
+    id: int
+    list_id: int
+    user_id: Optional[int] = None
+    action_type: str
+    details: Optional[str] = None
+    created_at: datetime
+    user: Optional[UserShortResponse] = None
+    model_config = ConfigDict(from_attributes=True)
+
+
+# --- Подкатегории закупа ---
+class PurchaseSubcategoryBase(BaseModel):
+    name: str = Field(..., max_length=255)
+
+class PurchaseSubcategoryCreate(PurchaseSubcategoryBase):
+    pass
+
+class PurchaseSubcategoryUpdate(BaseModel):
+    name: Optional[str] = Field(None, max_length=255)
+
+class PurchaseSubcategoryResponse(PurchaseSubcategoryBase):
+    id: int
+    created_at: datetime
+    model_config = ConfigDict(from_attributes=True)
+
+
+

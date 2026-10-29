@@ -9,6 +9,7 @@ class VkWebhookLog(SQLModel, table=True):
 
     id: Optional[int] = Field(default=None, primary_key=True)
     event_type: str = Field(index=True, description="Тип события VK (например, message_new, confirmation)")
+    vk_group_id: Optional[int] = Field(default=None, index=True, description="ID группы VK")
     payload: Dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON), description="Полный JSON события")
     created_at: datetime = Field(
         default_factory=lambda: datetime.now(timezone.utc), 

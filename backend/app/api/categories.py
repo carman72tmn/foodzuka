@@ -11,6 +11,38 @@ from app.schemas import CategoryCreate, CategoryUpdate, CategoryResponse
 router = APIRouter(prefix="/categories", tags=["Categories"])
 
 
+def filter_empty_categories(categories_list, session: Session):
+    from app.models.iiko_settings import IikoSettings
+    from app.models.product import Product
+    
+    settings = session.exec(select(IikoSettings)).first()
+    if not settings or not settings.hide_empty_categories:
+        return categories_list
+        
+    prod_query = select(Product).where(Product.is_available == True)
+    if settings.hide_stopped_products:
+        prod_query = prod_query.where(Product.is_stopped == False)
+    available_products = session.exec(prod_query).all()
+    
+    if settings.hide_stopped_products:
+        available_products = [p for p in available_products if not p.stop_list_branch_ids]
+        
+    active_category_ids = {p.category_id for p in available_products if p.category_id}
+    
+    added = True
+    cat_by_id = {c.id: c for c in categories_list}
+    while added:
+        added = False
+        current_ids = list(active_category_ids)
+        for cid in current_ids:
+            cat = cat_by_id.get(cid)
+            if cat and cat.parent_id and cat.parent_id not in active_category_ids:
+                active_category_ids.add(cat.parent_id)
+                added = True
+                
+    return [c for c in categories_list if c.id in active_category_ids]
+
+
 @router.get("/", response_model=List[CategoryResponse])
 def get_categories(
     skip: int = 0,
@@ -20,10 +52,6 @@ def get_categories(
 ):
     """
     Получить список всех категорий
-
-    - **skip**: Количество пропускаемых записей
-    - **limit**: Максимальное количество возвращаемых записей
-    - **is_active**: Фильтр по активности (опционально)
     """
     query = select(Category).order_by(Category.sort_order, Category.name).offset(skip).limit(limit)
 
@@ -31,7 +59,7 @@ def get_categories(
         query = query.where(Category.is_active == is_active)
 
     categories = session.exec(query).all()
-    return categories
+    return filter_empty_categories(categories, session)
 
 
 @router.get("/tree", response_model=List[CategoryResponse])
@@ -39,7 +67,7 @@ def get_categories_tree(session: Session = Depends(get_session)):
     """Получить все категории с данными для дерева"""
     query = select(Category).order_by(Category.sort_order, Category.name)
     categories = session.exec(query).all()
-    return categories
+    return filter_empty_categories(categories, session)
 
 
 @router.post("/sync-from-iiko")
@@ -48,6 +76,35 @@ async def sync_categories_from_iiko(session: Session = Depends(get_session)):
     from app.services.iiko_sync_service import iiko_sync_service
     result = await iiko_sync_service.sync_categories_only(session)
     return result
+
+
+@router.delete("/empty", status_code=status.HTTP_200_OK)
+def delete_empty_categories(session: Session = Depends(get_session)):
+    """Удалить все категории, в которых нет товаров и нет подкатегорий"""
+    from app.models.product import Product
+    
+    deleted_total = 0
+    while True:
+        # Находим id категорий, у которых есть товары
+        subquery_products = select(Product.category_id).where(Product.category_id != None).distinct()
+        # Находим id родительских категорий
+        subquery_parents = select(Category.parent_id).where(Category.parent_id != None).distinct()
+        
+        # Выбираем категории, id которых нет в товарах и нет в родительских связях
+        query = select(Category).where(
+            Category.id.not_in(subquery_products),
+            Category.id.not_in(subquery_parents)
+        )
+        empty_cats = session.exec(query).all()
+        if not empty_cats:
+            break
+            
+        for cat in empty_cats:
+            session.delete(cat)
+            deleted_total += 1
+        session.commit()
+        
+    return {"deleted_count": deleted_total}
 
 
 @router.get("/{category_id}", response_model=CategoryResponse)
@@ -131,5 +188,13 @@ def delete_category(category_id: int, session: Session = Depends(get_session)):
             detail=f"Category with id {category_id} not found"
         )
 
+    from sqlalchemy import text
+    # 1. Обнуляем parent_id у подкатегорий
+    session.exec(text("UPDATE categories SET parent_id = NULL WHERE parent_id = :cat_id").bindparams(cat_id=category_id))
+    
+    # 2. Обнуляем category_id у товаров этой категории
+    session.exec(text("UPDATE products SET category_id = NULL WHERE category_id = :cat_id").bindparams(cat_id=category_id))
+
     session.delete(category)
     session.commit()
+    return None

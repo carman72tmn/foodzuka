@@ -17,6 +17,13 @@
           </VBtn>
         </div>
       </VCardTitle>
+      <VCardText v-if="selectedPeriod === 'custom'">
+        <VRow>
+          <VCol cols="12" sm="5"><VTextField v-model="customFrom" type="date" label="От" density="compact" /></VCol>
+          <VCol cols="12" sm="5"><VTextField v-model="customTo" type="date" label="До" density="compact" /></VCol>
+          <VCol cols="12" sm="2"><VBtn color="primary" block @click="fetchReport(true)">Ок</VBtn></VCol>
+        </VRow>
+      </VCardText>
     </VCard>
 
     <VCard>
@@ -31,8 +38,11 @@
 
 <script setup>
 import { ref, onMounted } from 'vue'
+import { getAuthHeaders } from '@/utils/auth'
 
 const selectedPeriod = ref('month')
+const customFrom = ref('')
+const customTo = ref('')
 const loading = ref(false)
 const reportData = ref([])
 
@@ -51,7 +61,13 @@ async function fetchReport(forceRefresh = false) {
   loading.value = true
   try {
     const params = new URLSearchParams({ period: selectedPeriod.value, refresh: forceRefresh })
-    const resp = await fetch(`/api/v1/reports/olap/clients?${params}`)
+    if (selectedPeriod.value === 'custom') {
+      params.set('date_from', customFrom.value)
+      params.set('date_to', customTo.value)
+    }
+    const resp = await fetch(`/api/v1/reports/olap/clients?${params}`, {
+      headers: getAuthHeaders()
+    })
     const json = await resp.json()
     reportData.value = json.data || []
   } catch (e) {

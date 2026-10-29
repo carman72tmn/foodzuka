@@ -1,5 +1,5 @@
 import logging
-from typing import Generator
+from typing import Generator, Optional
 from fastapi import Depends, HTTPException, status, Header
 from fastapi.security import OAuth2PasswordBearer
 from jose import jwt, JWTError
@@ -122,6 +122,39 @@ def require_permission(permission_code: str):
         return current_user
     
     return _permission_dependency
+
+
+def require_any_permission(*permission_codes: str):
+    """
+    Зависимость для проверки наличия хотя бы одного из указанных прав у пользователя.
+    Суперпользователь (is_superuser=True) всегда имеет доступ.
+    """
+    def _permission_dependency(
+        current_user: User = Depends(get_current_user),
+    ) -> User:
+        if current_user.is_superuser:
+            return current_user
+        
+        if not current_user.role:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Пользователю не назначена роль"
+            )
+        
+        # Проверяем наличие хотя бы одного права из списка
+        has_permission = any(p.code in permission_codes for p in current_user.role.permissions)
+        
+        if not has_permission:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"Недостаточно прав (требуется одно из: {', '.join(permission_codes)})"
+            )
+            
+        return current_user
+    
+    return _permission_dependency
+
+
 def get_user_from_token(db: Session, token: str) -> User:
     """Получение пользователя из токена (для WebSocket)"""
     try:
@@ -146,3 +179,23 @@ def get_user_from_token(db: Session, token: str) -> User:
     if not user or not user.is_active:
         raise ValueError("User not found or inactive")
     return user
+
+
+def check_is_courier(user: User, db: Optional[Session] = None) -> bool:
+    """Определяет, является ли пользователь курьером"""
+    if not user or user.is_superuser:
+        return False
+    if user.role:
+        if user.role.code and user.role.code.upper() in ("CUR", "COURIER"):
+            return True
+        if any(k in (user.role.name or "").lower() for k in ["курьер", "courier"]):
+            return True
+    if user.employee and (user.employee.is_courier or any(k in (user.employee.role or "").lower() for k in ["курьер", "courier"])):
+        return True
+    if user.iiko_id and db:
+        from app.models.employee import Employee
+        emp = db.exec(select(Employee).where(Employee.iiko_id == str(user.iiko_id))).first()
+        if emp and (emp.is_courier or any(k in (emp.role or "").lower() for k in ["курьер", "courier"])):
+            return True
+    return False
+

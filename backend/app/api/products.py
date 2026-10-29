@@ -39,7 +39,17 @@ def get_products(
     if is_available is not None:
         query = query.where(Product.is_available == is_available)
 
+    from app.models.iiko_settings import IikoSettings
+    settings = session.exec(select(IikoSettings)).first()
+    
+    if settings and settings.hide_stopped_products:
+        query = query.where(Product.is_stopped == False)
+
     products = session.exec(query).all()
+    
+    if settings and settings.hide_stopped_products:
+        products = [p for p in products if not p.stop_list_branch_ids]
+        
     return products
 
 
@@ -83,6 +93,7 @@ def get_all_modifiers(session: Session = Depends(get_session)):
                     "min_amount": m.min_amount,
                     "max_amount": m.max_amount,
                     "default_amount": m.default_amount,
+                    "is_visible": getattr(m, "is_visible", True),
                 }
                 for m in g.modifiers
             ]
@@ -168,6 +179,30 @@ def update_product(
     session.commit()
     session.refresh(product)
     return product
+
+
+@router.patch("/modifiers/{modifier_id}", response_model=dict, status_code=status.HTTP_200_OK)
+def update_product_modifier(
+    modifier_id: int,
+    visible_data: dict,
+    session: Session = Depends(get_session)
+):
+    """Обновить видимость конкретного модификатора"""
+    from app.models.product import ProductModifier
+    modifier = session.get(ProductModifier, modifier_id)
+    if not modifier:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Modifier with id {modifier_id} not found"
+        )
+    
+    if "is_visible" in visible_data:
+        modifier.is_visible = bool(visible_data["is_visible"])
+        session.add(modifier)
+        session.commit()
+        session.refresh(modifier)
+    
+    return {"id": modifier.id, "is_visible": modifier.is_visible}
 
 
 @router.delete("/{product_id}", status_code=status.HTTP_204_NO_CONTENT)

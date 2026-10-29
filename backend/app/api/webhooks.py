@@ -1,9 +1,10 @@
 from fastapi import APIRouter, Depends, HTTPException, Header, Request, BackgroundTasks
 from sqlmodel import Session, select
 from app.core.database import get_session, SessionLocal
-from app.models import IikoSettings, IikoWebhookEvent
+from app.models import IikoSettings, IikoWebhookEvent, SenlerSettings, SenlerSubscriber
 from app.services.iiko_sync_service import iiko_sync_service
 import logging
+from typing import Optional
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -24,53 +25,88 @@ async def process_stop_list_update():
 
 
 async def process_courier_assigned(event_info: dict):
-    """Обновить courier_name в заказе и создать/обновить запись в courier_orders"""
+    """Обновить courier_name в заказе, сбросить статус подтверждения при переназначении, уведомить курьеров и сотрудников"""
+    import json
     from app.models.order import Order
     from app.models.employee import Employee, CourierOrder
+    from app.models.user import User
+    from app.api.chat import manager
     from datetime import datetime, timezone
     from sqlalchemy.orm.attributes import flag_modified
 
     order_id = event_info.get("id") or (event_info.get("order") or {}).get("id")
-    courier_info = event_info.get("courierInfo") or {}
-    c_obj = courier_info.get("courier") or {}
-    fn = (c_obj.get("firstName") or c_obj.get("name") or "").strip()
-    ln = (c_obj.get("lastName") or "").strip()
-    courier_name = f"{fn} {ln}".strip() or courier_info.get("courierName") or ""
-    courier_iiko_id = c_obj.get("id")
+    courier_info = event_info.get("courierInfo") or (event_info.get("order") or {}).get("courierInfo") or {}
+    c_obj = courier_info.get("courier") or {} if isinstance(courier_info, dict) else {}
+    
+    courier_iiko_id = c_obj.get("id") if isinstance(c_obj, dict) else None
+    fn = (c_obj.get("firstName") or c_obj.get("name") or "").strip() if isinstance(c_obj, dict) else ""
+    ln = (c_obj.get("lastName") or "").strip() if isinstance(c_obj, dict) else ""
+    courier_name = f"{fn} {ln}".strip() or (courier_info.get("courierName") if isinstance(courier_info, dict) else "") or ""
+    courier_name = courier_name.replace(" None", "").strip()
 
-    if not order_id or not courier_name:
-        logger.warning(f"Skipping courier assignment: missing order_id or courier_name. Payload: {event_info}")
+    if not order_id:
+        logger.warning(f"Skipping courier assignment: missing order_id. Payload: {event_info}")
         return
 
     with SessionLocal() as session:
         try:
             order = session.exec(select(Order).where(Order.iiko_order_id == order_id)).first()
-            if order:
-                if order.courier_name != courier_name:
-                    order.courier_name = courier_name
-                    order.updated_at = datetime.now(timezone.utc)
-                    session.add(order)
+            if not order:
+                logger.warning(f"Order {order_id} not found in DB during courier assignment. Payload: {event_info}")
+                return
 
-            if courier_iiko_id and order:
-                emp = session.exec(select(Employee).where(Employee.iiko_id == courier_iiko_id)).first()
+            emp = None
+            if courier_iiko_id:
+                emp = session.exec(select(Employee).where(Employee.iiko_id == str(courier_iiko_id))).first()
+            if not emp and courier_name:
+                emp = session.exec(select(Employee).where(Employee.name == courier_name)).first()
+                if not emp:
+                    # Поиск по вхождению слов имени
+                    target_words = {w for w in courier_name.lower().split() if len(w) > 2 and w not in ["курьер", "courier"]}
+                    if target_words:
+                        all_emps = session.exec(select(Employee)).all()
+                        for e_item in all_emps:
+                            e_words = {w for w in (e_item.name or "").lower().split() if len(w) > 2}
+                            if target_words & e_words:
+                                emp = e_item
+                                break
+
+            # Если сотрудник найден в справочнике, берем его официальное имя
+            canonical_courier_name = emp.name if emp else (courier_name or "Не назначен")
+            old_courier = order.courier_name or "Не назначен"
+            is_courier_changed = (old_courier != canonical_courier_name)
+            is_reassigned = bool(old_courier != "Не назначен" and canonical_courier_name != "Не назначен" and is_courier_changed)
+            is_unassigned = bool(old_courier != "Не назначен" and canonical_courier_name == "Не назначен")
+            is_assigned = bool(canonical_courier_name != "Не назначен")
+
+            ext_num = str(getattr(order, 'external_number', order.id) or order.id)
+
+            if is_courier_changed:
+                logger.info(f"Order #{ext_num} courier changed: '{old_courier}' -> '{canonical_courier_name}' (reassigned={is_reassigned}, unassigned={is_unassigned})")
+                order.courier_name = canonical_courier_name
+                order.updated_at = datetime.now(timezone.utc)
+                
+                # При смене курьера ОБЯЗАТЕЛЬНО сбрасываем статус подтверждения
+                order.courier_notification_status = None
+                order.courier_accepted_at = None
+                order.courier_accepted_source = None
+                order.courier_read_at = None
+                session.add(order)
+
+                # Обновление записи в CourierOrder
+                iiko_uid = f"wh_{order_id}"
+                existing_co = session.exec(select(CourierOrder).where(CourierOrder.iiko_id == iiko_uid)).first()
                 if emp:
-                    # Используем уникальный ключ для записи о курьере в рамках заказа
-                    iiko_uid = f"wh_{order_id}"
-                    existing_co = session.exec(
-                        select(CourierOrder).where(CourierOrder.iiko_id == iiko_uid)
-                    ).first()
-                    
                     if existing_co:
-                        # Если курьер изменился - обновляем запись
                         if existing_co.employee_id != emp.id:
-                            logger.info(f"Updating courier for order {order_id}: {existing_co.employee_id} -> {emp.id}")
+                            logger.info(f"Updating CourierOrder for order {order_id}: {existing_co.employee_id} -> {emp.id}")
                             existing_co.employee_id = emp.id
                             existing_co.updated_at = datetime.now(timezone.utc)
                             session.add(existing_co)
                     else:
                         co = CourierOrder(
                             iiko_id=iiko_uid,
-                            order_num=str(getattr(order, 'external_number', order_id) or order_id)[:20],
+                            order_num=ext_num[:20],
                             employee_id=emp.id,
                             address=getattr(order, 'delivery_address', None),
                             delivery_zone=getattr(order, 'delivery_zone', None),
@@ -79,18 +115,152 @@ async def process_courier_assigned(event_info: dict):
                             updated_at=datetime.now(timezone.utc)
                         )
                         session.add(co)
+                elif is_unassigned and existing_co:
+                    session.delete(existing_co)
 
-            session.commit()
-            logger.info(f"Courier processed successfully: order={order_id}, courier={courier_name}")
-            
-            # Отправка уведомления курьеру в VK
-            if order:
+                session.commit()
+                session.refresh(order)
+
+                # 1. WebSocket Broadcast в админку (/orders) и панель курьера (/pers/courier)
+                now_ts = int(datetime.now(timezone.utc).timestamp() * 1000)
+                ws_order_changed = {
+                    "type": "order_changed",
+                    "order_id": order.id,
+                    "order_number": ext_num,
+                    "status": order.status,
+                    "customer_name": order.customer_name or "Гость",
+                    "order_type": order.order_type,
+                    "courier_name": order.courier_name,
+                    "courier_notification_status": None,
+                    "timestamp": now_ts
+                }
+                ws_courier_status = {
+                    "type": "courier_status_changed",
+                    "order_id": order.id,
+                    "order_num": ext_num,
+                    "courier_name": order.courier_name,
+                    "courier_notification_status": None,
+                    "status": "reassigned" if is_reassigned else ("unassigned" if is_unassigned else "assigned"),
+                    "timestamp": now_ts
+                }
                 try:
-                    await iiko_sync_service.send_order_notification(order, "courier_assigned", session=session)
-                except Exception as vk_err:
-                    logger.error(f"Failed to send courier notification: {vk_err}")
+                    await manager.broadcast(ws_order_changed)
+                    await manager.broadcast(ws_courier_status)
+                except Exception as ws_err:
+                    logger.warning(f"Failed to broadcast websocket on courier change: {ws_err}")
+
+                # 2. Персональные WebSocket и Push новому курьеру
+                courier_user = None
+                if emp and emp.iiko_id:
+                    courier_user = session.exec(select(User).where(User.iiko_id == str(emp.iiko_id))).first()
+                if not courier_user and canonical_courier_name != "Не назначен":
+                    courier_user = session.exec(select(User).where(User.full_name == canonical_courier_name)).first()
+
+                if courier_user:
+                    try:
+                        ws_assigned = {
+                            "type": "delivery_assigned",
+                            "order_id": order.id,
+                            "order_number": ext_num,
+                            "address": order.delivery_address,
+                            "amount": float(order.total_with_discount or order.total_amount or 0),
+                            "target_user_id": courier_user.id
+                        }
+                        await manager.send_personal_message(json.dumps(ws_assigned), courier_user.id)
+                        await iiko_sync_service.send_admin_push_notification(
+                            session=session,
+                            title="Вам назначена доставка!",
+                            body=f"Адрес: {order.delivery_address} | Заказ #{ext_num}",
+                            url="/pers/courier",
+                            event_type="delivery_assigned",
+                            target_user_id=courier_user.id,
+                            tag=f"assigned-{order.id}"
+                        )
+                        await iiko_sync_service.send_courier_notification(
+                            session=session,
+                            courier_user_id=courier_user.id,
+                            event_type="courier_order_assigned",
+                            title="Назначен заказ на доставку",
+                            body=f"Заказ #{ext_num} на сумму {order.total_with_discount or order.total_amount} ₽. Адрес: {order.delivery_address}",
+                            order_id=order.id,
+                            order_number=ext_num,
+                            extra_data={"order_id": order.id, "order_number": ext_num, "amount": float(order.total_with_discount or order.total_amount or 0), "address": order.delivery_address},
+                            order=order
+                        )
+                    except Exception as c_err:
+                        logger.error(f"Error notifying new courier user: {c_err}")
+
+                # 3. Персональные WebSocket и Push старому курьеру о снятии
+                if is_reassigned or is_unassigned:
+                    try:
+                        old_emp = session.exec(select(Employee).where(Employee.name == old_courier)).first()
+                        old_user = None
+                        if old_emp and old_emp.iiko_id:
+                            old_user = session.exec(select(User).where(User.iiko_id == str(old_emp.iiko_id))).first()
+                        if not old_user and old_courier != "Не назначен":
+                            old_user = session.exec(select(User).where(User.full_name == old_courier)).first()
+
+                        if old_user:
+                            ws_unassigned = {
+                                "type": "delivery_unassigned",
+                                "order_id": order.id,
+                                "order_number": ext_num,
+                                "total_sum": float(order.total_with_discount or order.total_amount or 0),
+                                "address": order.delivery_address,
+                                "customer_name": order.customer_name or "Гость"
+                            }
+                            await manager.send_personal_message(json.dumps(ws_unassigned), old_user.id)
+                            await iiko_sync_service.send_admin_push_notification(
+                                session=session,
+                                title="Доставка отменена",
+                                body=f"С вас снята доставка заказа #{ext_num}",
+                                url="/pers/courier",
+                                event_type="delivery_unassigned",
+                                target_user_id=old_user.id,
+                                tag=f"unassigned-{order.id}"
+                            )
+                            await iiko_sync_service.send_courier_notification(
+                                session=session,
+                                courier_user_id=old_user.id,
+                                event_type="courier_unassigned",
+                                title="Заказ снят с доставки",
+                                body=f"Заказ #{ext_num} передан другому курьеру или отменен",
+                                order_id=order.id,
+                                order_number=ext_num,
+                                extra_data={"order_id": order.id, "order_number": ext_num}
+                            )
+                    except Exception as un_err:
+                        logger.error(f"Error notifying old courier user: {un_err}")
+
+                # 4. Системные уведомления (VK / TG / MAX) курьерам и сотрудникам
+                if is_assigned:
+                    try:
+                        await iiko_sync_service.send_order_notification(
+                            order,
+                            "courier_assigned",
+                            session=session,
+                            is_reassigned=is_reassigned,
+                            old_courier=old_courier,
+                            new_courier=canonical_courier_name
+                        )
+                        # При переназначении курьера повторно отправляем карточку заказа новому курьеру
+                        if is_reassigned:
+                            logger.info(f"Order #{ext_num} re-sending order_new to new courier '{canonical_courier_name}'")
+                            await iiko_sync_service.send_order_notification(
+                                order,
+                                "order_new",
+                                session=session,
+                                is_reassigned=True,
+                                old_courier=old_courier,
+                                new_courier=canonical_courier_name
+                            )
+                    except Exception as vk_err:
+                        logger.error(f"Failed to send courier notifications: {vk_err}")
+            else:
+                logger.info(f"Courier unchanged for order #{ext_num}: '{canonical_courier_name}'")
+
         except Exception as e:
-            logger.error(f"Error processing courier assigned: {e}. Payload: {event_info}")
+            logger.error(f"Error processing courier assigned: {e}. Payload: {event_info}", exc_info=True)
             session.rollback()
 
 
@@ -164,12 +334,20 @@ async def iiko_webhook(
             org_id = event.get("organizationId")
 
             if order_id and org_id and background_tasks:
-                # Всегда запрашиваем полные данные через API
-                logger.info(f"Triggering background API sync for order {order_id} ({event_type})")
-                background_tasks.add_task(run_sync_with_session, iiko_sync_service.sync_order_by_id, order_id, org_id)
+                # Если в вебхуке уже есть полный объект заказа, обрабатываем его напрямую за 0 мс без риска таймаута /by_id
+                if order_data and isinstance(order_data, dict) and order_data.get("status"):
+                    logger.info(f"Processing webhook payload directly for order {order_id} ({event_type})")
+                    background_tasks.add_task(run_sync_with_session, iiko_sync_service.process_iiko_order, event_info, org_id)
+                else:
+                    logger.info(f"Triggering background API sync for order {order_id} ({event_type})")
+                    background_tasks.add_task(run_sync_with_session, iiko_sync_service.sync_order_by_id, order_id, org_id)
 
-                # Если это назначение курьера, дополнительно обрабатываем быстрый лог
-                if event_type == "CourierAssigned":
+                # Если это назначение курьера или обновление заказа с информацией о курьере, запускаем быстрый процессинг
+                has_courier_info = bool(
+                    event_info.get("courierInfo") or 
+                    (order_data and isinstance(order_data, dict) and order_data.get("courierInfo"))
+                )
+                if event_type == "CourierAssigned" or has_courier_info:
                     background_tasks.add_task(process_courier_assigned, event_info)
 
                 log_entry.processed = True
@@ -190,3 +368,134 @@ async def iiko_webhook(
             pass
 
     return {"status": "ok", "ids": processed_ids}
+
+
+@router.post("/senler")
+async def senler_webhook(
+    request: Request,
+    secret: Optional[str] = None,
+    session: Session = Depends(get_session)
+):
+    """
+    Прием вебхуков от сервиса рассылок Senler
+    URL: /api/v1/webhooks/senler
+    """
+    settings = session.exec(select(SenlerSettings)).first()
+    if not settings or not settings.is_active:
+        logger.warning("Senler webhook received but integration is inactive or not configured")
+        raise HTTPException(status_code=400, detail="Senler integration inactive")
+
+    # Проверка секретного ключа
+    if settings.secret_key and secret != settings.secret_key:
+        logger.warning(f"Senler webhook unauthorized attempt: invalid secret '{secret}'")
+        raise HTTPException(status_code=401, detail="Invalid secret key")
+
+    try:
+        payload = await request.json()
+        logger.info(f"Incoming Senler Webhook Payload: {payload}")
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON payload")
+
+    # Парсинг полей из payload Senler
+    # Структура по умолчанию в Senler содержит: action/event, user_id/vk_user_id, subscription_id
+    vk_user_id = payload.get("vk_user_id") or payload.get("user_id") or (payload.get("object", {})).get("vk_user_id")
+    if not vk_user_id:
+        logger.warning(f"Senler webhook skipped: vk_user_id not found in payload: {payload}")
+        return {"status": "ignored", "reason": "vk_user_id_missing"}
+
+    # Преобразуем vk_user_id в int
+    try:
+        vk_user_id = int(vk_user_id)
+    except (ValueError, TypeError):
+        logger.warning(f"Senler webhook: invalid vk_user_id format '{vk_user_id}'")
+        return {"status": "error", "reason": "invalid_vk_user_id_format"}
+
+    action = payload.get("action") or payload.get("event") or (payload.get("object", {})).get("action")
+    subscription_id = payload.get("subscription_id") or (payload.get("object", {})).get("subscription_id")
+    
+    first_name = payload.get("first_name") or (payload.get("object", {})).get("first_name")
+    last_name = payload.get("last_name") or (payload.get("object", {})).get("last_name")
+    
+    utm_tags = payload.get("utms") or payload.get("utm") or (payload.get("object", {}).get("utms")) or {}
+    user_vars = payload.get("vars") or (payload.get("object", {}).get("vars")) or {}
+
+    # Поиск существующего подписчика
+    statement = select(SenlerSubscriber).where(SenlerSubscriber.vk_user_id == vk_user_id)
+    subscriber = session.exec(statement).first()
+
+    from app.core.datetime_utils import utc_now
+    now = utc_now()
+
+    if action in ["subscribe", "subscription_add", "user_add"]:
+        # Логика подписки
+        group_ids = []
+        if subscriber and subscriber.group_ids:
+            group_ids = list(subscriber.group_ids)
+            
+        if subscription_id is not None:
+            try:
+                sub_id = int(subscription_id)
+                if sub_id not in group_ids:
+                    group_ids.append(sub_id)
+            except (ValueError, TypeError):
+                pass
+                
+        if not subscriber:
+            subscriber = SenlerSubscriber(
+                vk_user_id=vk_user_id,
+                first_name=first_name,
+                last_name=last_name,
+                is_subscribed=True,
+                subscribe_date=now,
+                group_ids=group_ids,
+                utm_tags=utm_tags,
+                user_vars=user_vars
+            )
+        else:
+            subscriber.is_subscribed = True
+            subscriber.subscribe_date = now
+            subscriber.unsubscribe_date = None
+            subscriber.group_ids = group_ids
+            if first_name:
+                subscriber.first_name = first_name
+            if last_name:
+                subscriber.last_name = last_name
+            if utm_tags:
+                subscriber.utm_tags = utm_tags
+            if user_vars:
+                subscriber.user_vars = user_vars
+            subscriber.updated_at = now
+            
+        session.add(subscriber)
+        logger.info(f"Senler Webhook: Subscriber {vk_user_id} subscribed to group {subscription_id}")
+
+    elif action in ["unsubscribe", "subscription_remove", "user_remove"]:
+        # Логика отписки
+        if subscriber:
+            group_ids = list(subscriber.group_ids) if subscriber.group_ids else []
+            if subscription_id is not None:
+                try:
+                    sub_id = int(subscription_id)
+                    if sub_id in group_ids:
+                        group_ids.remove(sub_id)
+                except (ValueError, TypeError):
+                    pass
+            
+            subscriber.group_ids = group_ids
+            
+            # Если отписался от конкретной группы, но состоит в других, он все еще активный подписчик.
+            # Если отписался от всего или групп не осталось:
+            if not group_ids or subscription_id is None:
+                subscriber.is_subscribed = False
+                subscriber.unsubscribe_date = now
+                logger.info(f"Senler Webhook: Subscriber {vk_user_id} unsubscribed completely")
+            else:
+                logger.info(f"Senler Webhook: Subscriber {vk_user_id} unsubscribed from group {subscription_id}, remains in {group_ids}")
+                
+            subscriber.updated_at = now
+            session.add(subscriber)
+        else:
+            logger.info(f"Senler Webhook: Unsubscribe received for unknown subscriber {vk_user_id}, ignoring")
+
+    session.commit()
+    return {"status": "ok"}

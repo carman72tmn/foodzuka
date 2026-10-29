@@ -1,114 +1,108 @@
 <script setup>
-import chartInfo from '@images/cards/chart-info.png'
-import creditCardSuccess from '@images/cards/credit-card-success.png'
-import creditCardWarning from '@images/cards/credit-card-warning.png'
-import paypalError from '@images/cards/paypal-error.png'
-import walletPrimary from '@images/cards/wallet-primary.png'
+const props = defineProps({
+  transactions: {
+    type: Array,
+    default: () => [],
+  },
+})
 
-const transactions = [
-  {
-    amount: +82.6,
-    paymentMethod: 'PayPal',
-    description: 'Перевод средств',
-    icon: paypalError,
-    color: 'error',
-  },
-  {
-    paymentMethod: 'Кошелек',
-    amount: +270.69,
-    description: 'Обед в МакД',
-    icon: walletPrimary,
-    color: 'primary',
-  },
-  {
-    amount: +637.91,
-    paymentMethod: 'Перевод',
-    description: 'Возврат средств',
-    icon: chartInfo,
-    color: 'info',
-  },
-  {
-    paymentMethod: 'Кредитная карта',
-    amount: -838.71,
-    description: 'Заказ еды',
-    icon: creditCardSuccess,
-    color: 'success',
-  },
-  {
-    paymentMethod: 'Кошелек',
-    amount: +203.33,
-    description: 'Кофе Старбакс',
-    icon: walletPrimary,
-    color: 'primary',
-  },
-  {
-    paymentMethod: 'Mastercard',
-    amount: -92.45,
-    description: 'Заказ еды',
-    icon: creditCardWarning,
-    color: 'warning',
-  },
-]
+function getPaymentIcon(method) {
+  const m = (method || '').toLowerCase()
+  if (m.includes('t bank') || m.includes('т-банк') || m.includes('карт')) return 'bx-credit-card'
+  if (m.includes('наличн')) return 'bx-money'
+  return 'bx-wallet'
+}
 
-const moreList = [
-  {
-    title: 'Поделиться',
-    value: 'Share',
-  },
-  {
-    title: 'Обновить',
-    value: 'Refresh',
-  },
-  {
-    title: 'Изменить',
-    value: 'Update',
-  },
-]
+function getPaymentColor(method) {
+  const m = (method || '').toLowerCase()
+  if (m.includes('t bank') || m.includes('т-банк')) return 'primary'
+  if (m.includes('наличн')) return 'warning'
+  return 'info'
+}
+
+function getStatusColor(status) {
+  const s = (status || '').toLowerCase()
+  if (s === 'delivered' || s === 'closed') return 'success'
+  if (s === 'delivering') return 'info'
+  if (s === 'cooking' || s === 'assembling' || s === 'preparing') return 'warning'
+  if (s === 'cancelled') return 'error'
+  return 'secondary'
+}
 </script>
 
 <template>
-  <VCard title="Транзакции">
+  <VCard title="Последние заказы">
+    <template #subtitle>
+      <span class="text-caption">Свежие транзакции ресторана</span>
+    </template>
+
     <template #append>
-      <MoreBtn :menu-list="moreList" />
+      <VBtn
+        variant="text"
+        size="small"
+        to="/orders"
+        color="primary"
+      >
+        Все заказы
+      </VBtn>
     </template>
 
     <VCardText>
-      <VList class="card-list">
+      <VList v-if="props.transactions.length" class="card-list">
         <VListItem
-          v-for="item in transactions"
-          :key="item.paymentMethod"
+          v-for="item in props.transactions"
+          :key="item.id"
+          :to="`/orders`"
+          class="px-1 py-1"
         >
           <template #prepend>
             <VAvatar
               rounded
               variant="tonal"
-              :color="item.color"
-              :image="item.icon"
-              size="40"
-            />
+              :color="getPaymentColor(item.payment_method)"
+              size="38"
+            >
+              <VIcon :icon="getPaymentIcon(item.payment_method)" size="20" />
+            </VAvatar>
           </template>
 
-          <VListItemSubtitle>
-            {{ item.paymentMethod }}
-          </VListItemSubtitle>
-          <VListItemTitle>
-            {{ item.description }}
+          <VListItemTitle class="font-weight-medium text-body-2">
+            #{{ item.order_number }} • {{ item.customer_name }}
           </VListItemTitle>
 
+          <VListItemSubtitle class="text-caption d-flex align-center gap-1 mt-1">
+            <span>{{ item.time }}</span>
+            <span>•</span>
+            <span>{{ item.order_type }}</span>
+            <span>•</span>
+            <VChip
+              size="x-small"
+              variant="tonal"
+              :color="getStatusColor(item.status)"
+            >
+              {{ item.status_ru }}
+            </VChip>
+          </VListItemSubtitle>
+
           <template #append>
-            <VListItemAction>
-              <span class="me-2">{{ item.amount > 0 ? `+${Math.abs(item.amount)} ₽` : `-${Math.abs(item.amount)} ₽` }}</span>
-              <span class="text-disabled">RUB</span>
-            </VListItemAction>
+            <div class="text-end">
+              <span class="font-weight-bold text-success text-body-2">
+                +{{ Number(item.amount).toLocaleString('ru-RU') }} ₽
+              </span>
+            </div>
           </template>
         </VListItem>
       </VList>
+
+      <div v-else class="text-center py-6 text-medium-emphasis">
+        Нет недавних заказов
+      </div>
     </VCardText>
   </VCard>
 </template>
 
-<style lang="scss" scoped>
-  .card-list {
-    --v-card-list-gap: 1.5rem;
-  }
+<style lang="scss">
+.card-list {
+  --v-card-list-gap: 0.85rem;
+}
 </style>

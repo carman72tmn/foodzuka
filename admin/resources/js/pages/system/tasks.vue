@@ -11,6 +11,11 @@ const scheduledTasks = ref([])
 
 const API_BASE = '/api/v1/system'
 
+const getHeaders = () => ({
+  'Authorization': `Bearer ${localStorage.getItem('access_token')}`,
+  'Content-Type': 'application/json'
+})
+
 // Диалог запланированной задачи
 const scheduledTaskDialog = ref(false)
 const editTask = ref({
@@ -36,7 +41,7 @@ const newTask = ref({
 
 const fetchTasks = async () => {
   try {
-    const res = await fetch(`${API_BASE}/tasks`)
+    const res = await fetch(`${API_BASE}/tasks`, { headers: getHeaders() })
     if (res.ok) tasks.value = await res.json()
   } catch (e) {
     console.error('Error fetching tasks:', e)
@@ -46,7 +51,7 @@ const fetchTasks = async () => {
 const fetchFiles = async () => {
   loading.value = true
   try {
-    const res = await fetch(`${API_BASE}/files`)
+    const res = await fetch(`${API_BASE}/files`, { headers: getHeaders() })
     if (res.ok) files.value = await res.json()
   } catch (e) {
     console.error('Error fetching files:', e)
@@ -63,7 +68,7 @@ const loadData = () => {
 
 const fetchScheduledTasks = async () => {
   try {
-    const res = await fetch(`${API_BASE}/scheduled-tasks`)
+    const res = await fetch(`${API_BASE}/scheduled-tasks`, { headers: getHeaders() })
     if (res.ok) scheduledTasks.value = await res.json()
   } catch (e) {
     console.error('Error fetching scheduled tasks:', e)
@@ -79,7 +84,7 @@ const saveScheduledTask = async () => {
     
     const res = await fetch(url, {
       method,
-      headers: { 'Content-Type': 'application/json' },
+      headers: getHeaders(),
       body: JSON.stringify(editTask.value)
     })
     
@@ -96,7 +101,10 @@ const saveScheduledTask = async () => {
 
 const toggleScheduledTask = async (task) => {
   try {
-    await fetch(`${API_BASE}/scheduled-tasks/${task.id}/toggle`, { method: 'POST' })
+    await fetch(`${API_BASE}/scheduled-tasks/${task.id}/toggle`, {
+      method: 'POST',
+      headers: getHeaders()
+    })
     fetchScheduledTasks()
   } catch (e) {
     console.error('Error toggling task:', e)
@@ -105,7 +113,10 @@ const toggleScheduledTask = async (task) => {
 
 const runScheduledTaskNow = async (task) => {
   try {
-    const res = await fetch(`${API_BASE}/scheduled-tasks/${task.id}/run`, { method: 'POST' })
+    const res = await fetch(`${API_BASE}/scheduled-tasks/${task.id}/run`, {
+      method: 'POST',
+      headers: getHeaders()
+    })
     if (res.ok) alert('Задача запущена успешно')
   } catch (e) {
     console.error('Error running task:', e)
@@ -115,7 +126,10 @@ const runScheduledTaskNow = async (task) => {
 const deleteScheduledTask = async (task) => {
   if (!confirm(`Удалить задачу ${task.name}?`)) return
   try {
-    await fetch(`${API_BASE}/scheduled-tasks/${task.id}`, { method: 'DELETE' })
+    await fetch(`${API_BASE}/scheduled-tasks/${task.id}`, {
+      method: 'DELETE',
+      headers: getHeaders()
+    })
     fetchScheduledTasks()
   } catch (e) {
     console.error('Error deleting task:', e)
@@ -142,7 +156,10 @@ const openEditDialog = (task = null) => {
 
 const togglePause = async (task) => {
   try {
-    await fetch(`${API_BASE}/tasks/${task.id}/pause`, { method: 'POST' })
+    await fetch(`${API_BASE}/tasks/${task.id}/pause`, {
+      method: 'POST',
+      headers: getHeaders()
+    })
     fetchTasks()
   } catch (e) {
     console.error('Error toggling pause:', e)
@@ -152,7 +169,10 @@ const togglePause = async (task) => {
 const cancelTask = async (task) => {
   if (!confirm('Вы уверены, что хотите отменить задачу?')) return
   try {
-    await fetch(`${API_BASE}/tasks/${task.id}/cancel`, { method: 'POST' })
+    await fetch(`${API_BASE}/tasks/${task.id}/cancel`, {
+      method: 'POST',
+      headers: getHeaders()
+    })
     fetchTasks()
   } catch (e) {
     console.error('Error cancelling task:', e)
@@ -162,7 +182,10 @@ const cancelTask = async (task) => {
 const stopAllTasks = async () => {
   if (!confirm('Остановить все активные фоновые процессы?')) return
   try {
-    await fetch(`${API_BASE}/tasks/stop-all`, { method: 'POST' })
+    await fetch(`${API_BASE}/tasks/stop-all`, {
+      method: 'POST',
+      headers: getHeaders()
+    })
     fetchTasks()
   } catch (e) {
     console.error('Error stopping all tasks:', e)
@@ -172,7 +195,10 @@ const stopAllTasks = async () => {
 const cleanupTasks = async () => {
   if (!confirm('Очистить историю завершенных и отмененных задач?')) return
   try {
-    await fetch(`${API_BASE}/tasks/cleanup`, { method: 'POST' })
+    await fetch(`${API_BASE}/tasks/cleanup`, {
+      method: 'POST',
+      headers: getHeaders()
+    })
     fetchTasks()
   } catch (e) {
     console.error('Error cleaning up tasks:', e)
@@ -181,7 +207,10 @@ const cleanupTasks = async () => {
 
 const refreshTask = async (task) => {
   try {
-    const res = await fetch(`${API_BASE}/tasks/${task.id}/refresh`, { method: 'POST' })
+    const res = await fetch(`${API_BASE}/tasks/${task.id}/refresh`, {
+      method: 'POST',
+      headers: getHeaders()
+    })
     if (res.ok) {
       const updated = await res.json()
       const idx = tasks.value.findIndex(t => t.id === task.id)
@@ -195,7 +224,10 @@ const refreshTask = async (task) => {
 const deleteTask = async (task) => {
   if (!confirm('Удалить запись о задаче?')) return
   try {
-    await fetch(`${API_BASE}/tasks/${task.id}`, { method: 'DELETE' })
+    await fetch(`${API_BASE}/tasks/${task.id}`, {
+      method: 'DELETE',
+      headers: getHeaders()
+    })
     fetchTasks()
   } catch (e) {
     console.error('Error deleting task:', e)
@@ -207,7 +239,7 @@ const startTask = async () => {
   try {
     const res = await fetch(`${API_BASE}/tasks/run?task_type=${newTask.value.type}`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: getHeaders(),
       body: JSON.stringify(newTask.value.params)
     })
     if (res.ok) {
@@ -224,7 +256,10 @@ const startTask = async () => {
 const deleteFile = async (file) => {
   if (!confirm(`Удалить файл ${file.name}?`)) return
   try {
-    await fetch(`${API_BASE}/files/${file.name}`, { method: 'DELETE' })
+    await fetch(`${API_BASE}/files/${file.name}`, {
+      method: 'DELETE',
+      headers: getHeaders()
+    })
     fetchFiles()
   } catch (e) {
     console.error('Error deleting file:', e)
@@ -646,4 +681,3 @@ const formatSize = (bytes) => {
 .gap-1 { gap: 4px; }
 .gap-2 { gap: 8px; }
 </style>
-

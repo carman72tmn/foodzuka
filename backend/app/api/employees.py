@@ -44,10 +44,15 @@ def _is_courier(emp: Employee) -> bool:
             or "курьер" in name or "courier" in name)
 
 
+def _is_cook(emp: Employee) -> bool:
+    from app.services.shift_service import is_cook_employee
+    return is_cook_employee(emp)
+
+
 def _is_admin(emp: Employee) -> bool:
     role = (emp.role or "").lower()
     name = (emp.name or "").lower()
-    return any(k in role for k in ["администратор", "оператор", "manager", "старший", "adm", "admin"])
+    return any(k in role for k in ["администратор", "оператор", "manager", "старший", "adm", "admin", "кассир"])
 
 
 # ---------------------------------------------------------------------------
@@ -97,6 +102,7 @@ def get_employees(
             d["iiko_id"] = str(d["iiko_id"])
         d["is_courier"] = _is_courier(e)
         d["is_admin"] = _is_admin(e)
+        d["is_cook"] = _is_cook(e)
         result.append(d)
     return {"status": "success", "data": result}
 
@@ -151,7 +157,7 @@ def get_open_shifts(session: Session = Depends(get_session)):
 
 @router.get("/shifts/open/detailed")
 def get_open_shifts_detailed(session: Session = Depends(get_session)):
-    """Для дашборда: кто сейчас на смене"""
+    """Для дашборда: кто сейчас на смене (с авто-закрытием зависших смен старше 24ч)"""
     from sqlalchemy.orm import selectinload
     shifts = session.exec(
         select(Shift)
@@ -160,10 +166,25 @@ def get_open_shifts_detailed(session: Session = Depends(get_session)):
         .order_by(Shift.date_open.desc())
     ).all()
 
+    now_utc = datetime.now(timezone.utc)
     result = []
+    has_expired = False
+
     for shift in shifts:
+        shift_dt = shift.date_open if shift.date_open.tzinfo else shift.date_open.replace(tzinfo=timezone.utc)
+        elapsed_minutes = int((now_utc - shift_dt).total_seconds() / 60)
+
+        # Авто-закрытие смен, которые висят открытыми дольше 24 часов (1440 минут)
+        if elapsed_minutes > 1440:
+            shift.status = "CLOSED"
+            if not shift.date_close:
+                shift.date_close = shift.date_open
+            shift.updated_at = now_utc.replace(tzinfo=None)
+            session.add(shift)
+            has_expired = True
+            continue
+
         open_local = _to_local(shift.date_open, session)
-        elapsed_minutes = int((datetime.now(timezone.utc) - (shift.date_open if shift.date_open.tzinfo else shift.date_open.replace(tzinfo=timezone.utc))).total_seconds() / 60)
         result.append({
             "id": shift.id,
             "employee_id": shift.employee_id,
@@ -174,7 +195,57 @@ def get_open_shifts_detailed(session: Session = Depends(get_session)):
             "elapsed_minutes": elapsed_minutes,
             "elapsed_text": f"{elapsed_minutes // 60}ч {elapsed_minutes % 60}м",
         })
+
+    if has_expired:
+        session.commit()
+
     return {"status": "success", "data": result}
+
+
+@router.post("/shifts/reset-active")
+def reset_active_shifts(session: Session = Depends(get_session)):
+    """Принудительно закрыть все открытые смены в локальной БД"""
+    try:
+        # Находим все открытые смены
+        open_shifts = session.exec(select(Shift).where(Shift.status == "OPEN")).all()
+        count = len(open_shifts)
+        for shift in open_shifts:
+            shift.status = "CLOSED"
+            shift.date_close = datetime.now(timezone.utc)
+            shift.updated_at = datetime.now(timezone.utc)
+            session.add(shift)
+        session.commit()
+        return {"success": True, "message": f"Сброшено смен: {count}"}
+    except Exception as e:
+        logger.error(f"Error resetting active shifts: {e}")
+        session.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/shifts/recalculate-all")
+def recalculate_all_shifts(session: Session = Depends(get_session)):
+    """Пересчитать выручку и показатели для всех смен в базе данных"""
+    from app.services.shift_service import calculate_shift_metrics
+    try:
+        shifts = session.exec(select(Shift).order_by(Shift.date_open.desc())).all()
+        updated_count = 0
+        for s in shifts:
+            emp = s.employee
+            metrics = calculate_shift_metrics(session, s, emp)
+            s.revenue_at_close = metrics["total_revenue"]
+            s.kitchen_revenue = metrics["kitchen_revenue"]
+            s.hot_revenue = metrics["hot_revenue"]
+            s.cancelled_orders_count = metrics["cancelled_count"]
+            if metrics["deliveries_count"] > 0:
+                s.deliveries_count = metrics["deliveries_count"]
+            session.add(s)
+            updated_count += 1
+        session.commit()
+        return {"success": True, "message": f"Успешно пересчитано смен: {updated_count}"}
+    except Exception as e:
+        logger.error(f"Error recalculating all shifts: {e}")
+        session.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 # ---------------------------------------------------------------------------
@@ -213,15 +284,47 @@ def get_all_shifts(
 
     shifts = session.exec(query).all()
     result = []
+    
+    from app.services.shift_service import calculate_shift_metrics, is_cook_employee, is_courier_employee
+    
     for shift in shifts:
         open_local = _to_local(shift.date_open, session)
         close_local = _to_local(shift.date_close, session)
+        emp = shift.employee
+        
+        # Расчет актуальной выручки
+        # Если смена открыта или выручка еще не была рассчитана:
+        if shift.status == "OPEN" or shift.revenue_at_close is None or (shift.revenue_at_close == 0.0 and is_cook_employee(emp)):
+            metrics = calculate_shift_metrics(session, shift, emp)
+            revenue = metrics["total_revenue"]
+            kitchen_rev = metrics["kitchen_revenue"]
+            hot_rev = metrics["hot_revenue"]
+            cancelled = metrics["cancelled_count"]
+            deliveries = metrics["deliveries_count"]
+            
+            # Сохраняем в объект и БД
+            shift.revenue_at_close = revenue
+            shift.kitchen_revenue = kitchen_rev
+            shift.hot_revenue = hot_rev
+            shift.cancelled_orders_count = cancelled
+            if deliveries > 0:
+                shift.deliveries_count = deliveries
+            session.add(shift)
+        else:
+            revenue = float(shift.revenue_at_close or 0.0)
+            kitchen_rev = float(shift.kitchen_revenue or 0.0)
+            hot_rev = float(shift.hot_revenue or 0.0)
+            cancelled = shift.cancelled_orders_count or 0
+            deliveries = shift.deliveries_count or 0
+            
         result.append({
             "id": shift.id,
             "iiko_id": str(shift.iiko_id) if shift.iiko_id else None,
             "employee_id": shift.employee_id,
-            "employee_name": shift.employee.name if shift.employee else "Unknown",
-            "employee_role": shift.employee.role if shift.employee else None,
+            "employee_name": emp.name if emp else "Unknown",
+            "employee_role": emp.role if emp else None,
+            "is_cook": is_cook_employee(emp),
+            "is_courier": is_courier_employee(emp),
             "date": open_local.strftime("%d.%m.%Y") if open_local else "—",
             "date_iso": open_local.date().isoformat() if open_local else None,
             "day_of_week": day_names[open_local.weekday()] if open_local else "—",
@@ -231,11 +334,19 @@ def get_all_shifts(
             "time_close_full": close_local.isoformat() if close_local else None,
             "status": shift.status,
             "work_hours": round(shift.work_hours or 0.0, 2),
-            "revenue_at_close": shift.revenue_at_close or 0.0,
-            "cancelled_orders_count": shift.cancelled_orders_count or 0,
-            "deliveries_count": shift.deliveries_count or 0,
-            "employee_rate": shift.employee.rate if shift.employee else None,
+            "revenue_at_close": revenue,
+            "kitchen_revenue": kitchen_rev,
+            "hot_revenue": hot_rev,
+            "cancelled_orders_count": cancelled,
+            "deliveries_count": deliveries,
+            "employee_rate": emp.rate if emp else None,
         })
+    try:
+        session.commit()
+    except Exception as e:
+        logger.error(f"Error saving shifts metrics: {e}")
+        session.rollback()
+
     return {"status": "success", "data": result, "total": len(result)}
 
 

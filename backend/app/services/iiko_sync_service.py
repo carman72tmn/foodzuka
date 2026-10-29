@@ -6,6 +6,7 @@
 import logging
 import asyncio
 import json
+import re
 import httpx
 from typing import Optional, Dict, Any, List
 from datetime import datetime, timedelta, timezone
@@ -30,6 +31,7 @@ from app.services.iiko_service import iiko_service
 from app.utils.phone_utils import normalize_phone
 from app.core.logging_utils import log_audit
 from app.services.vk_notification_router import vk_notification_router
+from app.services.order_status_history_service import append_order_status_history
 
 logger = logging.getLogger(__name__)
 
@@ -38,6 +40,42 @@ class IikoSyncService:
         self.iiko = iiko_service
         self._terminal_groups_cache = {}
         self._last_rev_sync = {} # {org_id: last_time}
+
+    def send_websocket_broadcast_safe(self, payload: dict):
+        """Безопасная рассылка WebSocket сообщений из любого контекста (синхронного/асинхронного)"""
+        try:
+            from app.api.chat import manager
+            import asyncio
+            try:
+                loop = asyncio.get_event_loop()
+            except RuntimeError:
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                
+            if loop.is_running():
+                loop.create_task(manager.broadcast(payload))
+            else:
+                loop.run_until_complete(manager.broadcast(payload))
+        except Exception as e:
+            logger.error(f"Failed to send websocket broadcast in safe mode: {e}")
+
+    def send_websocket_personal_safe(self, payload: dict, user_id: int):
+        """Безопасная персональная отправка WebSocket сообщения из любого контекста"""
+        try:
+            from app.api.chat import manager
+            import asyncio
+            try:
+                loop = asyncio.get_event_loop()
+            except RuntimeError:
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                
+            if loop.is_running():
+                loop.create_task(manager.send_personal_message(payload, user_id))
+            else:
+                loop.run_until_complete(manager.send_personal_message(payload, user_id))
+        except Exception as e:
+            logger.error(f"Failed to send websocket personal message in safe mode: {e}")
 
     async def _sync_addresses_from_local_orders(self, session: Session, customer_id: int, phone: str, days: int = 365):
         """Извлечение адресов из локальной таблицы заказов за последние X дней"""
@@ -135,7 +173,15 @@ class IikoSyncService:
 
         return await asyncio.to_thread(_sync_db_logic)
 
-    async def sync_single_customer(self, session: Session, phone: str, organization_id: Optional[str] = None, order_id: Optional[int] = None, fast_sync: bool = False) -> bool:
+    async def sync_single_customer(
+        self, 
+        session: Session, 
+        phone: str, 
+        organization_id: Optional[str] = None, 
+        order_id: Optional[int] = None, 
+        fast_sync: bool = False,
+        bypass_cache: bool = False
+    ) -> bool:
         """
         Синхронизация одного клиента из iiko Cloud.
         Если передан order_id, создается снимок данных клиента в заказе.
@@ -189,12 +235,49 @@ class IikoSyncService:
                 customer.uid = iiko_data.get("id")
                 customer.iiko_id = iiko_data.get("id")
                 
-                if iiko_data.get("name"):
-                    customer.name = iiko_data["name"]
-                    customer.first_name = iiko_data["name"]
-                if iiko_data.get("surname"):
-                    customer.surname = iiko_data["surname"]
-                    customer.last_name = iiko_data["surname"]
+                iiko_name = iiko_data.get("name", "")
+                iiko_surname = iiko_data.get("surname", "")
+                
+                is_iiko_name_empty = not iiko_name.strip() or iiko_name.strip().lower() in ("не задано", "гость")
+                
+                from app.models.vk_user import VkUser
+                vk_user = session.exec(
+                    select(VkUser)
+                    .where((VkUser.phone == clean_phone) | (VkUser.vk_id == customer.vk_user_id))
+                    .where(VkUser.is_linked == True)
+                ).first()
+                
+                if is_iiko_name_empty and vk_user and (vk_user.first_name or vk_user.last_name):
+                    new_name = vk_user.first_name or "Гость"
+                    new_surname = vk_user.last_name or ""
+                    
+                    customer.name = new_name
+                    customer.first_name = new_name
+                    customer.surname = new_surname
+                    customer.last_name = new_surname
+                    
+                    logger.info(f"Auto-updating empty/placeholder name for customer {clean_phone} from linked VK profile: {new_name} {new_surname}")
+                    
+                    try:
+                        iiko_payload = {
+                            "phone": clean_phone,
+                            "name": new_name,
+                            "surName": new_surname
+                        }
+                        if customer.iiko_customer_id:
+                            iiko_payload["id"] = customer.iiko_customer_id
+                            
+                        await self.iiko.create_or_update_customer(iiko_payload)
+                        logger.info(f"Successfully synced VK name/surname to iiko for {clean_phone}")
+                    except Exception as e:
+                        logger.error(f"Error syncing VK name to iiko for {clean_phone}: {e}")
+                else:
+                    if iiko_data.get("name"):
+                        customer.name = iiko_data["name"]
+                        customer.first_name = iiko_data["name"]
+                    if iiko_data.get("surname"):
+                        customer.surname = iiko_data["surname"]
+                        customer.last_name = iiko_data["surname"]
                 if iiko_data.get("middleName"):
                     customer.middle_name = iiko_data["middleName"]
                 if iiko_data.get("email"):
@@ -229,6 +312,8 @@ class IikoSyncService:
                 # Комментарий iiko
                 customer.iiko_comment = iiko_data.get("comment")
 
+
+
                 # Флаг риска - обновляем только если поле есть в ответе, чтобы не затереть локальный статус
                 # Проверяем возможные варианты названия поля в iiko
                 risk_keys = ["shouldBeCheckedForRisk", "isHighRisk", "checkedForRisk"]
@@ -253,7 +338,7 @@ class IikoSyncService:
             # При fast_sync пропускаем тяжелые OLAP запросы
             if not fast_sync:
                 try:
-                    analytics = await self.iiko.get_customer_analytics_olap(clean_phone, session, organization_id=organization_id)
+                    analytics = await self.iiko.get_customer_analytics_olap(clean_phone, session, organization_id=organization_id, bypass_cache=bypass_cache)
                     if analytics and not analytics.get("error"):
                         customer.total_orders_count = analytics.get("orders_count", analytics.get("total_count", 0))
                         customer.total_orders_amount = Decimal(str(analytics.get("total_revenue", analytics.get("total_sum", 0))))
@@ -301,10 +386,17 @@ class IikoSyncService:
                     "is_high_risk": bool(customer.is_high_risk),
                     "total_orders_count": customer.total_orders_count or 0,
                     "bonus_balance": float(customer.bonus_points or 0),
+                    "bonus_points": float(customer.bonus_points or 0),  # Синоним
                     "iiko_notes": customer.iiko_comment or "",
+                    "notes": customer.notes or "",  # Заметки
+                    "phone": customer.phone or clean_phone or "",  # Телефон
+                    "categories": customer.iiko_categories or [],  # Категории
                     "sync_date": datetime.now(timezone.utc).isoformat(),
                     "sync_status": "success"
                 }
+                if order.customer_id != customer.id:
+                    order.customer_id = customer.id
+                    logger.info(f"Updated customer_id to {customer.id} for order {order.id} during customer sync")
                 order.customer_info_details = snapshot
                 from sqlalchemy.orm.attributes import flag_modified
                 flag_modified(order, "customer_info_details")
@@ -357,7 +449,8 @@ class IikoSyncService:
     def format_address(self, address_data: Any, city: Optional[str] = None, fmt: str = "components") -> str:
         """
         Форматирует адрес iiko. 
-        Приоритет: line1 (если fmt='line1'), иначе сборка по компонентам.
+        Приоритет: line1 (если fmt='line1' или 'line3'), иначе сборка по компонентам.
+        Всегда гарантирует наличие указанных клиентом подъезда, этажа, квартиры и кода домофона.
         """
         if not address_data:
             return ""
@@ -372,49 +465,77 @@ class IikoSyncService:
         street = street_val.get('name') if isinstance(street_val, dict) else self.clean_str(street_val)
         
         house = self.clean_str(address_data.get('house'))
+        if house in ["0", "-", "None", "null"]:
+            house = None
         flat = self.clean_str(address_data.get('flat'))
+        if flat in ["0", "-", "None", "null"]:
+            flat = None
         entrance = self.clean_str(address_data.get('entrance'))
+        if entrance in ["0", "-", "None", "null"]:
+            entrance = None
         floor = self.clean_str(address_data.get('floor'))
+        if floor in ["0", "-", "None", "null"]:
+            floor = None
         door_phone = self.clean_str(address_data.get('doorphone'))
+        if door_phone in ["0", "-", "None", "null"]:
+            door_phone = None
         building = self.clean_str(address_data.get('building'))
+        if building in ["0", "-", "None", "null"]:
+            building = None
 
-        # 2. Логика для fmt="line1" (как в настройках iiko)
-        if fmt == "line1" and line1:
+        # 2. Логика для fmt="line1" / "line3" (одной строкой)
+        if fmt in ["line1", "line3"] and line1:
             addr = self.clean_str(line1)
-            # Интеллектуальное добавление отсутствующих элементов
+            # Интеллектуальное добавление отсутствующих элементов через regex
             extras = []
-            if flat and str(flat) not in addr:
-                extras.append(f"кв. {flat}")
-            if entrance and str(entrance) not in addr:
-                extras.append(f"под. {entrance}")
-            if floor and str(floor) not in addr:
-                extras.append(f"эт. {floor}")
-            if door_phone and str(door_phone) not in addr:
-                extras.append(f"код {door_phone}")
+            if entrance:
+                # Проверяем, есть ли уже указание подъезда с данным номером
+                has_ent = bool(re.search(rf'(?i)(?:под(?:ъезд|\.|\s*)|(?<=[,\s])п\.\s*)\s*{re.escape(str(entrance))}\b', addr))
+                if not has_ent:
+                    extras.append(f"под. {entrance}")
+            if floor:
+                # Проверяем, есть ли уже указание этажа с данным номером
+                has_fl = bool(re.search(rf'(?i)(?:эт(?:аж|\.|\s*)|(?<=[,\s])э\.\s*)\s*{re.escape(str(floor))}\b', addr))
+                if not has_fl:
+                    extras.append(f"эт. {floor}")
+            if flat:
+                # Проверяем, есть ли уже указание квартиры/офиса с данным номером
+                has_flt = bool(re.search(rf'(?i)(?:кв(?:артира|\.|\s*)|оф(?:ис|\.|\s*)|пом(?:ещение|\.|\s*))\s*{re.escape(str(flat))}\b', addr))
+                if not has_flt:
+                    extras.append(f"кв. {flat}")
+            if door_phone:
+                # Проверяем, есть ли уже указание домофона с данным кодом
+                has_dp = bool(re.search(rf'(?i)(?:код|домофон|д\/ф|код\s*домофона)\s*[:#]?\s*{re.escape(str(door_phone))}\b', addr))
+                if not has_dp:
+                    extras.append(f"код {door_phone}")
                 
             if extras:
                 addr = f"{addr}, {', '.join(extras)}"
             return addr
 
-        # 3. Классическая сборка (город, улица, дом, квартира...)
+        # 3. Классическая сборка (город, улица, дом, корпус, подъезд, этаж, квартира, домофон)
         if not street and not house and line1:
             return line1
 
         parts = []
-        if city_val: parts.append(self.clean_str(city_val))
+        if city_val:
+            c = self.clean_str(city_val)
+            parts.append(c if c.lower().startswith("г.") else f"г. {c}")
+            
         if street:
             s = self.clean_str(street)
-            if not any(p in s.lower() for p in ["улица", "ул.", "пр.", "пер.", "бул."]):
+            if not any(p in s.lower() for p in ["улица", "ул.", "пр.", "пер.", "бул.", "проезд", "тракт", "шоссе"]):
                 s = f"ул. {s}"
             parts.append(s)
             
         if house: parts.append(f"д. {house}")
         if building: parts.append(f"корп. {building}")
-        if flat: parts.append(f"кв. {flat}")
         if entrance: parts.append(f"под. {entrance}")
         if floor: parts.append(f"эт. {floor}")
+        if flat: parts.append(f"кв. {flat}")
+        if door_phone: parts.append(f"код {door_phone}")
 
-        return ", ".join(parts) if parts else "Адрес не указан"
+        return ", ".join(parts) if parts else (line1 or "Адрес не указан")
 
     def _get_tz(self, session: Session):
         """Получение часового пояса из настроек"""
@@ -448,15 +569,62 @@ class IikoSyncService:
             org_id = settings.organization_id if settings else None
             
             # 1. Получаем данные из API (асинхронно)
+            res = None
+            use_fallback = False
+            
             if settings and settings.use_v2_menu:
                 logger.info("Syncing from Cloud Menu (API v2)")
-                menu_data = await iiko_service.get_menu_v2(
-                    api_login=api_login, 
-                    organization_id=org_id
-                )
-                # 2. Обрабатываем в БД (выносим в поток)
-                res = await asyncio.to_thread(self._sync_from_external_menu_sync, session, menu_data, log.id)
-            else:
+                
+                # Получаем резервные цены из классической номенклатуры
+                nomenclature_prices = {}
+                try:
+                    logger.info("Fetching fallback nomenclature prices...")
+                    nomenclature = await iiko_service.get_nomenclature(api_login=api_login, organization_id=org_id)
+                    for prod_data in nomenclature.get("products", []):
+                        prod_id = prod_data.get("id")
+                        if not prod_id:
+                            continue
+                        if "price" in prod_data and prod_data["price"] is not None:
+                            nomenclature_prices[(prod_id, None)] = float(prod_data["price"])
+                        for sp in prod_data.get("sizePrices", []):
+                            size_id = sp.get("sizeId")
+                            price_val = sp.get("price", {}).get("currentPrice") if isinstance(sp.get("price"), dict) else sp.get("price")
+                            if price_val is not None:
+                                nomenclature_prices[(prod_id, size_id)] = float(price_val)
+                except Exception as e:
+                    logger.warning(f"Failed to fetch fallback nomenclature prices: {e}")
+                    nomenclature_prices = {}
+
+                price_cat_id = None if settings.price_source == "menu" else settings.price_category_id
+                logger.info(f"get_menu_v2 with price_category_id={price_cat_id} (source={settings.price_source})")
+
+                try:
+                    menu_data = await iiko_service.get_menu_v2(
+                        api_login=api_login, 
+                        organization_id=org_id,
+                        external_menu_id=settings.external_menu_id,
+                        price_category_id=price_cat_id
+                    )
+                    
+                    # Проверяем, пустое ли меню
+                    cats_list = menu_data.get("itemCategories") or menu_data.get("groups") or []
+                    has_items = False
+                    for cat in cats_list:
+                        if cat.get("items") or cat.get("products"):
+                            has_items = True
+                            break
+                            
+                    if not has_items:
+                        logger.warning("External Menu v2 returned 0 items. Fallback to Classic Nomenclature.")
+                        use_fallback = True
+                    else:
+                        # 2. Обрабатываем в БД (выносим в поток)
+                        res = await asyncio.to_thread(self._sync_from_external_menu_sync, session, menu_data, log.id, nomenclature_prices)
+                except Exception as menu_err:
+                    logger.error(f"Error fetching V2 menu: {menu_err}. Fallback to Classic Nomenclature.")
+                    use_fallback = True
+            
+            if not settings or not settings.use_v2_menu or use_fallback:
                 logger.info("Syncing from Nomenclature (Classic API)")
                 nomenclature = await iiko_service.get_nomenclature(api_login=api_login, organization_id=org_id)
                 # 2. Обрабатываем в БД (выносим в поток)
@@ -537,10 +705,59 @@ class IikoSyncService:
             api_login = settings.api_login if settings else None
             org_id = settings.organization_id if settings else None
             
+            res = None
+            use_fallback = False
+            
             if settings and settings.use_v2_menu:
-                menu_data = await iiko_service.get_menu_v2(api_login=api_login, organization_id=org_id)
-                res = await asyncio.to_thread(self._update_prices_from_v2, session, menu_data)
-            else:
+                # Получаем резервные цены из классической номенклатуры
+                nomenclature_prices = {}
+                try:
+                    logger.info("Fetching fallback nomenclature prices...")
+                    nomenclature = await iiko_service.get_nomenclature(api_login=api_login, organization_id=org_id)
+                    for prod_data in nomenclature.get("products", []):
+                        prod_id = prod_data.get("id")
+                        if not prod_id:
+                            continue
+                        if "price" in prod_data and prod_data["price"] is not None:
+                            nomenclature_prices[(prod_id, None)] = float(prod_data["price"])
+                        for sp in prod_data.get("sizePrices", []):
+                            size_id = sp.get("sizeId")
+                            price_val = sp.get("price", {}).get("currentPrice") if isinstance(sp.get("price"), dict) else sp.get("price")
+                            if price_val is not None:
+                                nomenclature_prices[(prod_id, size_id)] = float(price_val)
+                except Exception as e:
+                    logger.warning(f"Failed to fetch fallback nomenclature prices: {e}")
+                    nomenclature_prices = {}
+
+                price_cat_id = None if settings.price_source == "menu" else settings.price_category_id
+                logger.info(f"get_menu_v2 with price_category_id={price_cat_id} (source={settings.price_source})")
+
+                try:
+                    menu_data = await iiko_service.get_menu_v2(
+                        api_login=api_login, 
+                        organization_id=org_id,
+                        external_menu_id=settings.external_menu_id,
+                        price_category_id=price_cat_id
+                    )
+                    
+                    # Проверяем, пустое ли меню
+                    cats_list = menu_data.get("itemCategories") or menu_data.get("groups") or []
+                    has_items = False
+                    for cat in cats_list:
+                        if cat.get("items") or cat.get("products"):
+                            has_items = True
+                            break
+                            
+                    if not has_items:
+                        logger.warning("External Menu v2 returned 0 items. Fallback to Classic Nomenclature for prices.")
+                        use_fallback = True
+                    else:
+                        res = await asyncio.to_thread(self._update_prices_from_v2, session, menu_data, nomenclature_prices)
+                except Exception as menu_err:
+                    logger.error(f"Error fetching V2 menu for prices: {menu_err}. Fallback to Classic Nomenclature.")
+                    use_fallback = True
+                    
+            if not settings or not settings.use_v2_menu or use_fallback:
                 nomenclature = await iiko_service.get_nomenclature(api_login=api_login, organization_id=org_id)
                 res = await asyncio.to_thread(self._update_prices_from_nomenclature, session, nomenclature)
             
@@ -678,8 +895,10 @@ class IikoSyncService:
             return {"success": False, "error": str(e)}
 
 
-    def _update_prices_from_v2(self, session: Session, menu_data: Dict[str, Any]) -> Dict[str, Any]:
+    def _update_prices_from_v2(self, session: Session, menu_data: Dict[str, Any], nomenclature_prices: Optional[Dict[tuple, float]] = None) -> Dict[str, Any]:
         count = 0
+        if nomenclature_prices is None:
+            nomenclature_prices = {}
         cats = menu_data.get("itemCategories") or menu_data.get("groups") or []
         for cat in cats:
             for item in (cat.get("items") or cat.get("products") or []):
@@ -692,11 +911,35 @@ class IikoSyncService:
                 elif "price" in item:
                     price = item["price"]
                 
+                # Применяем fallback
+                size0_id = sizes[0].get("sizeId") if sizes else None
+                fallback_price = nomenclature_prices.get((item_id, size0_id))
+                if (price is None or price == 0) and fallback_price is not None:
+                    price = fallback_price
+
                 prod = session.exec(select(Product).where(Product.iiko_id == item_id)).first()
                 if prod:
-                    prod.price = float(price)
+                    prod.price = float(price or 0)
                     prod.updated_at = datetime.now(timezone.utc).replace(tzinfo=None)
                     count += 1
+                    
+                    # Обновляем цены размеров
+                    if sizes:
+                        for s_data in sizes:
+                            s_id = s_data.get("sizeId") or item_id
+                            s_price = 0
+                            if s_data.get("prices"): 
+                                s_price = s_data["prices"][0].get("price", 0)
+                            
+                            # Fallback для размера
+                            fallback_size_price = nomenclature_prices.get((item_id, s_data.get("sizeId")))
+                            if (s_price is None or s_price == 0) and fallback_size_price is not None:
+                                s_price = fallback_size_price
+                                
+                            psize = session.exec(select(ProductSize).where(ProductSize.product_id == prod.id, ProductSize.iiko_id == s_id)).first()
+                            if psize:
+                                psize.price = float(s_price or 0)
+                                session.add(psize)
         session.commit()
         return {"count": count}
 
@@ -741,23 +984,44 @@ class IikoSyncService:
         session.commit()
         return {"count": count}
 
-    def _sync_from_external_menu_sync(self, session: Session, menu_data: Dict[str, Any], log_id: int) -> Dict[str, Any]:
+    def _sync_from_external_menu_sync(self, session: Session, menu_data: Dict[str, Any], log_id: int, nomenclature_prices: Optional[Dict[tuple, float]] = None) -> Dict[str, Any]:
         """Логика обработки внешнего меню iiko (Синхронная версия для потока)"""
         if not menu_data:
             return {"categories": 0, "products": 0}
         
+        if nomenclature_prices is None:
+            nomenclature_prices = {}
+
         categories_synced = 0
         products_synced = 0
 
-        # 1. Синхронизация категорий
-        cats_list = menu_data.get("itemCategories") or menu_data.get("groups") or []
-        for cat_data in cats_list:
+        # Рекурсивный сбор всех категорий и подкатегорий из дерева меню
+        def _collect_categories(cat_nodes, parent_iiko_id=None):
+            collected = []
+            for c in cat_nodes:
+                c_id = c.get("id")
+                if not c_id:
+                    continue
+                c_copy = dict(c)
+                c_copy["_parent_iiko_id"] = parent_iiko_id
+                collected.append(c_copy)
+                sub = c.get("groups") or c.get("itemCategories") or c.get("categories") or []
+                if sub:
+                    collected.extend(_collect_categories(sub, parent_iiko_id=c_id))
+            return collected
+
+        root_cats = menu_data.get("itemCategories") or menu_data.get("groups") or []
+        all_cats = _collect_categories(root_cats)
+
+        # 1. Синхронизация категорий (Проход 1: Создание/Обновление полей)
+        for cat_data in all_cats:
             cat_id = cat_data.get("id")
             if not cat_id: continue
             
             cat = session.exec(select(Category).where(Category.iiko_id == cat_id)).first()
             if cat:
-                cat.name = cat_data["name"]
+                if not getattr(cat, "lock_name", False):
+                    cat.name = cat_data["name"]
                 cat.updated_at = datetime.now(timezone.utc).replace(tzinfo=None)
             else:
                 cat = Category(
@@ -769,112 +1033,179 @@ class IikoSyncService:
             categories_synced += 1
         session.commit()
 
-        # 2. Синхронизация товаров
-        for cat_data in cats_list:
+        # Проход 2: Синхронизация иерархии (parent_id)
+        for cat_data in all_cats:
+            cat_id = cat_data.get("id")
+            if not cat_id: continue
+            
+            parent_iiko_id = cat_data.get("_parent_iiko_id") or cat_data.get("parentGroupId") or cat_data.get("parentId")
+            cat = session.exec(select(Category).where(Category.iiko_id == cat_id)).first()
+            if cat and not getattr(cat, "lock_parent", False):
+                if parent_iiko_id:
+                    parent_cat = session.exec(select(Category).where(Category.iiko_id == parent_iiko_id)).first()
+                    cat.parent_id = parent_cat.id if parent_cat else None
+                else:
+                    cat.parent_id = None
+        session.commit()
+
+        # 2. Синхронизация товаров (из категорий и корневых элементов)
+        processed_item_ids = set()
+        items_to_process = []
+
+        # Сбор элементов из всех категорий
+        for cat_data in all_cats:
             iiko_cat_id = cat_data.get("id")
             local_cat = session.exec(select(Category).where(Category.iiko_id == iiko_cat_id)).first()
             category_id = local_cat.id if local_cat else None
             
-            items_list = cat_data.get("items") or cat_data.get("products") or []
-            for item_data in items_list:
-                item_id = item_data.get("itemId") or item_data.get("id")
-                if not item_id: continue
-                
-                prod = session.exec(select(Product).where(Product.iiko_id == item_id)).first()
-                
-                sizes = item_data.get("itemSizes", [])
-                price = 0
-                nutritions = {}
-                weight = None
-                
-                if sizes:
-                    s0 = sizes[0]
-                    prices = s0.get("prices", [])
-                    if prices: price = prices[0].get("price", 0)
-                    nutritions = s0.get("nutritionPerHundredGrams") or s0.get("nutritions") or {}
-                    weight = s0.get("portionWeightGrams")
-                elif "price" in item_data: 
-                    price = item_data["price"]
+            c_items = cat_data.get("items") or cat_data.get("products") or []
+            for item_data in c_items:
+                items_to_process.append((item_data, category_id))
 
-                updated_data = {
-                    "name": item_data["name"],
-                    "description": item_data.get("description") or "",
-                    "price": float(price or 0),
-                    "article": item_data.get("sku") or "", 
-                    "category_id": category_id,
-                    "is_available": not item_data.get("isHidden", False),
-                    "weight_grams": int(weight) if weight else None,
-                    "calories": int(nutritions.get("energy") or 0) or None,
-                    "proteins": float(nutritions.get("proteins") or 0) or None,
-                    "fats": float(nutritions.get("fats") or 0) or None,
-                    "carbohydrates": float(nutritions.get("carbs") or 0) or None,
-                    "image_url": item_data.get("buttonImageUrl"),
-                    "updated_at": datetime.now(timezone.utc).replace(tzinfo=None)
-                }
+        # Сбор элемента из корня меню (если применимо)
+        root_items = menu_data.get("products") or menu_data.get("items") or []
+        for item_data in root_items:
+            cat_iiko_id = item_data.get("categoryId") or item_data.get("groupId")
+            local_cat = session.exec(select(Category).where(Category.iiko_id == cat_iiko_id)).first() if cat_iiko_id else None
+            category_id = local_cat.id if local_cat else None
+            items_to_process.append((item_data, category_id))
 
-                if prod:
-                    for key, val in updated_data.items(): setattr(prod, key, val)
-                else:
-                    prod = Product(iiko_id=item_id, **updated_data)
-                    session.add(prod)
-                
-                session.flush()
+        for item_data, category_id in items_to_process:
+            item_id = item_data.get("itemId") or item_data.get("id")
+            if not item_id or item_id in processed_item_ids:
+                continue
+            processed_item_ids.add(item_id)
+            
+            prod = session.exec(select(Product).where(Product.iiko_id == item_id)).first()
+            
+            sizes = item_data.get("itemSizes", [])
+            price = 0
+            nutritions = {}
+            weight = None
+            
+            if sizes:
+                s0 = sizes[0]
+                prices = s0.get("prices", [])
+                if prices: price = prices[0].get("price", 0)
+                nutritions = s0.get("nutritionPerHundredGrams") or s0.get("nutritions") or {}
+                weight = s0.get("portionWeightGrams")
+            elif "price" in item_data: 
+                price = item_data["price"]
 
-                # Размеры
-                session.exec(delete(ProductSize).where(ProductSize.product_id == prod.id))
-                
-                if sizes:
-                    for s_data in sizes:
-                        s_price = 0
-                        if s_data.get("prices"): s_price = s_data["prices"][0].get("price", 0)
-                        session.add(ProductSize(
-                            product_id=prod.id,
-                            iiko_id=s_data.get("sizeId") or item_id,
-                            name=s_data.get("sizeName") or "Стандарт",
-                            price=float(s_price or 0),
-                            is_default=s_data.get("isDefault", False)
-                        ))
-                else:
+            # Fallback цены
+            size0_id = sizes[0].get("sizeId") if sizes else None
+            fallback_price = nomenclature_prices.get((item_id, size0_id))
+            if (price is None or price == 0) and fallback_price is not None:
+                price = fallback_price
+
+            updated_data = {
+                "name": item_data["name"],
+                "description": item_data.get("description") or "",
+                "price": float(price or 0),
+                "article": item_data.get("sku") or "", 
+                "category_id": category_id,
+                "is_available": not item_data.get("isHidden", False),
+                "weight_grams": int(weight) if weight else None,
+                "calories": int(nutritions.get("energy") or 0) or None,
+                "proteins": float(nutritions.get("proteins") or 0) or None,
+                "fats": float(nutritions.get("fats") or 0) or None,
+                "carbohydrates": float(nutritions.get("carbs") or 0) or None,
+                "image_url": item_data.get("buttonImageUrl") or (sizes[0].get("buttonImageUrl") if sizes else None),
+                "updated_at": datetime.now(timezone.utc).replace(tzinfo=None)
+            }
+
+            if prod:
+                for key, val in updated_data.items(): setattr(prod, key, val)
+            else:
+                prod = Product(iiko_id=item_id, **updated_data)
+                session.add(prod)
+            
+            session.flush()
+
+            # Размеры
+            session.exec(delete(ProductSize).where(ProductSize.product_id == prod.id))
+            
+            if sizes:
+                has_default = any(s_data.get("isDefault", False) or s_data.get("default", False) for s_data in sizes)
+                for idx, s_data in enumerate(sizes):
+                    s_price = 0
+                    if s_data.get("prices"): s_price = s_data["prices"][0].get("price", 0)
+                    
+                    fallback_size_price = nomenclature_prices.get((item_id, s_data.get("sizeId")))
+                    if (s_price is None or s_price == 0) and fallback_size_price is not None:
+                        s_price = fallback_size_price
+
+                    is_def = s_data.get("isDefault", False) or s_data.get("default", False)
+                    if not has_default and idx == 0:
+                        is_def = True
+
+                    s_weight = s_data.get("portionWeightGrams")
+
                     session.add(ProductSize(
                         product_id=prod.id,
-                        iiko_id=item_id,
-                        name="Стандарт",
-                        price=float(price or 0),
-                        is_default=True
+                        iiko_id=s_data.get("sizeId") or item_id,
+                        name=s_data.get("sizeName") or "Стандарт",
+                        price=float(s_price or 0),
+                        weight_grams=int(s_weight) if s_weight else None,
+                        is_default=is_def
                     ))
+            else:
+                session.add(ProductSize(
+                    product_id=prod.id,
+                    iiko_id=item_id,
+                    name="Стандарт",
+                    price=float(price or 0),
+                    weight_grams=int(weight) if weight else None,
+                    is_default=True
+                ))
 
-                # Модификаторы
-                target_size = next((s for s in sizes if s.get("isDefault")), sizes[0] if sizes else None)
-                if target_size:
-                    session.exec(delete(ProductModifierGroup).where(ProductModifierGroup.product_id == prod.id))
+            # Модификаторы
+            target_size = next((s for s in sizes if s.get("isDefault") or s.get("default")), sizes[0] if sizes else None)
+            mod_groups = []
+            if target_size and (target_size.get("itemModifierGroups") or target_size.get("modifierGroups")):
+                mod_groups = target_size.get("itemModifierGroups") or target_size.get("modifierGroups") or []
+            elif item_data.get("itemModifierGroups") or item_data.get("modifierGroups"):
+                mod_groups = item_data.get("itemModifierGroups") or item_data.get("modifierGroups") or []
+
+            if mod_groups:
+                old_groups = session.exec(select(ProductModifierGroup).where(ProductModifierGroup.product_id == prod.id)).all()
+                old_group_ids = [g.id for g in old_groups]
+                if old_group_ids:
+                    session.exec(delete(ProductModifier).where(ProductModifier.group_id.in_(old_group_ids)))
+                
+                session.exec(delete(ProductModifierGroup).where(ProductModifierGroup.product_id == prod.id))
+                
+                for mg_data in mod_groups:
+                    mg_id = mg_data.get("itemGroupId") or mg_data.get("modifierGroupId") or f"mg_{mg_data['name']}"
+                    new_group = ProductModifierGroup(
+                        product_id=prod.id,
+                        iiko_id=mg_id,
+                        name=mg_data["name"],
+                        min_amount=mg_data.get("minAmount", 0),
+                        max_amount=mg_data.get("maxAmount", 1),
+                        is_required=mg_data.get("minAmount", 0) > 0
+                    )
+                    session.add(new_group)
+                    session.flush()
                     
-                    mod_groups = target_size.get("itemModifierGroups", [])
-                    for mg_data in mod_groups:
-                        mg_id = mg_data.get("itemGroupId") or mg_data.get("modifierGroupId") or f"mg_{mg_data['name']}"
-                        new_group = ProductModifierGroup(
-                            product_id=prod.id,
-                            iiko_id=mg_id,
-                            name=mg_data["name"],
-                            min_amount=mg_data.get("minAmount", 0),
-                            max_amount=mg_data.get("maxAmount", 1),
-                            is_required=mg_data.get("minAmount", 0) > 0
-                        )
-                        session.add(new_group)
-                        session.flush()
+                    for m_item in mg_data.get("items", []):
+                        m_price = 0
+                        if m_item.get("prices"): m_price = m_item["prices"][0].get("price", 0)
                         
-                        for m_item in mg_data.get("items", []):
-                            m_price = 0
-                            if m_item.get("prices"): m_price = m_item["prices"][0].get("price", 0)
-                            session.add(ProductModifier(
-                                group_id=new_group.id,
-                                iiko_id=m_item["itemId"],
-                                name=m_item["name"],
-                                price=float(m_price),
-                                min_amount=m_item.get("minAmount", 0),
-                                max_amount=m_item.get("maxAmount", 1),
-                                default_amount=m_item.get("defaultAmount", 0)
-                            ))
-                products_synced += 1
+                        fallback_modifier_price = nomenclature_prices.get((m_item["itemId"], None))
+                        if (m_price is None or m_price == 0) and fallback_modifier_price is not None:
+                            m_price = fallback_modifier_price
+
+                        session.add(ProductModifier(
+                            group_id=new_group.id,
+                            iiko_id=m_item["itemId"],
+                            name=m_item["name"],
+                            price=float(m_price or 0),
+                            min_amount=m_item.get("minAmount", 0),
+                            max_amount=m_item.get("maxAmount", 1),
+                            default_amount=m_item.get("defaultAmount", 0)
+                        ))
+            products_synced += 1
         
         session.commit()
         return {"categories": categories_synced, "products": products_synced}
@@ -887,17 +1218,35 @@ class IikoSyncService:
         categories_synced = 0
         products_synced = 0
 
-        # 1. Категории
+        # 1. Категории (Проход 1: Создание/Обновление полей, кроме иерархии)
         if "groups" in nomenclature:
             for g in nomenclature["groups"]:
                 if g.get("isDeleted"): continue
                 cat = session.exec(select(Category).where(Category.iiko_id == g["id"])).first()
                 if cat:
-                    cat.name = g["name"]
+                    if not getattr(cat, "lock_name", False):
+                        cat.name = g["name"]
                     cat.updated_at = datetime.now(timezone.utc).replace(tzinfo=None)
                 else:
                     session.add(Category(iiko_id=g["id"], name=g["name"], is_active=True))
                 categories_synced += 1
+            session.commit()
+
+            # Проход 2: Иерархия (parent_id) с учетом lock_parent
+            for g in nomenclature["groups"]:
+                if g.get("isDeleted"): continue
+                cat_id = g["id"]
+                parent_iiko_id = g.get("parentGroup")
+                if parent_iiko_id:
+                    parent_cat = session.exec(select(Category).where(Category.iiko_id == parent_iiko_id)).first()
+                    if parent_cat:
+                        cat = session.exec(select(Category).where(Category.iiko_id == cat_id)).first()
+                        if cat and not getattr(cat, "lock_parent", False):
+                            cat.parent_id = parent_cat.id
+                else:
+                    cat = session.exec(select(Category).where(Category.iiko_id == cat_id)).first()
+                    if cat and not getattr(cat, "lock_parent", False):
+                        cat.parent_id = None
             session.commit()
 
         # 2. Товары
@@ -1128,9 +1477,15 @@ class IikoSyncService:
 
                 customer.updated_at = datetime.now(timezone.utc).replace(tzinfo=None)
                 session.add(customer)
-                session.flush()
+                session.commit()
 
             await asyncio.to_thread(_save_addresses)
+        else:
+            def _commit_customer():
+                customer.updated_at = datetime.now(timezone.utc).replace(tzinfo=None)
+                session.add(customer)
+                session.commit()
+            await asyncio.to_thread(_commit_customer)
         
         try:
             # Получаем ID организации для API
@@ -1140,15 +1495,10 @@ class IikoSyncService:
             settings_db = await asyncio.to_thread(_get_settings)
             org_id = settings_db.organization_id if settings_db else None
             
-            # Прямой вызов синхронизации (теперь с поддержкой fallback ID -> Phone)
-            await self.sync_single_customer(
-                session=session,
-                phone=clean_phone,
-                order_id=order_db_id,
-                organization_id=org_id,
-                fast_sync=True
-            )
-            logger.info(f"Synchronous sync completed for phone {clean_phone} during order creation")
+            # Запуск синхронизации лояльности через Celery фоновую задачу во избежание таймаутов БД сессии
+            from app.tasks.customer_tasks import sync_single_customer_task
+            sync_single_customer_task.delay(clean_phone, order_id=order_db_id, fast_sync=True)
+            logger.info(f"Dispatched background customer sync for phone {clean_phone} during order creation")
         except Exception as sync_err:
             logger.warning(f"Synchronous sync failed for {clean_phone}: {sync_err}. Falling back to background task if possible.")
             # Если прямой вызов упал, на всякий случай пробуем в фоне
@@ -1157,11 +1507,28 @@ class IikoSyncService:
                 sync_single_customer_task.delay(clean_phone, order_id=order_db_id, fast_sync=True)
             except:
                 pass
+        
+        # Запускаем фоновое принудительное обновление аналитики со сбросом кэша при любом получении заказа
+        try:
+            from app.tasks.customer_tasks import sync_single_customer_task
+            sync_single_customer_task.delay(clean_phone, fast_sync=False, bypass_cache=True)
+            logger.info(f"Triggered background full-sync for phone {clean_phone} during order creation")
+        except Exception as bg_err:
+            logger.warning(f"Failed to trigger background full-sync for phone {clean_phone}: {bg_err}")
+
+        # Автоматический поиск и привязка аккаунта MAX для клиента без max_user_id
+        if customer and customer.phone and not customer.max_user_id:
+            try:
+                from app.tasks.customer_tasks import link_customer_max_task
+                link_customer_max_task.delay(customer.id)
+                logger.info(f"Triggered link_customer_max_task for customer #{customer.id} ({customer.phone})")
+            except Exception as max_task_err:
+                logger.warning(f"Failed to trigger link_customer_max_task: {max_task_err}")
             
         return customer
 
     async def process_iiko_order(self, session: Session, iiko_order_data: Dict[str, Any], organization_id: str, iiko_card_data: Optional[Dict[str, Any]] = None):
-        from app.models.order import Order, OrderStatus # Локальный импорт для предотвращения UnboundLocalError и циклических зависимостей
+        from app.models.order import Order, OrderItem, OrderStatus # Локальный импорт для предотвращения UnboundLocalError и циклических зависимостей
         from sqlalchemy.orm.attributes import flag_modified as sql_flag_modified
         """Интегрированный метод обработки заказа: консолидированная и очищенная версия"""
         if not iiko_order_data:
@@ -1304,15 +1671,21 @@ class IikoSyncService:
 
             # 7. ФОРМИРОВАНИЕ АДРЕСА
             addr_fmt = (settings_db.address_format or "components") if settings_db else "components"
+            building = clean(raw_addr.get("building")) or clean(raw_addr_dp.get("building"))
+            line1_raw = clean(raw_addr.get("line1")) or clean(raw_addr_dp.get("line1")) or clean(raw_addr.get("line3")) or clean(raw_addr_dp.get("line3")) or clean(raw_addr.get("addressString")) or clean(raw_addr_dp.get("addressString"))
+            addr_comment = clean(dp.get("comment")) or clean(raw_addr.get("comment")) or clean(raw_addr_dp.get("comment"))
+
             merged_addr_obj = {
                 "city": city,
                 "street": {"name": street_name} if street_name else None,
                 "house": house,
+                "building": building,
                 "flat": flat,
                 "entrance": entrance,
                 "floor": floor,
                 "doorphone": doorphone,
-                "line1": clean(raw_addr.get("line1")) or clean(raw_addr_dp.get("line1"))
+                "line1": line1_raw,
+                "comment": addr_comment
             }
             
             try:
@@ -1356,17 +1729,26 @@ class IikoSyncService:
                 if not isinstance(p, dict): continue
                 pt = p.get("paymentType") or {}
                 pn = pt.get("name") if isinstance(pt, dict) else clean(pt)
-                pk = (clean(p.get("paymentTypeKind") or p.get("kind") or "") or "").lower()
+                pk = (clean(p.get("paymentTypeKind") or p.get("kind") or (pt.get("kind") if isinstance(pt, dict) else "") or "") or "").lower()
                 if not pn: pn = pk or "Тип оплаты"
                 
                 psum = float(p.get("sum") or 0)
                 
-                is_processed_externally = p.get("isProcessedExternally", False) or p.get("processedExternally", False)
-                is_prepay = p.get("isPrepay", False) or p.get("prepay", False)
+                is_processed_externally = bool(p.get("isProcessedExternally", False) or p.get("processedExternally", False))
+                is_prepay = bool(p.get("isPrepay", False) or p.get("prepay", False))
                 status_payment = p.get("status", "").lower()
                 
-                # Считаем платеж проведенным
-                is_processed = bool(is_processed_externally or is_prepay or status_payment in ["processed", "closed", "success"] or pk in ["card", "online", "external"])
+                # Считаем платеж проведенным строго по подтверждению от iiko:
+                # - либо подтвержден внешней платежной системой (isProcessedExternally)
+                # - либо проведен как предоплата (isPrepay)
+                # - либо статус платежа в iiko явно processed/closed/success
+                # - либо заказ полностью закрыт в кассе iiko (closed)
+                is_processed = bool(
+                    is_processed_externally 
+                    or is_prepay 
+                    or status_payment in ["processed", "closed", "success"]
+                    or raw_status_lower == "closed"
+                )
                 
                 # Если это оплата iikoCard (бонусы), прибавляем к потраченным бонусам и считаем как скидку
                 # Это делаем независимо от is_processed, так как бонусы списываются сразу и уменьшают сумму к доплате
@@ -1383,7 +1765,8 @@ class IikoSyncService:
                     "name": pn,
                     "kind": pk,
                     "sum": psum,
-                    "is_processed": is_processed
+                    "is_processed": is_processed,
+                    "is_prepay": is_prepay
                 })
                 if pn: pm_list.append(pn)
             
@@ -1394,13 +1777,14 @@ class IikoSyncService:
 
             # Считаем остаток
             left_to_pay = max(Decimal('0.00'), total_with_discount - Decimal(str(total_paid)))
-            is_paid = (left_to_pay <= 0)
+            is_paid = (left_to_pay <= Decimal('0.00'))
             
             payment_method = ", ".join(list(set(pm_list))) or "Не указан"
             
-            # Фолбэк статуса закрытого заказа
-            if not is_paid and raw_status_lower in ("closed", "delivered"):
+            # Фолбэк статуса закрытого заказа: в iiko закрытый заказ всегда полностью оплачен
+            if not is_paid and raw_status_lower == "closed":
                 is_paid = True
+                total_paid = float(total_with_discount)
                 left_to_pay = Decimal('0.00')
 
             status_map = {
@@ -1426,13 +1810,15 @@ class IikoSyncService:
             mapped_status = status_map.get(raw_status_lower, OrderStatus.new)
 
             # Если заказ закрыт в iiko - он точно оплачен (для нашей CRM)
-            if not is_paid and mapped_status in (OrderStatus.closed, OrderStatus.delivered):
+            if not is_paid and mapped_status == OrderStatus.closed:
                 is_paid = True
                 left_to_pay = Decimal('0.00')
                 logger.info(f"Order {order_id_iiko}: Paid via status enforcement ('{mapped_status}')")
 
+
             # 7. Курьер, тип и дополнительные данные
             courier_name = "Не назначен"
+            courier_iiko_id = None
             ci = o_data.get("courierInfo") or {}
             if isinstance(ci, dict):
                 c_obj = ci.get("courier") or {}
@@ -1440,9 +1826,35 @@ class IikoSyncService:
                     fn = clean(c_obj.get("firstName") or c_obj.get("name")) or ""
                     ln = clean(c_obj.get("lastName")) or ""
                     courier_name = " ".join(filter(None, [fn, ln])).strip() or clean(ci.get("courierName")) or "Не назначен"
+                    courier_iiko_id = c_obj.get("id")
                     # Дополнительная защита от "None" в конце имени
                     if " None" in courier_name:
                         courier_name = courier_name.replace(" None", "").strip()
+
+                    # Сопоставление с локальным справочником сотрудников Employee
+                    from app.models.employee import Employee
+                    if courier_iiko_id:
+                        def _get_emp_by_iiko():
+                            return session.exec(select(Employee).where(Employee.iiko_id == str(courier_iiko_id))).first()
+                        emp_match = await asyncio.to_thread(_get_emp_by_iiko)
+                        if emp_match and emp_match.name:
+                            courier_name = emp_match.name
+                    elif courier_name and courier_name != "Не назначен":
+                        def _get_emp_by_name():
+                            emp_direct = session.exec(select(Employee).where(Employee.name == courier_name)).first()
+                            if emp_direct:
+                                return emp_direct
+                            target_words = {w for w in courier_name.lower().split() if len(w) > 2 and w not in ["курьер", "courier"]}
+                            if target_words:
+                                for e_item in session.exec(select(Employee)).all():
+                                    e_words = {w for w in (e_item.name or "").lower().split() if len(w) > 2}
+                                    if target_words & e_words:
+                                        return e_item
+                            return None
+                        emp_match = await asyncio.to_thread(_get_emp_by_name)
+                        if emp_match and emp_match.name:
+                            courier_name = emp_match.name
+                            courier_iiko_id = emp_match.iiko_id
 
             stype = (clean(o_data.get("orderServiceType")) or "").lower()
             if not stype and isinstance(o_data.get("orderType"), dict):
@@ -1486,7 +1898,12 @@ class IikoSyncService:
             
             # 8. Финальные флаги и сохранение
             delay = di.get("delayMinutes")
-            admin_name = self.clean_str((o_data.get("conformationInfo") or {}).get("confirmedBy"))
+            admin_name = None
+            op = o_data.get("operator")
+            if isinstance(op, dict):
+                admin_name = self.clean_str(op.get("name"))
+            if not admin_name:
+                admin_name = self.clean_str((o_data.get("conformationInfo") or {}).get("confirmedBy"))
             if not admin_name:
                 admin_name = self.clean_str((o_data.get("confirmationInfo") or {}).get("confirmedBy"))
 
@@ -1497,14 +1914,23 @@ class IikoSyncService:
 
             # ЗАПРЕТ ОБНОВЛЕНИЯ СТАТУСА ДЛЯ ЗАКРЫТЫХ ЗАКАЗОВ (но разрешаем обновление деталей для учета лояльности)
             if order and order.status in (OrderStatus.closed, OrderStatus.cancelled, OrderStatus.delivered):
-                if order.status != mapped_status:
+                # Если в БД заказ уже закрыт/доставлен/отменен, а из iiko приходит промежуточный статус (waiting/cooking/etc),
+                # мы НЕ откатываем статус назад в активный.
+                if mapped_status not in (OrderStatus.closed, OrderStatus.cancelled, OrderStatus.delivered):
+                    mapped_status = order.status
+                elif order.status != mapped_status:
                     logger.info(f"Order {order.id}: Status update ({order.status} -> {mapped_status})")
                     order.status = mapped_status
-                    # Сохраняем в историю
-                    h = list(order.status_history or [])
-                    h.append({"status": mapped_status, "time": current_time_tz.isoformat(), "comment": f"iiko: {raw_status} (terminal update)"})
-                    order.status_history = h
-                    sql_flag_modified(order, "status_history")
+                    append_order_status_history(
+                        order=order,
+                        new_status=mapped_status,
+                        comment=f"iiko: {raw_status} (terminal update)",
+                        custom_time=current_time_tz,
+                        tz=tz
+                    )
+                if mapped_status == OrderStatus.closed:
+                    is_paid = True
+                    left_to_pay = Decimal('0.00')
                 # Продолжаем выполнение для обновления деталей (discounts, items, bonus_spent)
 
 
@@ -1513,6 +1939,11 @@ class IikoSyncService:
             old_items_count = len(getattr(order, 'order_items_details', []) or []) if order else 0
             old_time = getattr(order, 'expected_time', None) if order else None
             old_address = getattr(order, 'delivery_address', None) if order else None
+            old_courier = getattr(order, 'courier_name', None) if order else None
+            old_cooking_time = getattr(order, 'cooking_time_minutes', None) if order else None
+            old_payments_details = getattr(order, 'payments_details', None) if order else None
+            old_order_type = getattr(order, 'order_type', None) if order else None
+            old_status = getattr(order, 'status', None) if order else None
 
             # Определяем филиал (branch) по terminalGroupId
             terminal_group_id = o_data.get("terminalGroupId")
@@ -1531,7 +1962,13 @@ class IikoSyncService:
                 is_new = True
                 order = Order(iiko_order_id=order_id_iiko, branch_id=branch_id)
                 order.iiko_creation_time = iiko_creation_time
-                order.status_history = [{"status": mapped_status, "time": current_time_tz.isoformat(), "comment": "Синхронизирован"}]
+                append_order_status_history(
+                    order=order,
+                    new_status=mapped_status,
+                    comment=f"iiko: {raw_status}" if raw_status else "Синхронизирован",
+                    custom_time=current_time_tz,
+                    tz=tz
+                )
             else:
                 # Если заказ уже есть, обновляем branch_id если он изменился
                 order.branch_id = branch_id
@@ -1583,10 +2020,13 @@ class IikoSyncService:
 
             # Восстанавливаем логику истории статусов
             if order.id and order.status != mapped_status:
-                h = list(order.status_history or [])
-                h.append({"status": mapped_status, "time": current_time_tz.isoformat(), "comment": f"iiko: {raw_status}"})
-                order.status_history = h
-                sql_flag_modified(order, "status_history")
+                append_order_status_history(
+                    order=order,
+                    new_status=mapped_status,
+                    comment=f"iiko: {raw_status}",
+                    custom_time=current_time_tz,
+                    tz=tz
+                )
 
             # Маппинг всех полей
             order.status = mapped_status
@@ -1607,13 +2047,43 @@ class IikoSyncService:
                 order.entrance = entrance or order.entrance
                 order.floor = floor or order.floor
                 order.doorphone = doorphone or order.doorphone
+                order.address_parts = merged_addr_obj
+                sql_flag_modified(order, "address_parts")
             
+            # Извлекаем примечание к адресу
+            address_comment_raw = dp.get("comment") or raw_addr.get("comment") or raw_addr_dp.get("comment")
+            
+            # Извлекаем дополнительную информацию и прочее из верхнего уровня или externalData
+            additional_info_raw = o_data.get("additionalInfo")
+            other_info_raw = o_data.get("otherInfo") or o_data.get("other")
+            
+            ext_data = o_data.get("externalData") or []
+            for item in ext_data:
+                if isinstance(item, dict):
+                    k = (item.get("key") or "").lower().strip()
+                    v = item.get("value")
+                    if not additional_info_raw and any(x in k for x in ["доп", "additional"]):
+                        additional_info_raw = v
+                    if not other_info_raw and any(x in k for x in ["проч", "other"]):
+                        other_info_raw = v
+
+            order.address_comment = clean(address_comment_raw) or None
+            order.additional_info = clean(additional_info_raw) or None
+            order.other_info = clean(other_info_raw) or None
+
             orig_comment = clean(o_data.get("comment"))
             if bonus_spent_from_payments > 0:
                 bonus_note = f"[Оплата бонусами: {bonus_spent_from_payments:.0f} руб.]"
                 order.comment = f"{orig_comment} {bonus_note}" if orig_comment else bonus_note
             else:
                 order.comment = orig_comment or None
+            
+            # Если заказ уже оплачен курьером или отмечен оплаченным в локальной БД, не сбрасываем в False
+            if not is_paid and getattr(order, 'is_paid', False) and mapped_status in (OrderStatus.delivering, OrderStatus.delivered):
+                is_paid = True
+                left_to_pay = Decimal('0.00')
+                logger.info(f"Order {order_id_iiko}: Retaining local courier paid status")
+
             order.total_amount, order.total_with_discount, order.total_discount = sum_total, total_with_discount, total_discount
             order.total_paid = Decimal(str(total_paid))
             order.left_to_pay = left_to_pay
@@ -1699,6 +2169,7 @@ class IikoSyncService:
             # ---------------------------------------------
 
             # --- НОВАЯ ЛОГИКА СОСТАВА ЗАКАЗА (с именами и защитой от затирания) ---
+            prod_obj_map = {}
             
             if "items" in o_data and isinstance(o_data["items"], list) and len(o_data["items"]) > 0:
                 raw_items = o_data.get("items", [])
@@ -1727,11 +2198,13 @@ class IikoSyncService:
                             product_ids.append(mpid)
                             if not mod.get("productId"): mod["productId"] = mpid
                         
-                # Достаем названия из локальной базы
+                # Достаем названия и картинки из локальной базы
                 def _get_products():
                     return session.exec(select(Product).where(Product.iiko_id.in_(product_ids))).all()
                 db_products = await asyncio.to_thread(_get_products)
                 prod_map = {p.iiko_id: p.name for p in db_products}
+                prod_img_map = {p.iiko_id: p.image_url for p in db_products}
+                prod_obj_map = {p.iiko_id: p for p in db_products}
 
                 # Достаем старые названия из текущего состояния заказа
                 old_names_map = {}
@@ -1773,6 +2246,10 @@ class IikoSyncService:
                             old_names_map.get(pid) or 
                             "Неизвестный товар"
                         )
+                    
+                    # Записываем ссылку на картинку
+                    enriched_item["image_url"] = prod_img_map.get(pid) or enriched_item.get("image_url")
+                    
                     if not enriched_item.get("sum"):
                         enriched_item["sum"] = float(enriched_item.get("amount", 0)) * float(enriched_item.get("price", 0))
                         
@@ -1906,6 +2383,92 @@ class IikoSyncService:
                 session.flush() # Получаем ID для последующей синхронизации
             await asyncio.to_thread(_save_order_intermediate)
 
+            # --- Авто-сопоставление безналичного платежа заказа с реальной банковской проводкой Т-Банка ---
+            # Сопоставление с выпиской Т-Банка выполняем СТРОГО если платеж или заказ реально оплачен в iiko!
+            try:
+                from app.models.tbank_settings import TBankAccountStatement
+                from app.api.chat import manager
+                
+                if is_paid or (float(total_paid) > 0 and raw_status_lower in ["closed", "delivered"]):
+                    for p_item in pm_list_detailed:
+                        pn_lower = (p_item.get("name") or "").lower()
+                        is_cash_item = "налич" in pn_lower
+                        pay_sum = float(p_item.get("sum", 0) or 0)
+                        p_processed = p_item.get("is_processed", False)
+                        
+                        if not is_cash_item and pay_sum > 0 and (p_processed or is_paid):
+                            comm_lower = (order.comment or "").lower()
+                            # Определение точного метода оплаты
+                            if any(w in pn_lower for w in ["сбп", "qr"]) or any(w in comm_lower for w in ["сбп", "sbp"]):
+                                det_method = "СБП"
+                            elif any(w in pn_lower for w in ["tpay", "t-pay"]) or any(w in comm_lower for w in ["tpay", "t-pay", "t pay"]):
+                                det_method = "T-Pay"
+                            elif "приложении" in comm_lower or "приложение" in comm_lower:
+                                det_method = "СБП (T-Pay)"
+                            elif "курьер" in pn_lower:
+                                det_method = "Картой курьеру"
+                            else:
+                                det_method = "Эквайринг"
+
+                            # 1. Проверяем, не сопоставлен ли этот заказ уже с реальной проводкой Т-Банка
+                            def _check_already_matched():
+                                return session.exec(
+                                    select(TBankAccountStatement).where(
+                                        TBankAccountStatement.matched_order_id == order.id
+                                    )
+                                ).first()
+
+                            already_matched = await asyncio.to_thread(_check_already_matched)
+                            if already_matched:
+                                # Заказ уже привязан к банковской операции, дублировать не нужно
+                                continue
+
+                            # 2. Ищем реальную непривязанную проводку Т-Банка по сумме и времени (с учетом времени создания и закрытия)
+                            def _find_matching_statement():
+                                tx_time = iiko_creation_time or order.created_at or datetime.now()
+                                if hasattr(tx_time, 'tzinfo') and tx_time.tzinfo is not None:
+                                    tx_time = tx_time.replace(tzinfo=None)
+                                up_time = order.updated_at
+                                if up_time is not None and hasattr(up_time, 'tzinfo') and up_time.tzinfo is not None:
+                                    up_time = up_time.replace(tzinfo=None)
+                                from datetime import timedelta
+                                time_min = tx_time - timedelta(hours=2)
+                                end_bound = up_time if (up_time and up_time > tx_time) else tx_time
+                                time_max = end_bound + timedelta(hours=3)
+                                return session.exec(
+                                    select(TBankAccountStatement).where(
+                                        TBankAccountStatement.amount == pay_sum,
+                                        TBankAccountStatement.charge_date >= time_min,
+                                        TBankAccountStatement.charge_date <= time_max,
+                                        TBankAccountStatement.matched_order_id == None
+                                    )
+                                ).first()
+                                
+                            matched_stmt = await asyncio.to_thread(_find_matching_statement)
+                            if matched_stmt:
+                                matched_stmt.matched_order_id = order.id
+                                def _save_matched_statement():
+                                    session.add(matched_stmt)
+                                    session.flush()
+                                await asyncio.to_thread(_save_matched_statement)
+                                logger.info(f"[T-Bank Match] Заказ #{order.id} успешно сопоставлен с реальной проводкой Т-Банка #{matched_stmt.id} (RRN: {matched_stmt.payer_account})")
+
+                                # Мгновенная отправка в WebSocket шину Redis Pub/Sub для LIVE-монитора Т-Банка ТОЛЬКО при реальном сопоставлении проводки
+                                try:
+                                    ws_payload = {
+                                        "type": "new_bank_payment",
+                                        "amount": pay_sum,
+                                        "method": det_method,
+                                        "customer": order.customer_name or "Клиент",
+                                        "order_id": order.id,
+                                        "rrn": str(matched_stmt.payer_account or f"ORD{order.id:06d}")
+                                    }
+                                    manager.broadcast_sync(ws_payload)
+                                except Exception as ws_e:
+                                    logger.warning(f"Failed to broadcast new_bank_payment from iiko_sync: {ws_e}")
+            except Exception as tbank_err:
+                logger.error(f"Ошибка при сопоставлении платежа Т-Банка: {tbank_err}")
+
             # --- АВТО-СОЗДАНИЕ КАРТОЧКИ КЛИЕНТА ---
             if phone:
                 try:
@@ -1955,6 +2518,11 @@ class IikoSyncService:
                         total_sum=float(total_with_discount),
                         order_db_id=order.id
                     )
+                    
+                    if customer_obj and order.customer_id != customer_obj.id:
+                        order.customer_id = customer_obj.id
+                        session.add(order)
+                        logger.info(f"Linked order {order.id} to customer {customer_obj.id}")
 
                     # --- ЛОГИКА "ПЕРВЫЙ ЗАКАЗ" ---
                     if is_new and customer_obj:
@@ -1977,13 +2545,105 @@ class IikoSyncService:
                 except Exception as cust_err:
                     logger.error(f"Error in auto-creating customer for order {order_id_iiko}: {cust_err}")
 
+            # --- СИНХРОНИЗАЦИЯ ПОЗИЦИЙ ЗАКАЗА (order_items) ДЛЯ КУХНИ (KDS) ---
+            try:
+                def _sync_order_items():
+                    # Загружаем существующие OrderItem для этого заказа
+                    existing_items = session.exec(
+                        select(OrderItem).where(OrderItem.order_id == order.id)
+                    ).all()
+                    
+                    # Группируем существующие OrderItem по product_id
+                    existing_by_prod = {}
+                    for ei in existing_items:
+                        existing_by_prod.setdefault(ei.product_id, []).append(ei)
+                        
+                    items_to_keep = set()
+                    
+                    # Проходим по позициям из iiko
+                    for item_data in (order.order_items_details or []):
+                        pid_iiko = item_data.get("productId")
+                        if not pid_iiko:
+                            continue
+                            
+                        prod = prod_obj_map.get(pid_iiko)
+                        prod_id = prod.id if prod else None
+                        
+                        # Ищем существующий OrderItem
+                        matched_item = None
+                        if prod_id and prod_id in existing_by_prod and existing_by_prod[prod_id]:
+                            matched_item = existing_by_prod[prod_id].pop(0)
+                            
+                        qty = int(float(item_data.get("amount") or item_data.get("quantity") or 1))
+                        price = Decimal(str(item_data.get("price") or 0))
+                        total = Decimal(str(item_data.get("sum") or (qty * float(price))))
+                        size_val = item_data.get("size_name") or item_data.get("size")
+                        if isinstance(size_val, dict):
+                            size_name = size_val.get("name")
+                        else:
+                            size_name = size_val
+                        comment = item_data.get("comment")
+                        modifiers = item_data.get("modifiers")
+                        
+                        # Определяем зону приготовления (цех)
+                        k_zone_id = item_data.get("kitchen_zone_id") or (prod.kitchen_zone_id if prod else None)
+                        
+                        if matched_item:
+                            # Обновляем существующий
+                            matched_item.product_name = item_data.get("name") or "Неизвестный товар"
+                            matched_item.quantity = qty
+                            matched_item.price = price
+                            matched_item.total = total
+                            matched_item.size_name = size_name
+                            matched_item.comment = comment
+                            matched_item.modifiers = modifiers
+                            if k_zone_id is not None:
+                                matched_item.kitchen_zone_id = k_zone_id
+                            
+                            session.add(matched_item)
+                            items_to_keep.add(matched_item.id)
+                        else:
+                            # Создаем новый
+                            new_item = OrderItem(
+                                order_id=order.id,
+                                product_id=prod_id,
+                                product_name=item_data.get("name") or "Неизвестный товар",
+                                quantity=qty,
+                                price=price,
+                                total=total,
+                                size_name=size_name,
+                                comment=comment,
+                                modifiers=modifiers,
+                                kitchen_status="pending",
+                                kitchen_zone_id=k_zone_id
+                            )
+                            session.add(new_item)
+                            session.flush() # Получаем ID
+                            items_to_keep.add(new_item.id)
+                            
+                    # Удаляем старые, которых больше нет в iiko
+                    for ei in existing_items:
+                        if ei.id not in items_to_keep:
+                            session.delete(ei)
+                            
+                await asyncio.to_thread(_sync_order_items)
+            except Exception as items_sync_err:
+                logger.error(f"Error syncing order items for order {order_id_iiko}: {items_sync_err}")
+
             await asyncio.to_thread(session.commit)
             logger.info(f"Order {order_id_iiko} ({external_number}) synced. Status={mapped_status}, Paid={is_paid}")
 
             # Проверка изменений для уведомлений (только для существующих заказов)
+            old_cook = int(old_cooking_time or 0)
+            new_cook = int(order.cooking_time_minutes or 0)
+            is_cooking_time_set = not is_new and (old_cook <= 0 and new_cook > 0)
+            is_cooking_time_rechanged = not is_new and (old_cook > 0 and new_cook > 0 and old_cook != new_cook)
+            is_cooking_time_changed = not is_new and (old_cook != new_cook)
+
             is_amount_changed = not is_new and abs(old_amount - float(total_with_discount)) > 0.01
             is_address_changed = not is_new and old_address != order.delivery_address and has_new_address
             is_items_changed = not is_new and old_items_count != len(order.order_items_details or [])
+            is_payment_changed = not is_new and old_payments_details != order.payments_details
             
             is_time_changed = False
             if not is_new and old_time and order.expected_time:
@@ -2003,24 +2663,697 @@ class IikoSyncService:
                 except Exception as e:
                     logger.warning(f"Failed to trigger re-sync for customer {phone}: {e}")
 
-            # Отправка уведомлений в VK
+            # Отправка уведомлений
             if is_new:
-                await self._send_order_vk_notification(order, "order_new", session=session)
-            elif is_status_changed:
+                # 1. Общее событие "Новый заказ" для всех заказов (доставка, самовывоз, зал)
+                await self._send_order_vk_notification(order, "order_new_all", session=session)
+                
+                # 2. Событие "Новый заказ на доставку" для цепочек курьера
+                ord_type_str = str(order.order_type or "").lower()
+                is_pickup_order = "самовывоз" in ord_type_str or "pickup" in ord_type_str
+                if not is_pickup_order:
+                    await self.check_and_send_order_new_to_courier(order, session=session)
+                
+                # Отправка WebSocket уведомления в админку
+                try:
+                    from app.api.chat import manager
+                    ws_payload = {
+                        "type": "new_order",
+                        "order_id": order.id,
+                        "iiko_order_id": order.iiko_order_id,
+                        "order_number": external_number,
+                        "total_sum": float(total_with_discount),
+                        "customer_name": order.customer_name or "Гость"
+                    }
+                    loop = asyncio.get_event_loop()
+                    if loop.is_running():
+                        loop.create_task(manager.broadcast(ws_payload))
+                except Exception as e:
+                    logger.error(f"Failed to send websocket order notification: {e}")
+                
+                # Отправка пуш-уведомления администраторам
+                try:
+                    cust_name = order.customer_name or "Гость"
+                    await self.send_admin_push_notification(
+                        session=session,
+                        title="Новый заказ!",
+                        body=f"Сумма: {total_with_discount} ₽ | Клиент: {cust_name} | Заказ #{external_number or order.id}",
+                        url="/admin/orders",
+                        event_type="new_order",
+                        tag=f"order-{order.id}"
+                    )
+                except Exception as e:
+                    logger.error(f"Failed to send admin push notification: {e}")
+
+                # НОВАЯ ДОСТАВКА БЕЗ НАЗНАЧЕННОГО КУРЬЕРА
+                if order_type == "Доставка" and (not courier_name or courier_name == "Не назначен"):
+                    try:
+                        ws_unassigned = {
+                            "type": "delivery_unassigned",
+                            "order_id": order.id,
+                            "order_number": external_number,
+                            "total_sum": float(total_with_discount),
+                            "address": order.delivery_address,
+                            "customer_name": order.customer_name or "Гость"
+                        }
+                        loop = asyncio.get_event_loop()
+                        if loop.is_running():
+                            loop.create_task(manager.broadcast(ws_unassigned))
+                        
+                        await self.send_admin_push_notification(
+                            session=session,
+                            title="Новая доставка (свободная)!",
+                            body=f"Сумма: {total_with_discount} ₽ | Адрес: {order.delivery_address} | Заказ #{external_number or order.id}",
+                            url="/admin/orders",
+                            event_type="delivery_unassigned",
+                            tag=f"unassigned-{order.id}"
+                        )
+                    except Exception as e:
+                        logger.error(f"Failed to send delivery_unassigned notifications: {e}")
+
+            # ОТСЛЕЖИВАНИЕ ИЗМЕНЕНИЙ КУРЬЕРА (назначение, переназначение или снятие)
+            is_courier_assigned_now = False
+            is_courier_unassigned_now = False
+            is_courier_reassigned = False
+            
+            if is_new and courier_name and courier_name != "Не назначен":
+                is_courier_assigned_now = True
+            elif not is_new and old_courier != courier_name:
+                if courier_name and courier_name != "Не назначен":
+                    is_courier_assigned_now = True
+                    if old_courier and old_courier != "Не назначен":
+                        is_courier_reassigned = True
+                if old_courier and old_courier != "Не назначен" and (not courier_name or courier_name == "Не назначен"):
+                    is_courier_unassigned_now = True
+
+            if is_courier_assigned_now:
+                # 0. При переназначении курьера обязательно сбрасываем статус подтверждения
+                if is_courier_reassigned:
+                    order.courier_notification_status = None
+                    order.courier_accepted_at = None
+                    order.courier_accepted_source = None
+                    order.courier_read_at = None
+                    order.updated_at = datetime.now(timezone.utc)
+                    session.add(order)
+
+                # 1. Широковещательное обновление для админки (/orders) и панели курьера (/pers/courier)
+                now_ts = int(datetime.now(timezone.utc).timestamp() * 1000)
+                ws_order_changed = {
+                    "type": "order_changed",
+                    "order_id": order.id,
+                    "order_number": external_number or str(order.id),
+                    "status": order.status,
+                    "customer_name": order.customer_name or "Гость",
+                    "order_type": order.order_type,
+                    "courier_name": order.courier_name,
+                    "courier_notification_status": order.courier_notification_status,
+                    "timestamp": now_ts
+                }
+                ws_courier_status = {
+                    "type": "courier_status_changed",
+                    "order_id": order.id,
+                    "order_num": external_number or str(order.id),
+                    "courier_name": order.courier_name,
+                    "courier_notification_status": order.courier_notification_status,
+                    "status": "reassigned" if is_courier_reassigned else "assigned",
+                    "timestamp": now_ts
+                }
+                self.send_websocket_broadcast_safe(ws_order_changed)
+                self.send_websocket_broadcast_safe(ws_courier_status)
+
+                # 2. Отправка системного уведомления назначенному курьеру по цепочке шага 1 (order_new) или courier_assigned
+                sent_order_new = await self.check_and_send_order_new_to_courier(
+                    order, 
+                    session=session, 
+                    is_reassigned=is_courier_reassigned, 
+                    old_courier=old_courier, 
+                    new_courier=courier_name
+                )
+                if not sent_order_new:
+                    try:
+                        await self._send_order_vk_notification(
+                            order, 
+                            "courier_assigned", 
+                            session=session,
+                            is_reassigned=is_courier_reassigned,
+                            old_courier=old_courier,
+                            new_courier=courier_name
+                        )
+                        if is_courier_reassigned:
+                            logger.info(f"Order #{order.external_number or order.id} was REASSIGNED from '{old_courier}' to '{courier_name}'. Notification 'courier_assigned' sent to new courier.")
+                    except Exception as notif_err:
+                        logger.error(f"Failed to send courier_assigned notification: {notif_err}")
+
+                # 3. WebSocket и Push для приложения сотрудника
+                try:
+                    courier_user = None
+                    if courier_iiko_id:
+                        def _get_courier_user():
+                            return session.exec(select(User).where(User.iiko_id == str(courier_iiko_id))).first()
+                        courier_user = await asyncio.to_thread(_get_courier_user)
+                    
+                    if not courier_user and courier_name:
+                        def _get_courier_user_by_name():
+                            return session.exec(select(User).where(User.full_name == courier_name)).first()
+                        courier_user = await asyncio.to_thread(_get_courier_user_by_name)
+                        
+                    if courier_user:
+                        ws_assigned = {
+                            "type": "delivery_assigned",
+                            "order_id": order.id,
+                            "order_number": external_number,
+                            "address": order.delivery_address,
+                            "amount": float(total_with_discount),
+                            "target_user_id": courier_user.id
+                        }
+                        self.send_websocket_broadcast_safe(ws_assigned)
+                            
+                        await self.send_admin_push_notification(
+                            session=session,
+                            title="Вам назначена доставка!",
+                            body=f"Адрес: {order.delivery_address} | Заказ #{external_number or order.id}",
+                            url="/pers/courier",
+                            event_type="delivery_assigned",
+                            target_user_id=courier_user.id,
+                            tag=f"assigned-{order.id}"
+                        )
+                except Exception as e:
+                    logger.error(f"Failed to send courier delivery assignment notifications: {e}")
+
+            if is_courier_unassigned_now:
+                try:
+                    # Ищем пользователя старого курьера, чтобы отправить ему уведомление
+                    old_courier_user = None
+                    if old_courier:
+                        def _get_old_courier_user():
+                            from app.models.employee import Employee
+                            employee = session.exec(select(Employee).where(Employee.name == old_courier)).first()
+                            if employee:
+                                return session.exec(select(User).where(User.iiko_id == str(employee.iiko_id))).first()
+                            return None
+                        old_courier_user = await asyncio.to_thread(_get_old_courier_user)
+                    
+                    ws_unassigned = {
+                        "type": "delivery_unassigned",
+                        "order_id": order.id,
+                        "order_number": external_number,
+                        "total_sum": float(total_with_discount),
+                        "address": order.delivery_address,
+                        "customer_name": order.customer_name or "Гость"
+                    }
+                    self.send_websocket_broadcast_safe(ws_unassigned)
+                    
+                    if old_courier_user:
+                        self.send_websocket_personal_safe(ws_unassigned, old_courier_user.id)
+                        await self.send_admin_push_notification(
+                            session=session,
+                            title="Доставка отменена",
+                            body=f"С вас снята доставка заказа #{external_number or order.id}",
+                            url="/pers/courier",
+                            event_type="delivery_unassigned",
+                            target_user_id=old_courier_user.id,
+                            tag=f"unassigned-{order.id}"
+                        )
+                except Exception as e:
+                    logger.error(f"Failed to send courier delivery unassignment notifications: {e}")
+
+            if is_status_changed:
                 from app.models.order import OrderStatus
                 event = "order_cancelled" if mapped_status == OrderStatus.cancelled else "order_status_update"
                 await self._send_order_vk_notification(order, event, session=session)
+                
+                # WebSocket оповещение о смене статуса заказа в реальном времени
+                try:
+                    ws_type = "order_cancelled" if mapped_status == OrderStatus.cancelled else "order_changed"
+                    ws_payload = {
+                        "type": ws_type,
+                        "order_id": order.id,
+                        "order_number": external_number or str(order.id),
+                        "status": mapped_status,
+                        "customer_name": order.customer_name or "Гость",
+                        "order_type": order.order_type,
+                        "courier_name": order.courier_name
+                    }
+                    self.send_websocket_broadcast_safe(ws_payload)
+                    
+                    # Если курьер назначен, то также отправим ему лично
+                    if order.courier_name:
+                        try:
+                            from app.models.employee import Employee
+                            def _get_courier_user():
+                                employee = session.exec(select(Employee).where(Employee.name == order.courier_name)).first()
+                                if employee:
+                                    return session.exec(select(User).where(User.iiko_id == str(employee.iiko_id))).first()
+                                return None
+                            courier_user = await asyncio.to_thread(_get_courier_user)
+                            if courier_user:
+                                self.send_websocket_personal_safe(ws_payload, courier_user.id)
+                        except Exception as e_c:
+                            logger.warning(f"Failed to find courier for personal status update WS: {e_c}")
+                except Exception as e:
+                    logger.error(f"Failed to send websocket status change notification: {e}")
+                    
+                # Push-уведомление администраторам о смене статуса
+                try:
+                    ws_type = "order_cancelled" if mapped_status == OrderStatus.cancelled else "order_changed"
+                    title = "Заказ отменен" if mapped_status == OrderStatus.cancelled else "Статус заказа изменен"
+                    body = f"Заказ #{external_number or order.id} отменен" if mapped_status == OrderStatus.cancelled else f"Заказ #{external_number or order.id} переведен в статус '{mapped_status}'"
+                    await self.send_admin_push_notification(
+                        session=session,
+                        title=title,
+                        body=body,
+                        url="/admin/orders",
+                        event_type=ws_type,
+                        tag=f"order-status-{order.id}",
+                        order=order
+                    )
+                except Exception as e:
+                    logger.error(f"Failed to send admin push for status change: {e}")
+
+                # Специальное уведомление "Доставка заказа" (заказ доставлен курьером)
+                is_delivery_order = (
+                    "самовывоз" not in str(order.order_type or "").lower() and 
+                    "pickup" not in str(order.order_type or "").lower() and
+                    "зал" not in str(order.order_type or "").lower()
+                )
+                already_notified_delivered = False
+                if order.change_indicators and isinstance(order.change_indicators, dict):
+                    already_notified_delivered = bool(order.change_indicators.get("order_delivered_notified"))
+
+                if mapped_status == OrderStatus.delivered and is_delivery_order and not already_notified_delivered:
+                    try:
+                        from app.core.datetime_utils import format_local_time
+                        deliv_time_str = format_local_time(order.actual_time) if order.actual_time else ""
+                        ws_delivered = {
+                            "type": "order_delivered",
+                            "order_id": order.id,
+                            "order_number": external_number or str(order.id),
+                            "courier_name": order.courier_name or "Курьер",
+                            "delivery_address": order.delivery_address or "---",
+                            "total_amount": float(total_with_discount),
+                            "customer_name": order.customer_name or "Гость",
+                            "actual_time": deliv_time_str,
+                            "timestamp": int(datetime.now(timezone.utc).timestamp() * 1000)
+                        }
+                        self.send_websocket_broadcast_safe(ws_delivered)
+                        
+                        await self.send_admin_push_notification(
+                            session=session,
+                            title="Заказ доставлен!",
+                            body=f"Заказ #{external_number or order.id} успешно доставлен! Курьер: {order.courier_name or 'Курьер'} | Адрес: {order.delivery_address or '---'}",
+                            url="/admin/orders",
+                            event_type="order_delivered",
+                            tag=f"delivered-{order.id}",
+                            order=order
+                        )
+                        
+                        if not order.change_indicators or not isinstance(order.change_indicators, dict):
+                            order.change_indicators = {}
+                        order.change_indicators["order_delivered_notified"] = True
+                        from sqlalchemy.orm.attributes import flag_modified
+                        flag_modified(order, "change_indicators")
+                        session.add(order)
+                        logger.info(f"Order #{external_number or order.id} delivered notification broadcasted and flagged.")
+                    except Exception as deliv_err:
+                        logger.error(f"Failed to send order_delivered notification: {deliv_err}")
             
             # Уведомления об изменениях
             if not is_new:
                 if is_amount_changed:
-                    await self._send_order_vk_notification(order, "order_amount_changed", session=session)
+                    await self._send_order_vk_notification(
+                        order, "order_amount_changed", session=session,
+                        is_amount_changed=True, old_amount=old_amount, new_amount=float(total_with_discount)
+                    )
                 if is_items_changed:
-                    await self._send_order_vk_notification(order, "order_items_changed", session=session)
+                    await self._send_order_vk_notification(
+                        order, "order_items_changed", session=session,
+                        is_items_changed=True, old_items_count=old_items_count, new_items_count=len(order.order_items_details or [])
+                    )
                 if is_time_changed:
-                    await self._send_order_vk_notification(order, "order_time_changed", session=session)
+                    await self._send_order_vk_notification(
+                        order, "order_time_changed", session=session,
+                        is_time_changed=True, old_time=old_time, new_time=order.expected_time
+                    )
                 if is_address_changed:
-                    await self._send_order_vk_notification(order, "order_address_changed", session=session)
+                    await self._send_order_vk_notification(
+                        order, "order_address_changed", session=session,
+                        is_address_changed=True, old_address=old_address, new_address=order.delivery_address
+                    )
+                
+                # WebSocket и Web Push уведомления об изменениях в заказе
+                try:
+                    from app.api.chat import manager
+                    loop = asyncio.get_event_loop()
+                    
+                    # 1. Изменение времени готовности
+                    if is_cooking_time_changed:
+                        if loop.is_running():
+                            loop.create_task(manager.broadcast({
+                                "type": "change_cooking_time",
+                                "order_id": order.id,
+                                "order_number": external_number,
+                                "cooking_time_minutes": order.cooking_time_minutes,
+                                "order_type": order.order_type,
+                                "courier_name": order.courier_name
+                            }))
+                        await self.send_admin_push_notification(
+                            session=session,
+                            title="Изменение времени готовности",
+                            body=f"Заказ #{external_number or order.id} | Время на кухне: {order.cooking_time_minutes} мин.",
+                            url="/admin/orders",
+                            event_type="change_cooking_time",
+                            tag=f"cooking-time-{order.id}",
+                            order=order
+                        )
+                        
+                        # 1.1. Если время кухни задано впервые (>0 мин), проверяем досылку шага 1 (order_new) назначенному курьеру
+                        if is_cooking_time_set:
+                            await self.check_and_send_order_new_to_courier(order, session=session)
+
+                        # 1.2. Отправка уведомления change_cooking_time (роутер проверит require_cooking_time_changed)
+                        try:
+                            await self._send_order_vk_notification(
+                                order, 
+                                "change_cooking_time", 
+                                session=session,
+                                is_cooking_time_set=is_cooking_time_set,
+                                is_cooking_time_rechanged=is_cooking_time_rechanged,
+                                old_cooking_time=old_cook,
+                                new_cooking_time=new_cook
+                            )
+                        except Exception as notif_err:
+                            logger.error(f"Failed to send change_cooking_time notification: {notif_err}")
+                        
+                    # 2. Изменение состава заказа
+                    if is_items_changed:
+                        if loop.is_running():
+                            loop.create_task(manager.broadcast({
+                                "type": "change_items",
+                                "order_id": order.id,
+                                "order_number": external_number,
+                                "order_type": order.order_type,
+                                "courier_name": order.courier_name
+                            }))
+                        await self.send_admin_push_notification(
+                            session=session,
+                            title="Изменение состава заказа",
+                            body=f"Состав заказа #{external_number or order.id} был изменен",
+                            url="/admin/orders",
+                            event_type="change_items",
+                            tag=f"items-change-{order.id}",
+                            order=order
+                        )
+                        
+                    # 3. Изменение суммы оплаты
+                    if is_amount_changed:
+                        if loop.is_running():
+                            loop.create_task(manager.broadcast({
+                                "type": "change_amount",
+                                "order_id": order.id,
+                                "order_number": external_number,
+                                "amount": float(total_with_discount),
+                                "order_type": order.order_type,
+                                "courier_name": order.courier_name
+                            }))
+                        await self.send_admin_push_notification(
+                            session=session,
+                            title="Изменение суммы заказа",
+                            body=f"Сумма заказа #{external_number or order.id} изменена: {total_with_discount} ₽",
+                            url="/admin/orders",
+                            event_type="change_amount",
+                            tag=f"amount-change-{order.id}",
+                            order=order
+                        )
+                        
+                    # 4. Изменение способа оплаты
+                    if is_payment_changed:
+                        pay_name = "не указан"
+                        if order.payments_details and isinstance(order.payments_details, dict):
+                            items = order.payments_details.get("items", [])
+                            if items:
+                                pay_name = ", ".join([it.get("paymentType", {}).get("name", "") for it in items])
+                        if loop.is_running():
+                            loop.create_task(manager.broadcast({
+                                "type": "change_payment",
+                                "order_id": order.id,
+                                "order_number": external_number,
+                                "payment_method": pay_name,
+                                "order_type": order.order_type,
+                                "courier_name": order.courier_name
+                            }))
+                        await self.send_admin_push_notification(
+                            session=session,
+                            title="Изменение способа оплаты",
+                            body=f"Способ оплаты заказа #{external_number or order.id} изменен: {pay_name}",
+                            url="/admin/orders",
+                            event_type="change_payment",
+                            tag=f"payment-change-{order.id}",
+                            order=order
+                        )
+                        
+                    # 5. Изменение адреса доставки
+                    if is_address_changed:
+                        if loop.is_running():
+                            loop.create_task(manager.broadcast({
+                                "type": "change_address",
+                                "order_id": order.id,
+                                "order_number": external_number,
+                                "address": order.delivery_address,
+                                "order_type": order.order_type,
+                                "courier_name": order.courier_name
+                            }))
+                        await self.send_admin_push_notification(
+                            session=session,
+                            title="Изменение адреса доставки",
+                            body=f"Адрес доставки заказа #{external_number or order.id} изменен: {order.delivery_address}",
+                            url="/admin/orders",
+                            event_type="change_address",
+                            tag=f"address-change-{order.id}",
+                            order=order
+                        )
+                        
+                except Exception as e:
+                    logger.error(f"Failed to send order change notifications: {e}")
+            
+            # =========================================================================
+            # ПЕРСОНАЛЬНЫЕ PUSH И BROWSER УВЕДОМЛЕНИЯ КУРЬЕРУ (10 ВЫДЕЛЕННЫХ СОБЫТИЙ)
+            # =========================================================================
+            try:
+                courier_user = self.find_courier_user(session, courier_name, courier_iiko_id)
+                old_courier_user = self.find_courier_user(session, old_courier) if old_courier else None
+
+                # 1. Назначен заказ на доставку
+                if is_courier_assigned_now and courier_user:
+                    await self.send_courier_notification(
+                        session=session,
+                        courier_user_id=courier_user.id,
+                        event_type="courier_order_assigned",
+                        title="Назначен заказ на доставку",
+                        body=f"Вам назначен заказ #{external_number or order.id} | Сумма: {float(total_with_discount):.0f} ₽ | Адрес: {order.delivery_address}",
+                        order_id=order.id,
+                        order_number=external_number or order.id,
+                        url="/pers/courier",
+                        extra_data={
+                            "amount": float(total_with_discount),
+                            "address": order.delivery_address,
+                            "customer_name": order.customer_name or "Гость",
+                            "cooking_time_minutes": order.cooking_time_minutes
+                        },
+                        order=order
+                    )
+
+                # 2. Установление времени приготовления заказа
+                if not is_new and (old_cooking_time is None or old_cooking_time == 0) and order.cooking_time_minutes and order.cooking_time_minutes > 0 and courier_user:
+                    await self.send_courier_notification(
+                        session=session,
+                        courier_user_id=courier_user.id,
+                        event_type="courier_cooking_time_set",
+                        title="Установлено время приготовления",
+                        body=f"Заказ #{external_number or order.id}. Время на кухне: {order.cooking_time_minutes} мин.",
+                        order_id=order.id,
+                        order_number=external_number or order.id,
+                        url="/pers/courier",
+                        extra_data={
+                            "cooking_time_minutes": order.cooking_time_minutes,
+                            "amount": float(total_with_discount),
+                            "address": order.delivery_address
+                        },
+                        order=order
+                    )
+
+                # 3. Изменение времени приготовления заказа
+                if not is_new and old_cooking_time and old_cooking_time > 0 and order.cooking_time_minutes and old_cooking_time != order.cooking_time_minutes and courier_user:
+                    await self.send_courier_notification(
+                        session=session,
+                        courier_user_id=courier_user.id,
+                        event_type="courier_cooking_time_changed",
+                        title="Изменено время приготовления",
+                        body=f"Заказ #{external_number or order.id}. Новое время кухни: {order.cooking_time_minutes} мин. (было: {old_cooking_time} мин.)",
+                        order_id=order.id,
+                        order_number=external_number or order.id,
+                        url="/pers/courier",
+                        extra_data={
+                            "cooking_time_minutes": order.cooking_time_minutes,
+                            "old_cooking_time": old_cooking_time,
+                            "amount": float(total_with_discount),
+                            "address": order.delivery_address
+                        },
+                        order=order
+                    )
+
+                # 4. Изменение статуса заказа (только готов или отменен)
+                if is_status_changed and courier_user:
+                    if mapped_status in (OrderStatus.ready, "cooking_finished", "ready", "Готов"):
+                        await self.send_courier_notification(
+                            session=session,
+                            courier_user_id=courier_user.id,
+                            event_type="courier_status_changed",
+                            title="Заказ готов к выдаче!",
+                            body=f"Заказ #{external_number or order.id} приготовлен кухней. Можно забирать!",
+                            order_id=order.id,
+                            order_number=external_number or order.id,
+                            url="/pers/courier",
+                            extra_data={
+                                "status": "ready",
+                                "amount": float(total_with_discount),
+                                "address": order.delivery_address
+                            },
+                            order=order
+                        )
+                    elif mapped_status in (OrderStatus.cancelled, "cancelled", "отменен"):
+                        await self.send_courier_notification(
+                            session=session,
+                            courier_user_id=courier_user.id,
+                            event_type="courier_status_changed",
+                            title="Заказ отменен!",
+                            body=f"Заказ #{external_number or order.id} был отменен!",
+                            order_id=order.id,
+                            order_number=external_number or order.id,
+                            url="/pers/courier",
+                            extra_data={
+                                "status": "cancelled",
+                                "amount": float(total_with_discount),
+                                "address": order.delivery_address
+                            },
+                            order=order
+                        )
+
+                # 5. Изменение суммы заказа
+                if not is_new and is_amount_changed and courier_user:
+                    await self.send_courier_notification(
+                        session=session,
+                        courier_user_id=courier_user.id,
+                        event_type="courier_amount_changed",
+                        title="Изменение суммы заказа",
+                        body=f"Сумма заказа #{external_number or order.id} изменена: {float(total_with_discount):.0f} ₽ (было: {old_amount:.0f} ₽)",
+                        order_id=order.id,
+                        order_number=external_number or order.id,
+                        url="/pers/courier",
+                        extra_data={
+                            "amount": float(total_with_discount),
+                            "old_amount": old_amount,
+                            "address": order.delivery_address
+                        },
+                        order=order
+                    )
+
+                # 6. Изменение адреса доставки
+                if not is_new and is_address_changed and courier_user:
+                    await self.send_courier_notification(
+                        session=session,
+                        courier_user_id=courier_user.id,
+                        event_type="courier_address_changed",
+                        title="Изменение адреса доставки",
+                        body=f"Адрес заказа #{external_number or order.id} изменен: {order.delivery_address}",
+                        order_id=order.id,
+                        order_number=external_number or order.id,
+                        url="/pers/courier",
+                        extra_data={
+                            "address": order.delivery_address,
+                            "old_address": old_address,
+                            "amount": float(total_with_discount)
+                        },
+                        order=order
+                    )
+
+                # 7. Изменение способа доставки заказа (изменили на самовывоз)
+                if not is_new and old_order_type == "Доставка" and order.order_type in ("Самовывоз", "В ресторане"):
+                    target_u = old_courier_user or courier_user
+                    if target_u:
+                        await self.send_courier_notification(
+                            session=session,
+                            courier_user_id=target_u.id,
+                            event_type="courier_changed_to_pickup",
+                            title="Заказ переведен на самовывоз!",
+                            body=f"Заказ #{external_number or order.id} изменен на самовывоз. Доставка отменена.",
+                            order_id=order.id,
+                            order_number=external_number or order.id,
+                            url="/pers/courier",
+                            extra_data={
+                                "order_type": order.order_type,
+                                "amount": float(total_with_discount)
+                            },
+                            order=order
+                        )
+
+                # 8. Заказ убран из доставки
+                if not is_new and (old_order_type == "Доставка" or order.order_type == "Доставка") and mapped_status in (OrderStatus.cancelled, "cancelled", "отменен"):
+                    target_u = courier_user or old_courier_user
+                    if target_u:
+                        await self.send_courier_notification(
+                            session=session,
+                            courier_user_id=target_u.id,
+                            event_type="courier_removed_from_delivery",
+                            title="Заказ убран из доставки!",
+                            body=f"Заказ #{external_number or order.id} снят с доставки.",
+                            order_id=order.id,
+                            order_number=external_number or order.id,
+                            url="/pers/courier",
+                            extra_data={
+                                "amount": float(total_with_discount)
+                            },
+                            order=order
+                        )
+
+                # 9. Заказ убран из списка доставок выбранного курьера
+                if (is_courier_unassigned_now or is_courier_reassigned) and old_courier_user:
+                    await self.send_courier_notification(
+                        session=session,
+                        courier_user_id=old_courier_user.id,
+                        event_type="courier_unassigned",
+                        title="Заказ снят с ваших доставок",
+                        body=f"Заказ #{external_number or order.id} убран из вашего списка доставок.",
+                        order_id=order.id,
+                        order_number=external_number or order.id,
+                        url="/pers/courier",
+                        extra_data={
+                            "amount": float(total_with_discount),
+                            "address": order.delivery_address
+                        },
+                        order=order
+                    )
+
+                # 10. Изменение времени доставки заказа
+                if not is_new and is_time_changed and courier_user:
+                    time_str = order.expected_time.strftime("%H:%M") if order.expected_time else "---"
+                    await self.send_courier_notification(
+                        session=session,
+                        courier_user_id=courier_user.id,
+                        event_type="courier_delivery_time_changed",
+                        title="Изменение времени доставки",
+                        body=f"Время доставки заказа #{external_number or order.id} изменено: ожидается к {time_str}",
+                        order_id=order.id,
+                        order_number=external_number or order.id,
+                        url="/pers/courier",
+                        extra_data={
+                            "expected_time": order.expected_time.isoformat() if order.expected_time else None,
+                            "amount": float(total_with_discount),
+                            "address": order.delivery_address
+                        },
+                        order=order
+                    )
+            except Exception as courier_notif_err:
+                logger.error(f"Error sending dedicated courier notifications: {courier_notif_err}")
             
         except Exception as e:
             import traceback
@@ -2033,17 +3366,140 @@ class IikoSyncService:
             except:
                 pass
 
-    async def send_order_notification(self, order, event_type: str, session: Session = None):
-        """Публичный метод для отправки уведомлений о заказах"""
-        await self._send_order_vk_notification(order, event_type, session=session)
+    async def check_and_send_order_new_to_courier(
+        self, 
+        order, 
+        session: Session = None, 
+        is_reassigned: bool = False, 
+        old_courier: str = None, 
+        new_courier: str = None
+    ) -> bool:
+        """
+        Проверяет готовность заказа для отправки по цепочке "order_new" (Шаг 1 «Новый заказ курьеру»):
+        - Заказ не является самовывозом
+        - Курьер назначен на заказ (если в цепочке включено require_courier_assigned)
+        - Время готовности на кухне задано (>0 мин), если в цепочке включено require_cooking_time_set
+        - Заказ не был ранее отправлен текущему курьеру (или разрешен повтор resend_on_courier_reassigned при смене курьера)
+        """
+        try:
+            if not order:
+                return False
 
-    async def _send_order_vk_notification(self, order, event_type: str, session: Session = None):
+            # 1. Самовывоз курьеру не отправляется
+            ord_type_str = str(getattr(order, 'order_type', '') or '').lower()
+            if "самовывоз" in ord_type_str or "pickup" in ord_type_str:
+                return False
+
+            # 2. Проверка назначенного курьера
+            c_name = getattr(order, 'courier_name', None) or new_courier
+            has_assigned_courier = bool(c_name and str(c_name).strip() not in ("", "Не назначен", "---"))
+
+            # 3. Проверка активности шаблона order_new в БД
+            from app.models.vk_bot import VkTemplate
+            from app.core.database import engine
+            def _get_template():
+                s = session if session else Session(engine)
+                try:
+                    return s.exec(select(VkTemplate).where(VkTemplate.event_type == "order_new")).first()
+                finally:
+                    if not session:
+                        s.close()
+
+            tpl = await asyncio.to_thread(_get_template)
+            if not tpl or not getattr(tpl, 'is_active', True):
+                return False
+
+            chain_config_obj = {}
+            if tpl and tpl.chain_config:
+                try:
+                    import json
+                    if isinstance(tpl.chain_config, str):
+                        chain_config_obj = json.loads(tpl.chain_config)
+                    elif isinstance(tpl.chain_config, dict):
+                        chain_config_obj = tpl.chain_config
+                except Exception:
+                    chain_config_obj = {}
+
+            # Если требуется назначенный курьер, а курьер не назначен — ждем
+            if chain_config_obj.get("require_courier_assigned", True) and not has_assigned_courier:
+                logger.debug(f"Order #{order.external_number or order.id}: order_new pending assigned courier")
+                return False
+
+            # 4. Проверка требования времени готовности кухни
+            if chain_config_obj.get("require_cooking_time_set"):
+                cook_mins = int(getattr(order, 'cooking_time_minutes', 0) or 0)
+                if cook_mins <= 0:
+                    logger.debug(f"Order #{order.external_number or order.id}: order_new pending cooking time > 0 (current: {cook_mins})")
+                    return False
+
+            # 5. Проверка требования "только неоплаченные"
+            if chain_config_obj.get("only_unpaid") and getattr(order, 'is_paid', False):
+                logger.debug(f"Order #{order.external_number or order.id}: order_new requires unpaid, but order is paid")
+                return False
+
+            # 6. Проверка: отправлялся ли уже order_new текущему курьеру
+            change_indicators = dict(getattr(order, 'change_indicators', None) or {})
+            already_sent_courier = change_indicators.get("order_new_sent_courier")
+
+            if has_assigned_courier:
+                if already_sent_courier and already_sent_courier == c_name:
+                    # Уже отправлялся этому курьеру
+                    return False
+
+                if already_sent_courier and already_sent_courier != c_name:
+                    # Курьер сменился (переназначение)
+                    resend_on_reassign = chain_config_obj.get("resend_on_courier_reassigned", True)
+                    if not resend_on_reassign:
+                        logger.info(f"Order #{order.external_number or order.id}: courier changed from '{already_sent_courier}' to '{c_name}', but resend_on_courier_reassigned is False")
+                        return False
+            else:
+                if change_indicators.get("order_new_sent_unassigned"):
+                    return False
+
+            # 7. Отправляем order_new назначенному курьеру
+            logger.info(f"Dispatching step 1 'order_new' to courier '{c_name or 'все'}' for order #{order.external_number or order.id} (cooking_time={getattr(order, 'cooking_time_minutes', 0)} min)")
+            await self._send_order_vk_notification(
+                order,
+                "order_new",
+                session=session,
+                is_reassigned=is_reassigned,
+                old_courier=old_courier or already_sent_courier,
+                new_courier=c_name
+            )
+
+            # 8. Фиксируем отправку в change_indicators
+            if has_assigned_courier:
+                change_indicators["order_new_sent_courier"] = c_name
+            else:
+                change_indicators["order_new_sent_unassigned"] = True
+            change_indicators["order_new_sent_at"] = datetime.now(timezone.utc).isoformat()
+            order.change_indicators = change_indicators
+            if session:
+                session.add(order)
+                await asyncio.to_thread(session.commit)
+
+            return True
+        except Exception as e:
+            logger.error(f"Error in check_and_send_order_new_to_courier for order {getattr(order, 'id', None)}: {e}")
+            return False
+
+    async def send_order_notification(self, order, event_type: str, session: Session = None, **extra_flags):
+        """Публичный метод для отправки уведомлений о заказах"""
+        await self._send_order_vk_notification(order, event_type, session=session, **extra_flags)
+
+    async def _send_order_vk_notification(self, order, event_type: str, session: Session = None, **extra_flags):
         """Вспомогательный метод для отправки уведомлений о заказах в ВК"""
         try:
             # --- Каскадное уведомление Гостя ---
             try:
                 from app.services.mailing_cascade_service import mailing_cascade_service
-                await mailing_cascade_service.trigger_cascade(order, event_type)
+                cust_id = getattr(order, 'customer_id', None)
+                if cust_id:
+                    await mailing_cascade_service.trigger_cascade(
+                        customer_id=cust_id,
+                        event_type=event_type,
+                        order_id=getattr(order, 'id', None)
+                    )
             except Exception as ce:
                 logger.error(f"Error in mailing cascade: {ce}")
 
@@ -2082,8 +3538,37 @@ class IikoSyncService:
 
             # Создаем расширенный объект контекста с отформатированными полями
             # Чтобы в шаблоне можно было писать {{ order.total_amount }} и получать красивую строку
+            from datetime import timedelta
+            from app.core.datetime_utils import get_tz_name, to_local, utc_now
+
+            tz_name = get_tz_name(session) if session else "Asia/Yekaterinburg"
+            addr_str = getattr(order, 'delivery_address', '---') or '---'
+            exp_time_str = getattr(order, 'expected_time', '').strftime('%d.%m %H:%M') if getattr(order, 'expected_time', None) else '---'
+            
+            cooking_mins = int(getattr(order, 'cooking_time_minutes', 0) or 0)
+            cooking_updated_at = getattr(order, 'cooking_time_updated_at', None)
+            if cooking_updated_at:
+                local_cooking_dt = to_local(cooking_updated_at, tz_name)
+            else:
+                local_cooking_dt = to_local(utc_now(), tz_name)
+
+            cooking_set_time_str = local_cooking_dt.strftime('%H:%M')
+            cooking_updated_at_str = local_cooking_dt.strftime('%d.%m %H:%M')
+
+            if cooking_mins > 0:
+                pickup_dt = local_cooking_dt + timedelta(minutes=cooking_mins)
+                pickup_time_str = pickup_dt.strftime('%H:%M')
+                arrival_time_str = pickup_dt.strftime('%H:%M')
+                pickup_time_full_str = pickup_dt.strftime('%d.%m %H:%M')
+            else:
+                pickup_time_str = exp_time_str if exp_time_str != "---" else "Уточняется на кухне"
+                arrival_time_str = pickup_time_str
+                pickup_time_full_str = exp_time_str
+
             formatted_order = {
+                "id": getattr(order, 'id', None),
                 "external_number": getattr(order, 'external_number', '---'),
+                "order_number": getattr(order, 'external_number', str(getattr(order, 'id', '---'))),
                 "total_amount": f"{float(getattr(order, 'total_amount', 0)):.0f}",
                 "total_with_discount": f"{float(getattr(order, 'total_with_discount', 0)):.0f}",
                 "total_discount": f"{float(getattr(order, 'total_discount', 0)):.0f}",
@@ -2091,7 +3576,8 @@ class IikoSyncService:
                 "final_price": f"{float(getattr(order, 'total_with_discount', 0)):.0f}",
                 "bonus_spent": f"{float(getattr(order, 'bonus_spent', 0)):.0f}",
                 "bonus_accrued": f"{float(getattr(order, 'bonus_accrued', 0)):.0f}",
-                "delivery_address": getattr(order, 'delivery_address', '---'),
+                "delivery_address": addr_str,
+                "address": addr_str,
                 "city": getattr(order, 'city', ''),
                 "street": getattr(order, 'street', ''),
                 "house": getattr(order, 'house', ''),
@@ -2099,21 +3585,61 @@ class IikoSyncService:
                 "customer_name": getattr(order, 'customer_name', 'Гость'),
                 "customer_phone": getattr(order, 'customer_phone', '---'),
                 "comment": getattr(order, 'comment', ''),
-                "status": getattr(order, 'status', ''),
+                "address_comment": getattr(order, 'address_comment', '') or '',
+                "entrance": getattr(order, 'entrance', '') or '',
+                "floor": getattr(order, 'floor', '') or '',
+                "doorphone": getattr(order, 'doorphone', '') or '',
+                "additional_info": getattr(order, 'additional_info', '') or '',
+                "other_info": getattr(order, 'other_info', '') or '',
+                "courier_notes": getattr(order, 'additional_info', '') or getattr(order, 'other_info', '') or '',
+                "notes": getattr(order, 'additional_info', '') or getattr(order, 'other_info', '') or '',
+                "status": status_text,
+                "raw_status": str(getattr(order, 'status', '')),
                 "order_type": getattr(order, 'order_type', '---'),
                 "payment_method": getattr(order, 'payment_method', '---'),
+                "is_paid": "Оплачен" if getattr(order, 'is_paid', False) else "Не оплачен",
                 "courier_name": getattr(order, 'courier_name', '---'),
                 "delivery_zone": getattr(order, 'delivery_zone', '---'),
-                "expected_time": getattr(order, 'expected_time', '').strftime('%d.%m %H:%M') if getattr(order, 'expected_time', None) else '---',
+                "expected_time": exp_time_str,
+                "delivery_time": exp_time_str,
+                "cooking_time_minutes": str(cooking_mins),
+                "cooking_time": str(cooking_mins),
+                "cooking_set_time": cooking_set_time_str,
+                "cooking_updated_at": cooking_updated_at_str,
+                "pickup_time": pickup_time_str,
+                "arrival_time": arrival_time_str,
+                "ready_time": pickup_time_str,
+                "pickup_time_full": pickup_time_full_str,
                 "items_text": order_items_text,
                 "items_summary": order_items_text, # Синоним для удобства
-                "map_yandex": f"https://yandex.ru/maps/?text={getattr(order, 'delivery_address', '')}".replace(' ', '+'),
-                "map_2gis": f"https://2gis.ru/search/{getattr(order, 'delivery_address', '')}".replace(' ', '+')
+                "customer_info_details": getattr(order, 'customer_info_details', {}) or {}
             }
 
-            if order.latitude and order.longitude:
-                formatted_order["map_yandex"] = f"https://yandex.ru/maps/?pt={order.longitude},{order.latitude}&z=18&l=map"
-                formatted_order["map_2gis"] = f"https://2gis.ru/geo/{order.longitude},{order.latitude}"
+            # Формируем чистый полный адрес для навигатора (Город, Улица, Дом) без квартиры/комментария
+            import urllib.parse
+            city_val = getattr(order, 'city', '') or ''
+            street_val = getattr(order, 'street', '') or ''
+            house_val = getattr(order, 'house', '') or ''
+            clean_nav_addr = ", ".join([p for p in [city_val, street_val, house_val] if p]) or addr_str
+
+            if clean_nav_addr and clean_nav_addr not in ("Самовывоз", "---"):
+                encoded_addr = urllib.parse.quote_plus(clean_nav_addr)
+                formatted_order["map_yandex"] = f"https://yandex.ru/maps/?rtext=~{encoded_addr}&rtt=auto"
+                formatted_order["map_2gis"] = f"https://2gis.ru/search/{encoded_addr}"
+                formatted_order["yandex_navigator"] = f"https://yandex.ru/maps/?rtext=~{encoded_addr}&rtt=auto"
+                formatted_order["map_navigator"] = f"https://yandex.ru/maps/?rtext=~{encoded_addr}&rtt=auto"
+            elif getattr(order, 'latitude', None) and getattr(order, 'longitude', None):
+                lat = getattr(order, 'latitude')
+                lon = getattr(order, 'longitude')
+                formatted_order["map_yandex"] = f"https://yandex.ru/maps/?pt={lon},{lat}&z=18&l=map"
+                formatted_order["map_2gis"] = f"https://2gis.ru/geo/{lon},{lat}"
+                formatted_order["yandex_navigator"] = f"https://yandex.ru/maps/?rtext=~{lat}%2C{lon}&rtt=auto"
+                formatted_order["map_navigator"] = f"https://yandex.ru/maps/?rtext=~{lat}%2C{lon}&rtt=auto"
+            else:
+                formatted_order["map_yandex"] = ""
+                formatted_order["map_2gis"] = ""
+                formatted_order["yandex_navigator"] = ""
+                formatted_order["map_navigator"] = ""
 
             context = {
                 "order": formatted_order,
@@ -2140,10 +3666,13 @@ class IikoSyncService:
                 fallback_msg.append(order_items_text)
 
 
+            context["chain_flags"] = extra_flags
+
             await vk_notification_router.dispatch_event(
                 event_type=event_type, 
                 message_text="\n".join(fallback_msg),
-                context_data=context
+                context_data=context,
+                **extra_flags
             )
         except Exception as e:
             logger.error(f"Error sending VK notification: {e}")
@@ -2158,7 +3687,9 @@ class IikoSyncService:
             # Формируем контекст данных для шаблона
             context = {
                 "shift": shift,
-                "employee": employee
+                "employee": employee,
+                "kitchen_revenue": getattr(shift, "kitchen_revenue", None) or 0.0,
+                "hot_revenue": getattr(shift, "hot_revenue", None) or 0.0
             }
 
             # Fallback сообщение
@@ -2171,6 +3702,13 @@ class IikoSyncService:
             if shift.date_close:
                 msg.append(f"Конец: {shift.date_close.strftime('%d.%m %H:%M')}")
                 msg.append(f"Отработано: {shift.work_hours} ч.")
+                if shift.revenue_at_close is not None:
+                    msg.append(f"Выручка: {round(shift.revenue_at_close, 2):,.2f} ₽")
+                if getattr(shift, "kitchen_revenue", None) or getattr(shift, "hot_revenue", None):
+                    if shift.kitchen_revenue:
+                        msg.append(f"• Кухня: {round(shift.kitchen_revenue, 2):,.2f} ₽")
+                    if shift.hot_revenue:
+                        msg.append(f"• Горячий цех: {round(shift.hot_revenue, 2):,.2f} ₽")
             
             await vk_notification_router.dispatch_event(
                 event_type=event_type, 
@@ -2197,8 +3735,24 @@ class IikoSyncService:
 
         # Если разрешена быстрая синхронизация и мы не пропускаем ревизии
         if fast_only and not skip_revision:
-            logger.info("Быстрая синхронизация через ревизии (запрос из Курьеров)...")
+            logger.info("Быстрая синхронизация: опрос ревизий + прямая сверка активных заказов iiko...")
             await self.sync_orders_by_revision(session, settings_db.organization_id)
+            
+            # Гарантированная подгрузка всех активных заказов и предзаказов из iiko
+            try:
+                active_orders = await self.iiko.get_active_orders(
+                    organization_id=settings_db.organization_id,
+                    api_login=settings_db.api_login
+                )
+                if active_orders:
+                    logger.info(f"Fast sync fetched {len(active_orders)} active orders directly from iiko")
+                    for ord_data in active_orders:
+                        try:
+                            await self.process_iiko_order(session, ord_data, settings_db.organization_id)
+                        except Exception as ord_err:
+                            logger.error(f"Error processing active order from fast sync: {ord_err}")
+            except Exception as active_err:
+                logger.error(f"Error during active orders fetch in fast sync: {active_err}")
             return
 
         def _init_log():
@@ -2220,9 +3774,9 @@ class IikoSyncService:
             if fast_only and hours == 24:
                 hours = 4
 
-            # Охватываем диапазон
+            # Охватываем диапазон с учетом предзаказов на вечер (+14 часов)
             date_from = now - timedelta(hours=hours)
-            date_to = now + timedelta(hours=2) # 2 часа вперед достаточно для учета разброса времени
+            date_to = now + timedelta(hours=14)
             
             logger.info(f"Mass sync starting: orders from {date_from} to {date_to} for org {org_id} (fast_only={fast_only})")
             
@@ -2340,6 +3894,10 @@ class IikoSyncService:
                     if res: success_count += 1
                 except Exception as e:
                     logger.error(f"Failed to sync order {order_id}: {e}")
+                    try:
+                        await asyncio.to_thread(session.rollback)
+                    except Exception:
+                        pass
                     
             logger.info(f"Mass sync finished. Total: {len(all_ids)}, Success: {success_count}")
             def _final_log():
@@ -2435,6 +3993,10 @@ class IikoSyncService:
                     count += 1
                 except Exception as e:
                     logger.error(f"Error processing order from revision: {e}")
+                    try:
+                        await asyncio.to_thread(session.rollback)
+                    except Exception:
+                        pass
             
             # Обновляем ревизию в настройках
             if max_revision:
@@ -2697,7 +4259,11 @@ class IikoSyncService:
                 ("orders_view", "Просмотр заказов"),
                 ("reports_view", "Просмотр отчетов"),
                 ("settings_manage", "Управление настройками"),
-                ("sync_run", "Запуск синхронизации")
+                ("sync_run", "Запуск синхронизации"),
+                ("purchase_view", "Просмотр закупа"),
+                ("purchase_manage", "Управление закупом"),
+                ("settings_validation_view", "Просмотр настроек валидации телефонов"),
+                ("settings_validation_edit", "Изменение настроек валидации и тестирование отправки")
             ]
             
             for code, name in base_perms:
@@ -2939,13 +4505,20 @@ class IikoSyncService:
                     work_hours = min(work_hours, 24.0)
                     shift_iiko_id = row.get("id") or f"att_{employee.id}_{date_open.strftime('%Y%m%d%H%M')}"
 
-                    revenue_at_close = 0.0
-                    if date_close:
-                        biz_date_str = date_open.astimezone(tz).strftime("%Y-%m-%d")
-                        revenue_at_close = session.exec(
-                            select(func.sum(OlapRevenueRecord.revenue))
-                            .where(OlapRevenueRecord.business_date == biz_date_str)
-                        ).first() or 0.0
+                    from app.services.shift_service import calculate_shift_metrics
+
+                    # Создаем временную сущность для расчета метрик смены
+                    temp_shift = Shift(
+                        date_open=date_open,
+                        date_close=date_close,
+                        employee_id=employee.id
+                    )
+                    shift_metrics = calculate_shift_metrics(session, temp_shift, employee)
+                    revenue_at_close = shift_metrics["total_revenue"]
+                    kitchen_revenue = shift_metrics["kitchen_revenue"]
+                    hot_revenue = shift_metrics["hot_revenue"]
+                    cancelled_orders_count = shift_metrics["cancelled_count"]
+                    deliveries_count = shift_metrics["deliveries_count"]
 
                     existing_shift = session.exec(
                         select(Shift).where(Shift.iiko_id == shift_iiko_id)
@@ -2956,8 +4529,12 @@ class IikoSyncService:
                         existing_shift.date_close = date_close
                         existing_shift.status = "CLOSED" if date_close else "OPEN"
                         existing_shift.work_hours = round(work_hours, 2)
-                        if date_close and existing_shift.revenue_at_close != revenue_at_close:
-                            existing_shift.revenue_at_close = revenue_at_close
+                        existing_shift.revenue_at_close = revenue_at_close
+                        existing_shift.kitchen_revenue = kitchen_revenue
+                        existing_shift.hot_revenue = hot_revenue
+                        existing_shift.cancelled_orders_count = cancelled_orders_count
+                        if deliveries_count > 0:
+                            existing_shift.deliveries_count = deliveries_count
                         existing_shift.updated_at = datetime.now(timezone.utc).replace(tzinfo=None)
                         session.add(existing_shift)
                         updated_c += 1
@@ -2972,8 +4549,11 @@ class IikoSyncService:
                             date_close=date_close,
                             status="CLOSED" if date_close else "OPEN",
                             work_hours=round(work_hours, 2),
-                            cancelled_orders_count=0,
+                            cancelled_orders_count=cancelled_orders_count,
+                            deliveries_count=deliveries_count,
                             revenue_at_close=revenue_at_close,
+                            kitchen_revenue=kitchen_revenue,
+                            hot_revenue=hot_revenue,
                             created_at=datetime.now(timezone.utc).replace(tzinfo=None),
                             updated_at=datetime.now(timezone.utc).replace(tzinfo=None)
                         )
@@ -3300,12 +4880,83 @@ class IikoSyncService:
             return await asyncio.to_thread(_db_op)
 
         created_c, updated_c = 0, 0
+        new_deliveries = []
         try:
             for item in processed_data:
-                if await _save_item(item): created_c += 1
-                else: updated_c += 1
+                if await _save_item(item):
+                    created_c += 1
+                    new_deliveries.append(item)
+                else:
+                    updated_c += 1
             await asyncio.to_thread(session.commit)
             logger.info(f"Courier sync finished: {created_c} created, {updated_c} updated")
+            
+            # Отправка уведомлений о назначении доставок курьерам
+            for item in new_deliveries:
+                try:
+                    from app.models.user import User
+                    from app.models.employee import Employee
+                    from sqlalchemy import cast, String
+                    from app.models.admin_notification_settings import AdminNotificationSettings
+                    from app.models.push_subscription import PushSubscription
+                    from app.core.webpush_utils import send_web_push
+                    
+                    courier_emp = session.get(Employee, item["employee_id"])
+                    if courier_emp:
+                        c_user = session.exec(
+                            select(User).where(
+                                cast(User.iiko_id, String) == cast(courier_emp.iiko_id, String)
+                            )
+                        ).first()
+                        
+                        if c_user:
+                            # Проверяем настройки курьера
+                            c_settings = session.exec(select(AdminNotificationSettings).where(AdminNotificationSettings.user_id == c_user.id)).first()
+                            if c_settings and not c_settings.courier_delivery_push_enabled:
+                                continue
+                                
+                            subscriptions = session.exec(select(PushSubscription).where(PushSubscription.user_id == c_user.id)).all()
+                            if subscriptions:
+                                global_settings = session.exec(select(AdminNotificationSettings).where(AdminNotificationSettings.id == 1)).first()
+                                if global_settings and global_settings.vapid_private_key:
+                                    payload_data = json.dumps({
+                                        "title": "Новая доставка!",
+                                        "body": f"Заказ #{item.get('order_num')}. Адрес: {item.get('address')}. Сумма: {item.get('amount')} ₽",
+                                        "icon": "/favicon.ico",
+                                        "url": "/courier",
+                                        "event_type": "courier_delivery"
+                                    }, ensure_ascii=False)
+                                    
+                                    db_changed = False
+                                    for sub in subscriptions:
+                                        sub_info = {
+                                            "endpoint": sub.endpoint,
+                                            "keys": {
+                                                "p256dh": sub.p256dh,
+                                                "auth": sub.auth
+                                            }
+                                        }
+                                        res = send_web_push(sub_info, payload_data, global_settings.vapid_private_key)
+                                        if res == "remove":
+                                            session.delete(sub)
+                                            db_changed = True
+                                    if db_changed:
+                                        session.commit()
+                            
+                            # Отправка WebSocket-уведомления на личную страницу курьера
+                            try:
+                                from app.api.chat import manager
+                                ws_payload = {
+                                    "type": "courier_delivery",
+                                    "order_num": item.get('order_num'),
+                                    "address": item.get('address'),
+                                    "amount": item.get('amount')
+                                }
+                                await manager.send_personal_message(ws_payload, c_user.id)
+                            except Exception as ws_err:
+                                logger.error(f"WebSocket courier alert error: {ws_err}")
+                except Exception as courier_err:
+                    logger.error(f"Failed to notify courier for delivery {item.get('order_num')}: {courier_err}")
         except Exception as e:
             await asyncio.to_thread(session.rollback)
             logger.error(f"Courier sync save failed: {e}")
@@ -3702,6 +5353,539 @@ class IikoSyncService:
         except Exception as e:
             logger.error(f"Loyalty sync error: {e}", exc_info=True)
             return {"success": False, "error": str(e)}
+
+    async def send_admin_push_notification(self, session: Session, title: str, body: str, url: str, event_type: str, target_user_id: Optional[int] = None, tag: Optional[str] = None, order: Optional[Any] = None):
+        """Отправляет push-уведомление всем администраторам, у которых есть подписки с учетом их настроек"""
+        try:
+            from app.models.admin_notification_settings import AdminNotificationSettings
+            from app.models.push_subscription import PushSubscription
+            from app.core.webpush_utils import send_web_push
+            import json
+
+            # Автоматическая фиксация в ленту центра уведомлений (независимо от браузерных пушей)
+            try:
+                from app.api.notifications import log_system_notification
+                cat = "new_order" if event_type == "new_order" else (
+                    "tbank_payment" if event_type == "new_payment" else "order_status"
+                )
+                b_text = "Новый заказ" if cat == "new_order" else (
+                    "Оплата" if cat == "tbank_payment" else "Статус заказа"
+                )
+                b_color = "success" if cat == "new_order" else (
+                    "info" if cat == "tbank_payment" else "warning"
+                )
+                ord_id = getattr(order, "id", None) if order else None
+                amt = float(getattr(order, "total_with_discount", None) or getattr(order, "total_amount", None) or 0.0) if order else None
+                ext_key = f"{event_type}_{ord_id}_{tag or int(datetime.now(timezone.utc).timestamp())}" if ord_id else None
+                log_system_notification(
+                    db=session,
+                    title=title,
+                    body=body,
+                    event_type=event_type,
+                    category=cat,
+                    url=url,
+                    badge_text=b_text,
+                    badge_color=b_color,
+                    amount=amt,
+                    order_id=ord_id,
+                    external_key=ext_key
+                )
+            except Exception as log_err:
+                logger.warning(f"Error logging feed notification in iiko_sync_service: {log_err}")
+
+            global_settings = session.exec(select(AdminNotificationSettings).where(AdminNotificationSettings.id == 1)).first()
+            if not global_settings or not global_settings.vapid_private_key:
+                return
+            if getattr(global_settings, 'disable_browser_notifications_all', False):
+                logger.info("[Push] Skipped push notifications: disable_browser_notifications_all is True")
+                return
+                
+            subscriptions = session.exec(select(PushSubscription)).all()
+            if not subscriptions:
+                return
+                
+            payload_data = json.dumps({
+                "title": title,
+                "body": body,
+                "icon": "/favicon.ico",
+                "url": url,
+                "event_type": event_type,
+                "tag": tag
+            }, ensure_ascii=False)
+            
+            db_changed = False
+            notified_users = set()
+            from app.models.user import User
+            for sub in subscriptions:
+                if target_user_id is not None and sub.user_id != target_user_id:
+                    continue
+                    
+                user_obj = session.get(User, sub.user_id)
+                is_courier = False
+                if user_obj and (user_obj.role_id == 7 or (getattr(user_obj, 'role', None) and getattr(user_obj.role, 'name', '') == "courier")):
+                    is_courier = True
+                    
+                if is_courier and getattr(global_settings, 'disable_browser_notifications_couriers', False):
+                    continue
+                    
+                if is_courier and event_type == "order_delivered":
+                    continue
+
+                # Проверяем настройки конкретного пользователя
+                user_settings = session.exec(select(AdminNotificationSettings).where(AdminNotificationSettings.user_id == sub.user_id)).first()
+                
+                # Поведение по умолчанию, если настроек нет
+                push_enabled = True
+                if user_settings:
+                    # Фильтрация по типу заказа для изменений в заказах
+                    if event_type in ("order_changed", "order_cancelled", "change_cooking_time", "change_items", "change_amount", "change_payment", "change_address") and order:
+                        scope = getattr(user_settings, 'order_changed_scope', 'all') or "all"
+                        if scope == "pickup" and order.order_type != "Самовывоз":
+                            continue
+                        elif scope == "delivery" and order.order_type != "Доставка":
+                            continue
+                        elif scope == "courier_assigned" and (order.order_type != "Доставка" or not order.courier_name or order.courier_name in ("Не назначен", "")):
+                            continue
+
+                    if event_type == "new_order":
+                        push_enabled = user_settings.new_order_push_enabled
+                    elif event_type == "new_payment":
+                        push_enabled = user_settings.new_payment_push_enabled
+                    elif event_type == "order_cancelled":
+                        push_enabled = user_settings.order_cancelled_push_enabled
+                    elif event_type == "order_changed":
+                        push_enabled = user_settings.order_changed_push_enabled
+                    elif event_type == "chat_message":
+                        push_enabled = user_settings.chat_message_push_enabled
+                    elif event_type == "courier_delivery":
+                        push_enabled = user_settings.courier_delivery_push_enabled
+                    elif event_type == "delivery_unassigned":
+                        push_enabled = user_settings.delivery_unassigned_push_enabled
+                    elif event_type == "delivery_assigned":
+                        push_enabled = user_settings.delivery_assigned_push_enabled
+                    elif event_type == "order_delivered":
+                        push_enabled = getattr(user_settings, 'order_delivered_push_enabled', True) and not is_courier
+                    elif event_type == "change_cooking_time":
+                        push_enabled = user_settings.change_cooking_time_push_enabled
+                    elif event_type == "change_items":
+                        push_enabled = user_settings.change_items_push_enabled
+                    elif event_type == "change_amount":
+                        push_enabled = user_settings.change_amount_push_enabled
+                    elif event_type == "change_payment":
+                        push_enabled = user_settings.change_payment_push_enabled
+                    elif event_type == "change_address":
+                        push_enabled = user_settings.change_address_push_enabled
+                else:
+                    # По умолчанию для order_changed и chat_message выключаем, для остальных включаем
+                    if event_type in ("order_changed", "chat_message"):
+                        push_enabled = False
+                    elif is_courier and event_type not in ("courier_delivery", "delivery_assigned"):
+                        push_enabled = False
+                
+                if not push_enabled:
+                    continue
+                
+                # Сохраняем уведомление в БД для этого пользователя (один раз на пользователя)
+                if sub.user_id not in notified_users:
+                    try:
+                        from app.models.admin_notification import AdminNotification
+                        db_notif = AdminNotification(
+                            user_id=sub.user_id,
+                            title=title,
+                            body=body,
+                            url=url,
+                            event_type=event_type,
+                            is_read=False
+                        )
+                        session.add(db_notif)
+                        notified_users.add(sub.user_id)
+                    except Exception as db_err:
+                        logger.error(f"Failed to log notification to database: {db_err}")
+                        
+                    # Отправка нативного Push-уведомления ВК Mini App
+                    try:
+                        from app.models.user import User
+                        from app.services.vk_service import send_miniapp_push
+                        user_obj = session.get(User, sub.user_id)
+                        if user_obj and user_obj.vk_user_id:
+                            push_msg = f"{title}: {body}"
+                            logger.info(f"[VK Push] Initiating Mini App push to User ID {sub.user_id} (VK ID {user_obj.vk_user_id})")
+                            await send_miniapp_push(session, [user_obj.vk_user_id], push_msg, url)
+                    except Exception as vk_push_err:
+                        logger.error(f"Failed to send VK Mini App Push notification: {vk_push_err}")
+                    
+                sub_info = {
+                    "endpoint": sub.endpoint,
+                    "keys": {
+                        "p256dh": sub.p256dh,
+                        "auth": sub.auth
+                    }
+                }
+                res = send_web_push(sub_info, payload_data, global_settings.vapid_private_key)
+                if res == "remove":
+                    session.delete(sub)
+                    db_changed = True
+                    
+            if len(notified_users) > 0 or db_changed:
+                session.commit()
+        except Exception as e:
+            logger.error(f"Failed to send admin push notification: {e}")
+
+    def find_courier_user(self, session: Session, courier_name: Optional[str], courier_iiko_id: Optional[str] = None):
+        """Находит объект User курьера по имени или iiko_id"""
+        from app.models.user import User
+        from app.models.employee import Employee
+        from sqlalchemy import cast, String
+
+        if courier_iiko_id:
+            u = session.exec(select(User).where(cast(User.iiko_id, String) == str(courier_iiko_id))).first()
+            if u:
+                return u
+            emp = session.exec(select(Employee).where(cast(Employee.iiko_id, String) == str(courier_iiko_id))).first()
+            if emp:
+                u = session.exec(select(User).where(cast(User.iiko_id, String) == str(emp.iiko_id))).first()
+                if u:
+                    return u
+                if emp.name:
+                    u = session.exec(select(User).where(User.full_name == emp.name)).first()
+                    if u:
+                        return u
+
+        if courier_name and courier_name not in ("Не назначен", "", None):
+            clean_name = courier_name.strip()
+            # 1. По полному имени в User
+            u = session.exec(select(User).where(User.full_name == clean_name)).first()
+            if u:
+                return u
+            # 2. По сотруднику в Employee
+            emp = session.exec(select(Employee).where(Employee.name == clean_name)).first()
+            if emp and emp.iiko_id:
+                u = session.exec(select(User).where(cast(User.iiko_id, String) == str(emp.iiko_id))).first()
+                if u:
+                    return u
+            # 3. Частичное совпадение
+            u = session.exec(select(User).where(User.full_name.ilike(f"%{clean_name}%"))).first()
+            if u:
+                return u
+        return None
+
+    async def send_courier_notification(
+        self,
+        session: Session,
+        courier_user_id: int,
+        event_type: str,
+        title: str,
+        body: str,
+        order_id: Optional[int] = None,
+        order_number: Optional[Any] = None,
+        url: str = "/pers/courier",
+        extra_data: Optional[Dict[str, Any]] = None,
+        order: Optional[Any] = None
+    ):
+        """
+        Отправляет персональное push-, websocket- и колокольчик-уведомление конкретному курьеру
+        с учетом индивидуальных настроек курьера (звук, всплывающее окно, Web Push).
+        """
+        try:
+            from app.models.admin_notification_settings import AdminNotificationSettings
+            from app.models.push_subscription import PushSubscription
+            from app.models.admin_notification import AdminNotification
+            from app.core.webpush_utils import send_web_push
+            import json
+
+            # 1. Загрузка настроек курьера
+            c_settings = session.exec(
+                select(AdminNotificationSettings).where(AdminNotificationSettings.user_id == courier_user_id)
+            ).first()
+
+            push_enabled = True
+            sound_enabled = True
+            sound_file = "chime.mp3"
+
+            # Дефолтные звуки для каждого курьерского типа
+            default_sounds = {
+                "courier_order_assigned": "chime.mp3",
+                "courier_cooking_time_set": "bell.mp3",
+                "courier_cooking_time_changed": "click.mp3",
+                "courier_status_changed": "bell.mp3",
+                "courier_amount_changed": "cash.mp3",
+                "courier_address_changed": "doorbell.mp3",
+                "courier_changed_to_pickup": "branch.mp3",
+                "courier_removed_from_delivery": "error.mp3",
+                "courier_unassigned": "sonar.mp3",
+                "courier_delivery_time_changed": "water.mp3",
+            }
+            sound_file = default_sounds.get(event_type, "chime.mp3")
+
+            if c_settings:
+                push_enabled = getattr(c_settings, f"{event_type}_push_enabled", True)
+                if push_enabled is None:
+                    push_enabled = True
+                sound_enabled = getattr(c_settings, f"{event_type}_sound_enabled", True)
+                if sound_enabled is None:
+                    sound_enabled = True
+                sf = getattr(c_settings, f"{event_type}_sound_file", None)
+                if sf:
+                    sound_file = sf
+
+            # 2. Сохраняем уведомление в БД (колокольчик)
+            try:
+                db_notif = AdminNotification(
+                    user_id=courier_user_id,
+                    title=title,
+                    body=body,
+                    url=url,
+                    event_type=event_type,
+                    is_read=False
+                )
+                session.add(db_notif)
+                session.commit()
+            except Exception as db_err:
+                logger.error(f"Failed to save courier notification to DB: {db_err}")
+                try:
+                    session.rollback()
+                except:
+                    pass
+
+            # 3. WebSocket трансляция курьеру в браузер (всплывающее окно + звук)
+            ws_payload = {
+                "type": event_type,
+                "title": title,
+                "body": body,
+                "order_id": order_id,
+                "order_number": str(order_number or ""),
+                "url": url,
+                "target_user_id": courier_user_id,
+                "sound_file": sound_file,
+                "sound_enabled": sound_enabled,
+                "push_enabled": push_enabled,
+                **(extra_data or {})
+            }
+            self.send_websocket_personal_safe(ws_payload, courier_user_id)
+            self.send_websocket_broadcast_safe(ws_payload)
+
+            # 4. Отправка нативного Web Push (VAPID) на устройство курьера
+            if push_enabled:
+                try:
+                    global_settings = session.exec(select(AdminNotificationSettings).where(AdminNotificationSettings.id == 1)).first()
+                    if global_settings and global_settings.vapid_private_key:
+                        subs = session.exec(
+                            select(PushSubscription).where(PushSubscription.user_id == courier_user_id)
+                        ).all()
+
+                        if subs:
+                            payload_data = json.dumps({
+                                "title": title,
+                                "body": body,
+                                "icon": "/favicon.ico",
+                                "url": url,
+                                "event_type": event_type,
+                                "tag": f"{event_type}-{order_id or int(datetime.now().timestamp())}"
+                            }, ensure_ascii=False)
+
+                            db_changed = False
+                            for sub in subs:
+                                sub_info = {
+                                    "endpoint": sub.endpoint,
+                                    "keys": {
+                                        "p256dh": sub.p256dh,
+                                        "auth": sub.auth
+                                    }
+                                }
+                                res = send_web_push(sub_info, payload_data, global_settings.vapid_private_key)
+                                if res == "remove":
+                                    session.delete(sub)
+                                    db_changed = True
+                            if db_changed:
+                                session.commit()
+                except Exception as wp_err:
+                    logger.error(f"Failed to send Web Push to courier {courier_user_id}: {wp_err}")
+
+                # 5. VK Mini App Push если привязан аккаунт ВК
+                try:
+                    from app.models.user import User
+                    from app.services.vk_service import send_miniapp_push
+                    courier_user = session.get(User, courier_user_id)
+                    if courier_user and courier_user.vk_user_id:
+                        push_msg = f"{title}: {body}"
+                        await send_miniapp_push(session, [courier_user.vk_user_id], push_msg, url)
+                except Exception as vk_err:
+                    logger.error(f"Failed to send VK push to courier {courier_user_id}: {vk_err}")
+
+        except Exception as e:
+            logger.error(f"Error in send_courier_notification: {e}")
+
+    async def sync_kitchen_recipes_and_zones(self, session: Session) -> Dict[str, Any]:
+        """Синхронизация техкарт и цехов из iiko Resto (Backoffice) API"""
+        logger.info(">>> Запуск синхронизации техкарт и цехов из iiko Resto")
+        try:
+            from app.models.iiko_settings import IikoSettings
+            from app.models.product import Product, KitchenZone, ProductRecipe
+            from app.services.iiko_service import iiko_service
+            import xml.etree.ElementTree as ET
+            import datetime
+            
+            # Получаем настройки организации
+            db_settings = session.exec(select(IikoSettings)).first()
+            org_id = db_settings.organization_id if db_settings else None
+            
+            if not db_settings or not db_settings.resto_url or not db_settings.resto_login:
+                raise ValueError("Не настроены параметры подключения к iiko Resto в настройках")
+                
+            # 1. Скачиваем список продуктов из Resto API для получения цехов приготовления (cookingPlaceType)
+            # и построения мапы UUID продукта -> Название ингредиента
+            logger.info("Resto API: Запрос /products...")
+            products_xml = await iiko_service._resto_request("GET", "/products", organization_id=org_id)
+            
+            product_names = {}
+            product_articles = {}
+            product_cooking_places = {}
+            
+            if isinstance(products_xml, str):
+                root = ET.fromstring(products_xml)
+                for pDto in root.findall('productDto'):
+                    p_id = pDto.findtext('id')
+                    p_name = pDto.findtext('name')
+                    p_num = pDto.findtext('num') or pDto.findtext('code')
+                    cooking_place = pDto.findtext('cookingPlaceType') or pDto.findtext('cookingPlace')
+                    
+                    if p_id and p_name:
+                        product_names[p_id] = p_name
+                    if p_id and p_num:
+                        product_articles[p_id] = p_num
+                    if p_id and cooking_place:
+                        product_cooking_places[p_id] = cooking_place
+            else:
+                logger.warning("Resto API products response is not XML string")
+                
+            # 2. Получаем технологические карты из Resto API v2/assemblyCharts/getAll
+            logger.info("Resto API: Запрос v2/assemblyCharts/getAll...")
+            today_str = datetime.date.today().strftime("%Y-%m-%d")
+            charts_data = await iiko_service._resto_request(
+                "GET", 
+                "/v2/assemblyCharts/getAll", 
+                organization_id=org_id,
+                params={"dateFrom": today_str}
+            )
+            
+            recipes_imported = 0
+            zones_created = 0
+            
+            # Мапа локальных зон (название -> KitchenZone) для кэширования в рамках одной сессии
+            local_zones = {z.name: z for z in session.exec(select(KitchenZone)).all()}
+            
+            if isinstance(charts_data, dict) and "assemblyCharts" in charts_data:
+                charts = charts_data["assemblyCharts"]
+                logger.info(f"Найдено {len(charts)} техкарт в iiko Resto")
+                
+                for chart in charts:
+                    product_iiko_id = chart.get("assembledProductId")
+                    if not product_iiko_id:
+                        continue
+                        
+                    # Ищем продукт в нашей локальной БД по iiko_id
+                    prod = session.exec(select(Product).where(Product.iiko_id == product_iiko_id)).first()
+                    if not prod:
+                        # Продукт отсутствует в каталоге товаров сайта, создаем служебную заготовку
+                        ing_name = product_names.get(product_iiko_id, f"Заготовка #{product_iiko_id[:8]}")
+                        prod = Product(
+                            name=ing_name,
+                            price=Decimal("0.00"),
+                            is_available=False,
+                            iiko_id=product_iiko_id,
+                            description="Служебный товар для техкарт (заготовка)",
+                            article=product_articles.get(product_iiko_id) or f"SERV-{product_iiko_id[:8].upper()}"
+                        )
+                        session.add(prod)
+                        session.flush()
+                        
+                    # 2.1. Обработка зоны приготовления (цеха)
+                    cooking_place_name = product_cooking_places.get(product_iiko_id)
+                    if cooking_place_name:
+                        # Находим или создаем цех
+                        zone = local_zones.get(cooking_place_name)
+                        if not zone:
+                            zone = KitchenZone(
+                                name=cooking_place_name,
+                                color="#2196F3",
+                                description=f"Цех импортирован из iiko Office: {cooking_place_name}"
+                            )
+                            session.add(zone)
+                            session.flush()
+                            local_zones[cooking_place_name] = zone
+                            zones_created += 1
+                        
+                        # Привязываем продукт к цеху
+                        prod.kitchen_zone_id = zone.id
+                        session.add(prod)
+                        
+                    # 2.2. Обработка технологической карты (рецепта)
+                    ingredients = []
+                    items = chart.get("items") or []
+                    for item in items:
+                        ing_id = item.get("productId")
+                        if not ing_id:
+                            continue
+                            
+                        # Ищем название сырья по мапе из XML продуктов
+                        ing_name = product_names.get(ing_id, f"Сырье #{ing_id[:8]}")
+                        
+                        # amountIn (gross), amountMiddle (net), amountOut (output)
+                        gross = float(item.get("amountIn") or 0)
+                        net = float(item.get("amountMiddle") or 0)
+                        output = float(item.get("amountOut") or 0)
+                        
+                        # Переведем значения в граммы (умножаем на 1000, если вес дробный < 1.0, чтобы получить граммы)
+                        def _to_grams(val):
+                            val_f = float(val or 0)
+                            if 0 < val_f <= 2.0:
+                                return round(val_f * 1000, 1)
+                            return round(val_f, 1)
+                            
+                        ingredients.append({
+                            "name": ing_name,
+                            "iiko_id": ing_id,
+                            "gross": _to_grams(gross),
+                            "net": _to_grams(net),
+                            "output": _to_grams(output)
+                        })
+                        
+                    technology = chart.get("technologyDescription") or ""
+                    appearance = chart.get("appearance") or ""
+                    critical_points = chart.get("organoleptic") or chart.get("outputComment") or ""
+                    
+                    # Проверяем, есть ли уже рецепт у товара
+                    recipe = session.exec(select(ProductRecipe).where(ProductRecipe.product_id == prod.id)).first()
+                    if not recipe:
+                        recipe = ProductRecipe(product_id=prod.id)
+                        
+                    recipe.ingredients = ingredients
+                    recipe.technology = technology
+                    recipe.appearance = appearance
+                    recipe.critical_points = critical_points
+                    recipe.updated_at = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
+                    
+                    session.add(recipe)
+                    recipes_imported += 1
+                    
+                session.commit()
+                logger.info(f"Успешно импортировано: {recipes_imported} техкарт, {zones_created} новых цехов")
+            else:
+                logger.warning("Resto API assemblyCharts response is not dict or missing assemblyCharts key")
+                
+            return {
+                "success": True,
+                "recipes_imported": recipes_imported,
+                "zones_created": zones_created,
+                "message": f"Синхронизация завершена: импортировано {recipes_imported} техкарт, создано {zones_created} цехов."
+            }
+        except Exception as e:
+            logger.error(f"Resto Kitchen sync failed: {e}", exc_info=True)
+            return {
+                "success": False,
+                "error": str(e),
+                "message": f"Ошибка синхронизации: {str(e)}"
+            }
 
 iiko_sync_service = IikoSyncService()
 

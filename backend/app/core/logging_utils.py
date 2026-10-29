@@ -108,3 +108,7 @@ async def global_exception_handler(request: Request, exc: Exception):
             "message": error_msg if settings.DEBUG else "Произошла внутренняя ошибка сервера"
         }
     )
+
+# Отключение логирования всех SQL-запросов в stdout для экономии диска
+logging.getLogger("sqlalchemy.engine").setLevel(logging.WARNING)
+logging.getLogger("sqlalchemy.pool").setLevel(logging.WARNING)

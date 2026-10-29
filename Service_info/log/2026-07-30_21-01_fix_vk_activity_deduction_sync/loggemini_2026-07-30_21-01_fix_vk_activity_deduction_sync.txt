@@ -1,0 +1,20 @@
+Лог сессии: 2026-07-30_21-01_fix_vk_activity_deduction_sync
+Задача: Исправление списания баллов активности ВК из iikoCard при ручной корректировке, нарушениях и сбросе рейтинга.
+
+Запланированные действия:
+1. В backend/app/services/iiko_service.py исправить эндпоинт списания баллов с '/customer/wallet/charge' на '/customer/wallet/chargeoff'.
+2. В backend/app/api/vk_activity_bots.py исправить получение настроек во '/update-points' по vk_user.vk_group_id с использованием таблицы VkBotConnection.
+3. В backend/app/api/vk_activity_bots.py в '/connection/{connection_id}/reset' добавить сброс поля vk_bonus_balance_synced = 0.
+4. Выгрузить изменения на VPS сервер.
+5. Выполнить проверку и перезапуск сервисов на VPS.
+
+Выполненные изменения:
+1. Изменен метод add_customer_bonuses в backend/app/services/iiko_service.py:
+   - Ветка `elif sum_change < 0` теперь обращается к корректному эндпоинту "/api/1/loyalty/iiko/customer/wallet/chargeoff".
+2. Исправлен метод update_user_points в backend/app/api/vk_activity_bots.py:
+   - Исправлен запрос поиска настроек VkActivitySettings. Теперь сначала ищется запись в таблице VkBotConnection по vk_user.vk_group_id, и по ее conn.id запрашивается верный VkActivitySettings.
+3. Исправлен метод reset_activity_ranking в backend/app/api/vk_activity_bots.py:
+   - SQL UPDATE запрос дополнен сбросом поля vk_bonus_balance_synced в 0 вместе с vk_bonus_balance. Это предотвращает возникновение ложных отрицательных разниц при последующей синхронизации после полного сброса рейтинга.
+4. Файлы выгружены по scp на VPS vezuroll.
+5. Сверка файлов на VPS подтвердила идентичность исходному коду локальной среды.
+6. Выполнен успешный перезапуск контейнеров backend и worker на VPS.

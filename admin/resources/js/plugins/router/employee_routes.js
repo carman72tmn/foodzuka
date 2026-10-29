@@ -1,31 +1,21 @@
-export const routes = [
-  { path: '/', redirect: '/dashboard' },
-  {
-    path: '/',
-    component: () => import('@/layouts/default.vue'),
-    children: [
-      {
-        path: 'dashboard',
-        component: () => import('@/pages/employee/dashboard.vue'),
-      },
-      {
-        path: 'courier',
-        component: () => import('@/pages/employee/courier.vue'),
-      },
-    ],
-  },
-  {
-    path: '/',
-    component: () => import('@/layouts/blank.vue'),
-    children: [
-      {
-        path: 'login',
-        component: () => import('@/pages/login.vue'),
-      },
-      {
-        path: '/:pathMatch(.*)*',
-        component: () => import('@/pages/[...error].vue'),
-      },
-    ],
-  },
-]
+import { routes as adminRoutes } from './routes'
+
+// Маршруты панели сотрудников на базе общих маршрутов с переопределением dashboard на специализированный
+export const routes = adminRoutes.map(group => {
+  if (group.children) {
+    return {
+      ...group,
+      children: group.children.map(child => {
+        if (child.path === 'dashboard') {
+          return {
+            ...child,
+            component: () => import('@/pages/employee/dashboard.vue'),
+          }
+        }
+        return child
+      }),
+    }
+  }
+  return group
+})
+

@@ -15,6 +15,14 @@ class IikoSettings(SQLModel, table=True):
 
     # Основные настройки подключения
     api_login: str = Field(max_length=500, description="API Login Cloud API key")
+    app_id: Optional[str] = Field(
+        default="19de15e4-bce3-4742-b120-72a33813c025", max_length=255,
+        description="Идентификатор приложения (App ID) на портале разработчика iiko"
+    )
+    client_secret: Optional[str] = Field(
+        default="9BryJrlsxs9aA863hjNPQLFSmlNvMZ0piUQFWCLBSec=", max_length=255,
+        description="Секрет клиента (Client Secret) на портале разработчика iiko"
+    )
     organization_id: Optional[str] = Field(
         default=None, max_length=255,
         description="UUID выбранной организации"
@@ -31,6 +39,11 @@ class IikoSettings(SQLModel, table=True):
         default=None, max_length=255,
         description="UUID выбранной категории цен для выгрузки меню"
     )
+    price_source: str = Field(
+        default="category", max_length=50,
+        description="Источник цен: category (ценовая категория) или menu (напрямую из внешнего меню)"
+    )
+
 
 
     # Типы оплаты
@@ -49,6 +62,14 @@ class IikoSettings(SQLModel, table=True):
     payment_type_bonus: Optional[str] = Field(
         default=None, max_length=255,
         description="ID типа оплаты — бонусные баллы"
+    )
+    payment_type_courier_cash: Optional[str] = Field(
+        default=None, max_length=255,
+        description="ID типа оплаты — наличные для курьера при смене"
+    )
+    payment_type_courier_card: Optional[str] = Field(
+        default=None, max_length=255,
+        description="ID типа оплаты — карта для курьера при смене"
     )
 
     # Бонусная система
@@ -78,6 +99,15 @@ class IikoSettings(SQLModel, table=True):
     use_v2_menu: bool = Field(
         default=False,
         description="Использовать API v2 (Cloud Menu) вместо Nomenclature"
+    )
+    
+    hide_empty_categories: bool = Field(
+        default=False,
+        description="Скрывать на сайте категории без товаров"
+    )
+    hide_stopped_products: bool = Field(
+        default=False,
+        description="Скрывать на сайте товары в стоп-листе"
     )
 
     # Резервные каналы для ошибок

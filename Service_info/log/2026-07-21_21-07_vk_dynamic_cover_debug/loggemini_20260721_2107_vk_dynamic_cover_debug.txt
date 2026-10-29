@@ -1,0 +1,21 @@
+[2026-07-21 21:07:18] Session Started: VK Dynamic Cover Debug
+User Issue: не работает динамическая обложка , а точнее в группе сообщества не отображаются элементы динамической обложки
+
+[2026-07-21 21:09:00] Diagnostic Results & Findings:
+1. Font download URL returned 404: https://raw.githubusercontent.com/google/fonts/main/ofl/roboto/static/Roboto-Bold.ttf
+   Result: Pillow failed to load TTF and fell back to ImageFont.load_default() (8px bitmap), rendering text invisible on 1590x530 canvas.
+2. VK Upload Server crop params:
+   vk_cover_service.py passed crop_x2=1590, crop_y2=530 without crop_x=0, crop_y=0.
+   Result: VK photos.saveOwnerCoverPhoto threw Error 129 Invalid photo.
+3. Clock Widget Timezone:
+   Used UTC server time instead of Europe/Moscow timezone.
+
+[2026-07-21 21:25:00] User Request 2.0:
+Elements positioned near top/edges were obscured on VK Mobile app due to mobile app status bars and cropping.
+User requested adding rich, modern, dynamic widgets and container styling to make the dynamic cover highly visible, stylish, and modern on both Mobile and PC devices.
+
+Plan 2.0:
+- Add 8 dynamic widgets (Clock & Date, Weather, Top Subscriber, Countdown Timer, Orders Counter, Last Contest Winner, Promo Code, Rich Text).
+- Add Glassmorphism / Neon / Pill container boxes, text shadows, and text stroke outlines in Pillow rendering.
+- Add VK Mobile Safe Area guide overlay in admin Vue editor.
+- Add 1-click preset templates.

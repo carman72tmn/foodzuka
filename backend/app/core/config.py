@@ -42,6 +42,10 @@ class Settings(BaseSettings):
     VK_CONFIRMATION_CODE: Optional[str] = None
     VK_SECRET_KEY: Optional[str] = None
 
+    # Настройки VK App OAuth
+    VK_APP_ID: Optional[str] = None
+    VK_APP_SECRET: Optional[str] = None
+
     # Настройки Redis
     REDIS_URL: Optional[str] = None
     CACHE_ENABLED: bool = False

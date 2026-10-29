@@ -1,0 +1,17 @@
+Сессия инициализирована: 2026-07-10 19:23:36
+Задача: Интеграция ботов ВКонтакте (поздравление именинников среди подписчиков на стене сообщества с автоудалением).
+Статус: Реализовано.
+
+Выполненные изменения:
+1. Модели БД (vk_birthday_bots, vk_birthday_posts) добавлены в backend/app/models/vk_birthday_bot.py и импортированы в backend/app/models/__init__.py.
+2. Логика работы с VK API (сбор подписчиков, загрузка картинок на стену, публикация wall.post и удаление wall.delete) реализована в backend/app/services/vk_birthday_service.py.
+3. Добавлены права доступа (marketing_vk_bots_view, marketing_vk_bots_edit) в backend/app/scripts/seed_rbac.py.
+4. Разработаны API-эндпоинты CRUD, тест-публикации и аплоада в backend/app/api/vk_birthday_bots.py.
+5. Зарегистрирован роутер в backend/main.py и backend/app/api/__init__.py.
+6. Celery задачи для автопубликации и автоудаления настроены в backend/app/tasks/vk_birthday_task.py и зарегистрированы в backend/app/core/celery_app.py.
+7. Врапперы задач интегрированы в планировщик backend/app/core/scheduler.py с автоинициализацией в scheduled_tasks на старте.
+8. Скрипт миграции создания таблиц бэкенда создан в backend/app/scripts/create_vk_birthday_bot_tables.py.
+9. В меню фронтенда (NavItems.vue) добавлен пункт "Боты ВКонтакте", настроен Vue Router в routes.js, и добавлены права в RoleList.vue.
+10. Создан интерактивный плиточный интерфейс настройки ботов (карточки ботов со статусами) в admin/resources/js/pages/marketing/vk-bots.vue. При клике на карточку открывается красивый VDialog с формой настроек.
+11. Запущен процесс синхронизации с VPS и пересборки через sync_to_vps.py.
+12. Выполнен повторный деплой и пересборка обновленного фронтенда на VPS. Все проверки завершены успешно.

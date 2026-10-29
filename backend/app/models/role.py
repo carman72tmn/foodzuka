@@ -46,6 +46,7 @@ class Role(SQLModel, table=True):
     description: Optional[str] = Field(default=None, max_length=255)
     iiko_id: Optional[str] = Field(default=None, unique=True, index=True)  # ID должности из iiko
     is_system: bool = Field(default=False)  # Системные роли нельзя удалять
+    default_page: Optional[str] = Field(default=None, max_length=255)
     
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))

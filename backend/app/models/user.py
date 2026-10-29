@@ -4,7 +4,7 @@
 from typing import Optional, TYPE_CHECKING
 from datetime import datetime, timezone
 from sqlmodel import Field, SQLModel, Relationship
-from sqlalchemy import String, cast
+from sqlalchemy import String, cast, Column, JSON
 from sqlalchemy.orm import foreign
 
 if TYPE_CHECKING:
@@ -28,6 +28,8 @@ class User(SQLModel, table=True):
     # Новые поля для RBAC и интеграции с iiko
     role_id: Optional[int] = Field(default=None, foreign_key="roles.id")
     iiko_id: Optional[str] = Field(default=None, unique=True, index=True) # ID сотрудника в iiko
+    profile_data: Optional[dict] = Field(default=None, sa_column=Column(JSON))
+    vk_user_id: Optional[int] = Field(default=None, unique=True, index=True, nullable=True) # ID ВК
     
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))

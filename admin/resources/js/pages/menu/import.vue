@@ -167,7 +167,7 @@ onUnmounted(() => {
               <div class="font-weight-medium">{{ settings.external_menu_id }}</div>
            </div>
            <VDivider class="mb-4" />
-           <VBtn block variant="tonal" to="/admin/settings" prepend-icon="mdi-pencil">Изменить в настройках</VBtn>
+           <VBtn block variant="tonal" to="/settings/iiko" prepend-icon="mdi-pencil">Изменить в настройках</VBtn>
         </VCardText>
       </VCard>
     </VCol>

@@ -1,0 +1,10 @@
+Сессия: 2026-07-23 00:50
+Задача: Добавление глобальных настроек фильтрации каталога (скрытие пустых категорий, скрытие/затемнение товаров в стоп-листе), настройка отображения и блокировки покупки на фронтенде, добавление тумблеров в админке.
+
+Измененные файлы:
+1. backend/app/api/categories.py — добавлена функция filter_empty_categories и её применение в методах GET /categories/ и GET /categories/tree.
+2. backend/app/api/products.py — добавлена фильтрация get_products по hide_stopped_products и stop_list_branch_ids.
+3. frontend/src/views/Home.vue — обновлен шаблон карточки товара для товаров в стоп-листе (dimmed, disabled add-to-cart button, status label, warning banner). Обновлено модальное окно товара с выводом аналогичного баннера и блокировкой покупки. Добавлен хелпер isProductStopped и стили CSS.
+4. admin/resources/js/pages/settings/iiko.vue — добавлены свойства hide_empty_categories и hide_stopped_products в объект настроек и выведены в виде тумблеров (VSwitch) на вкладке "Управление".
+5. Service_info/sql_faq.md — задокументированы новые поля баз данных.
+6. Service_info/system_faq.md — обновлена документация архитектуры фильтрации каталога.

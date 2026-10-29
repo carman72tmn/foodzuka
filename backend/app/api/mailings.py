@@ -7,13 +7,13 @@ from app.schemas import MailingCreate, MailingUpdate, MailingResponse
 
 router = APIRouter(prefix="/mailings", tags=["Mailings"])
 
-@router.get("/", response_model=List[MailingResponse])
+@router.get("", response_model=List[MailingResponse])
 def get_mailings(db: Session = Depends(get_session)):
     """Получить список всех рассылок"""
     mailings = db.exec(select(Mailing).order_by(Mailing.id.desc())).all()
     return mailings
 
-@router.post("/", response_model=MailingResponse)
+@router.post("", response_model=MailingResponse)
 def create_mailing(mailing: MailingCreate, db: Session = Depends(get_session)):
     """Создать новую рассылку"""
     db_mailing = Mailing.model_validate(mailing)

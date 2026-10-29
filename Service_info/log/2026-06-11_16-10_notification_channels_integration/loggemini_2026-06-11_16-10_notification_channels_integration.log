@@ -1,0 +1,57 @@
+# Лог сессии Antigravity: Реорганизация системных рассылок получателям
+Дата создания: 11.06.2026 16:10 (UTC+5)
+Задача: Переименовать вкладку «Уведомления VK бота» в «Системные рассылки», добавить привязку Telegram, MAX, выбор каналов по умолчанию и по событиям.
+
+## Описание изменений
+
+1. **Модели базы данных (backend/app/models/vk_bot.py)**:
+   - В `VkBotAccount` поле `vk_user_id` стало опциональным (`Optional[int] = Field(default=None, nullable=True...)`) для добавления сотрудников без VK.
+   - В `VkBotSubscription` добавлены флаги:
+     - `send_vk: bool` (default=True)
+     - `send_tg: bool` (default=False)
+     - `send_max: bool` (default=False)
+     - `send_sms: bool` (default=False)
+
+2. **Скрипт миграции (backend/app/scripts/migrate_notifications_channels.py)**:
+   - Изменяет тип `vk_user_id` в таблице `vk_bot_accounts` на nullable (`DROP NOT NULL`).
+   - Добавляет поля Telegram, MAX, флаги по умолчанию и статусы верификации в `vk_bot_accounts`.
+   - Добавляет флаги `send_vk`, `send_tg`, `send_max`, `send_sms` в `vk_bot_subscriptions`.
+
+3. **REST API (backend/app/api/vk_bot_admin.py)**:
+   - Обновлены Pydantic-схемы `AccountCreate`, `AccountUpdate` и `SubscriptionUpdate` с добавлением новых полей.
+   - Эндпоинты `POST /accounts` и `PATCH /accounts/{id}` обновлены для записи/обновления Telegram ID, MAX ID и флагов использования каналов.
+   - Добавлены эндпоинты:
+     - `POST /accounts/{account_id}/verify/tg` — проверочное сообщение в Telegram.
+     - `POST /accounts/{account_id}/verify/max` — проверочное сообщение в MAX.
+   - Метод `POST /subscriptions` изменен для сохранения флагов `send_vk`, `send_tg`, `send_max`, `send_sms`.
+
+4. **Маршрутизатор (backend/app/services/vk_notification_router.py)**:
+   - Метод `dispatch_event` теперь отправляет события по активным каналам согласно настройкам получателя и подписки.
+   - Реализована отправка в Telegram через HTTP Bot API и в MAX через `send_max_message`.
+   - Для SMS сделан логгер.
+   - В лог сообщений `vk_bot_message_logs` добавляются префиксы `[VK]`, `[TG]`, `[MAX]`, `[SMS]` и сохраняется корректный статус отправки.
+   - Метод `send_manual_broadcast` уникализирует получателей по первичному ключу и рассылает сообщения по всем активным каналам каждого пользователя.
+
+5. **Навигация и роуты фронтенда (admin/resources/js/layouts/components/NavItems.vue)**:
+   - Название пункта меню изменено с "Уведомления VK Бота" на "Системные рассылки".
+
+6. **Компонент Vue (admin/resources/js/pages/settings/vk-notifications_utf8.vue)**:
+   - Компонент полностью обновлен. Заголовок изменен на "Системные рассылки".
+   - На карточках получателей отображаются иконки подключенных соцсетей с цветовой кодировкой статуса (активен, отключен, проверен/не проверен). При клике на иконки идет вызов тестов связи.
+   - Формы создания и редактирования получателя дополнены полями Telegram ID, MAX ID и переключателями использования каналов.
+   - Диалог подписок сотрудника переделан в матрицу чекбоксов. Изменение любого чекбокса в реальном времени создает, обновляет или удаляет подписку.
+
+7. **Скрипт синхронизации (sync_to_vps.py)**:
+   - В список файлов добавлен скрипт `migrate_notifications_channels.py`.
+   - В функцию `run_migrations` добавлено выполнение этого скрипта на VPS.
+
+## Инструкция по откату изменений
+В случае необходимости отката:
+1. Выполнить `git checkout` измененных файлов:
+   - `backend/app/models/vk_bot.py`
+   - `backend/app/api/vk_bot_admin.py`
+   - `backend/app/services/vk_notification_router.py`
+   - `admin/resources/js/layouts/components/NavItems.vue`
+   - `admin/resources/js/pages/settings/vk-notifications_utf8.vue`
+   - `sync_to_vps.py`
+2. Откатить изменения структуры базы данных на VPS (через ALTER TABLE ... DROP COLUMN ...).

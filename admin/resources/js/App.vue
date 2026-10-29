@@ -1,9 +1,45 @@
 <script setup>
 import { onMounted } from 'vue'
+import { useRouter } from 'vue-router'
 import { appTimezone, appOffset } from '@/utils/date'
-import UpgradeToPro from '@/components/UpgradeToPro.vue'
+import { loginWithVkMiniApp } from '@/utils/auth'
+import PwaInstallBanner from '@/components/PwaInstallBanner.vue'
+
+const router = useRouter()
 
 onMounted(async () => {
+  // Проверяем среду VK Mini App и выполняем авто-логин
+  const urlParams = new URLSearchParams(window.location.search)
+  const isVk = urlParams.has('vk_app_id') || urlParams.has('vk_user_id')
+  
+  if (isVk) {
+    console.log('[VK Mini App] VK launch parameters detected. Attempting auto-login (Admin)...')
+    try {
+      const queryParams = window.location.search
+      const result = await loginWithVkMiniApp(queryParams)
+      
+      if (result.status === 'success') {
+        console.log('[VK Mini App] Auto-login successful for admin:', result.username)
+        localStorage.setItem('vk_launch_params', queryParams)
+        if (result.is_courier) {
+          router.push('/pers/dashboard')
+        } else {
+          router.push('/admin/dashboard')
+        }
+      } else if (result.status === 'not_linked') {
+        console.log('[VK Mini App] Account not linked. Redirecting to login with link mode (Admin)...')
+        localStorage.setItem('vk_launch_params', queryParams)
+        router.push({
+          path: '/login',
+          query: { vk_link_mode: '1', vk_user_id: result.vk_user_id }
+        })
+        return // Прерываем дальнейшее монтирование
+      }
+    } catch (err) {
+      console.error('[VK Mini App] Auto-login error (Admin):', err)
+    }
+  }
+
   try {
     const response = await fetch('/api/v1/iiko/settings/')
     if (response.ok) {
@@ -41,6 +77,6 @@ onMounted(async () => {
 <template>
   <VApp>
     <RouterView />
-    <UpgradeToPro />
+    <PwaInstallBanner />
   </VApp>
 </template>

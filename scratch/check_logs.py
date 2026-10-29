@@ -1,24 +1,8 @@
-import sys
-import os
+from sqlmodel import Session, select
+from app.core.database import engine
+from app.models.sync_log import SyncLog
 
-# Добавляем путь к установленным библиотекам
-sys.path.append(r'C:\Users\v_kva\.gemini\antigravity\scratch\foodtech\trash\libs')
-
-import paramiko
-
-def check_logs(ip, pwd):
-    client = paramiko.SSHClient()
-    client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-    try:
-        client.connect(ip, username="root", password=pwd, timeout=30)
-        
-        print("--- Nginx Logs ---")
-        stdin, stdout, stderr = client.exec_command("docker logs foodtech-nginx --tail 100")
-        print(stdout.read().decode())
-        
-        client.close()
-    except Exception as e:
-        print(f"Failed: {e}")
-
-if __name__ == "__main__":
-    check_logs("178.212.13.48", "12101991Qq")
+with Session(engine) as session:
+    logs = session.exec(select(SyncLog).order_by(SyncLog.id.desc()).limit(10)).all()
+    for l in logs:
+        print(f"ID: {l.id} | Type: {l.sync_type} | Status: {l.status} | Details: {l.details}")

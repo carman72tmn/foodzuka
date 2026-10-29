@@ -63,15 +63,24 @@ async def main():
         
         await asyncio.sleep(10)  # Проверяем каждые 10 секунд
 
-    # Инициализация бота
-    bot = Bot(token=token)
+    # Инициализация бота с безопасным таймаутом сессии
+    from aiogram.client.session.aiohttp import AiohttpSession
+    session = AiohttpSession(timeout=30.0)
+    bot = Bot(token=token, session=session)
 
-    # Запуск polling
+    # Запуск polling с автоматическим переподключением при сетевых таймаутах
     logger.info("🤖 Бот запущен!")
     try:
-        await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
-    except TelegramUnauthorizedError:
-        logger.error("❌ Ошибка авторизации: Токен недействителен!")
+        while True:
+            try:
+                await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
+                break
+            except TelegramUnauthorizedError:
+                logger.error("❌ Ошибка авторизации: Токен недействителен! Повторная проверка через 60 сек...")
+                await asyncio.sleep(60)
+            except Exception as e:
+                logger.warning(f"⚠️ Сетевая ошибка Telegram API ({type(e).__name__}): {e}. Ожидание 15 сек перед повтором...")
+                await asyncio.sleep(15)
     finally:
         if bot:
             await bot.session.close()

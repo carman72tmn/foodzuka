@@ -5,81 +5,95 @@ import {
 } from 'vuetify'
 import { hexToRgb } from '@core/utils/colorConverter'
 
+const props = defineProps({
+  weekSummary: {
+    type: Object,
+    default: () => ({
+      total_revenue: 0,
+      total_revenue_formatted: '0 ₽',
+      total_orders: 0,
+      daily_trend: [],
+    }),
+  },
+  today: {
+    type: Object,
+    default: () => ({
+      revenue: 0,
+      revenue_formatted: '0 ₽',
+      expected_revenue: 0,
+      expected_revenue_formatted: '0 ₽',
+      unpaid_revenue: 0,
+      unpaid_revenue_formatted: '0 ₽',
+      orders_count: 0,
+      paid_orders_count: 0,
+      unpaid_orders_count: 0,
+    }),
+  },
+  yesterday: {
+    type: Object,
+    default: () => ({
+      revenue: 0,
+      revenue_formatted: '0 ₽',
+      orders_count: 0,
+    }),
+  },
+})
+
 const vuetifyTheme = useTheme()
 const display = useDisplay()
 
-const series = [
+const series = computed(() => [
   {
-    name: `${ new Date().getFullYear() - 1 }`,
-    data: [
-      18,
-      10,
-      15,
-      29,
-      18,
-      12,
-      9,
-    ],
+    name: 'В кассе (₽)',
+    data: (props.weekSummary.daily_trend || []).map(d => d.revenue),
   },
   {
-    name: `${ new Date().getFullYear() - 2 }`,
-    data: [
-      -13,
-      -18,
-      -9,
-      -14,
-      -8,
-      -17,
-      -15,
-    ],
+    name: 'Ожидаемая (₽)',
+    data: (props.weekSummary.daily_trend || []).map(d => d.expected_revenue || d.revenue),
   },
-]
+])
+
+const chartCategories = computed(() => {
+  return (props.weekSummary.daily_trend || []).map(d => {
+    return d.is_today ? `Сегодня (${d.date})` : `${d.date} ${d.day_name}`
+  })
+})
+
+// Процент сегодняшней выручки от среднедневной за неделю
+const weekAverageDaily = computed(() => {
+  const days = (props.weekSummary.daily_trend || []).filter(d => d.revenue > 0)
+  if (!days.length) return 0
+  const sum = days.reduce((acc, d) => acc + d.revenue, 0)
+  return sum / days.length
+})
+
+const radialPercentage = computed(() => {
+  if (weekAverageDaily.value <= 0) return 0
+  const pct = Math.round((props.today.revenue / weekAverageDaily.value) * 100)
+  return Math.min(pct, 100)
+})
 
 const chartOptions = computed(() => {
   const currentTheme = vuetifyTheme.current.value.colors
   const variableTheme = vuetifyTheme.current.value.variables
-  const disabledTextColor = `rgba(${ hexToRgb(String(currentTheme['on-surface'])) },${ variableTheme['disabled-opacity'] })`
-  const primaryTextColor = `rgba(${ hexToRgb(String(currentTheme['on-surface'])) },${ variableTheme['high-emphasis-opacity'] })`
   const secondaryTextColor = `rgba(${ hexToRgb(String(currentTheme['on-surface'])) },${ variableTheme['medium-emphasis-opacity'] })`
   const borderColor = `rgba(${ hexToRgb(String(variableTheme['border-color'])) },${ variableTheme['border-opacity'] })`
   
   return {
     bar: {
       chart: {
-        stacked: true,
         parentHeightOffset: 6,
-        offsetX: -12,
         toolbar: { show: false },
       },
       dataLabels: { enabled: false },
       stroke: {
-        width: 6,
-        lineCap: 'round',
-        colors: [currentTheme.surface],
+        width: 2,
+        colors: ['transparent'],
       },
       colors: [
         `rgba(${ hexToRgb(String(currentTheme.primary)) }, 1)`,
-        `rgba(${ hexToRgb(String(currentTheme.info)) }, 1)`,
+        `rgba(${ hexToRgb(String(currentTheme.info)) }, 0.85)`,
       ],
-      legend: {
-        offsetX: -22,
-        offsetY: -1,
-        position: 'top',
-        fontSize: '13px',
-        horizontalAlign: 'left',
-        fontFamily: 'Public Sans',
-        labels: { colors: currentTheme.secondary },
-        itemMargin: {
-          vertical: 4,
-          horizontal: 10,
-        },
-        markers: {
-          width: 11,
-          height: 11,
-          radius: 10,
-          offsetX: -2,
-        },
-      },
       states: {
         hover: { filter: { type: 'none' } },
         active: { filter: { type: 'none' } },
@@ -91,131 +105,44 @@ const chartOptions = computed(() => {
       },
       plotOptions: {
         bar: {
-          borderRadius: 9,
-          columnWidth: '30%',
-          borderRadiusApplication: 'around',
-          borderRadiusWhenStacked: 'all',
+          borderRadius: 8,
+          columnWidth: '40%',
+          distributed: false,
         },
       },
       xaxis: {
-        axisTicks: { show: false },
-        crosshairs: { opacity: 0 },
+        categories: chartCategories.value,
         axisBorder: { show: false },
-        categories: [
-          'Янв',
-          'Фев',
-          'Мар',
-          'Апр',
-          'Май',
-          'Июн',
-          'Июл',
-        ],
+        axisTicks: { show: false },
         labels: {
           style: {
-            fontSize: '13px',
-            colors: disabledTextColor,
+            colors: secondaryTextColor,
+            fontSize: '12px',
             fontFamily: 'Public Sans',
           },
         },
       },
       yaxis: {
         labels: {
+          formatter: val => `${Math.round(val / 1000)}k ₽`,
           style: {
-            fontSize: '13px',
-            colors: disabledTextColor,
+            colors: secondaryTextColor,
+            fontSize: '12px',
             fontFamily: 'Public Sans',
           },
         },
       },
-      responsive: [
-        {
-          breakpoint: 1980,
-          options: {
-            plotOptions: {
-              bar: {
-                columnWidth: '32%',
-                borderRadius: 8,
-              },
-            },
-          },
+      tooltip: {
+        y: {
+          formatter: val => `${Number(val).toLocaleString('ru-RU')} ₽`,
         },
-        {
-          breakpoint: display.thresholds.value.xl,
-          options: {
-            plotOptions: {
-              bar: {
-                columnWidth: '43%',
-                borderRadius: 8,
-              },
-            },
-          },
-        },
-        {
-          breakpoint: display.thresholds.value.lg,
-          options: {
-            plotOptions: {
-              bar: {
-                columnWidth: '50%',
-                borderRadius: 7,
-              },
-            },
-          },
-        },
-        {
-          breakpoint: display.thresholds.value.md,
-          options: {
-            plotOptions: {
-              bar: {
-                columnWidth: '48%',
-                borderRadius: 8,
-              },
-            },
-          },
-        },
-        {
-          breakpoint: display.thresholds.value.sm,
-          options: {
-            plotOptions: {
-              bar: {
-                columnWidth: '44%',
-                borderRadius: 6,
-              },
-            },
-          },
-        },
-        {
-          breakpoint: 599,
-          options: {
-            plotOptions: {
-              bar: {
-                columnWidth: '44%',
-                borderRadius: 8,
-              },
-            },
-          },
-        },
-        {
-          breakpoint: 420,
-          options: {
-            plotOptions: {
-              bar: {
-                columnWidth: '55%',
-                borderRadius: 6,
-              },
-            },
-          },
-        },
-      ],
+      },
     },
     radial: {
       chart: { sparkline: { enabled: true } },
-      labels: ['Рост'],
+      labels: ['От средней'],
       stroke: { dashArray: 5 },
       colors: [`rgba(${ hexToRgb(String(currentTheme.primary)) }, 1)`],
-      states: {
-        hover: { filter: { type: 'none' } },
-        active: { filter: { type: 'none' } },
-      },
       fill: {
         type: 'gradient',
         gradient: {
@@ -223,13 +150,9 @@ const chartOptions = computed(() => {
           opacityTo: 0.6,
           opacityFrom: 1,
           shadeIntensity: 0.5,
-          stops: [
-            30,
-            70,
-            100,
-          ],
+          stops: [30, 70, 100],
           inverseColors: false,
-          gradientToColors: [currentTheme.primary],
+          gradientToColors: [currentTheme.success],
         },
       },
       plotOptions: {
@@ -242,7 +165,7 @@ const chartOptions = computed(() => {
             name: {
               offsetY: 25,
               fontWeight: 500,
-              fontSize: '15px',
+              fontSize: '14px',
               color: secondaryTextColor,
               fontFamily: 'Public Sans',
             },
@@ -250,63 +173,40 @@ const chartOptions = computed(() => {
               offsetY: -15,
               fontWeight: 500,
               fontSize: '24px',
-              color: primaryTextColor,
+              color: currentTheme.primary,
               fontFamily: 'Public Sans',
+              formatter: value => `${value}%`,
             },
           },
         },
       },
-      responsive: [
-        {
-          breakpoint: 900,
-          options: { chart: { height: 200 } },
-        },
-        {
-          breakpoint: 735,
-          options: { chart: { height: 200 } },
-        },
-        {
-          breakpoint: 660,
-          options: { chart: { height: 200 } },
-        },
-        {
-          breakpoint: 600,
-          options: { chart: { height: 200 } },
-        },
-      ],
     },
   }
 })
 
-const balanceData = [
-  {
-    icon: 'bx-dollar',
-    amount: '2.54k ₽',
-    year: '2023',
-    color: 'primary',
-  },
+const balanceCards = computed(() => [
   {
     icon: 'bx-wallet',
-    amount: '4.21k ₽',
-    year: '2022',
+    amount: props.today.revenue_formatted,
+    label: 'В кассе (факт)',
+    sub: `${props.today.paid_orders_count ?? props.today.orders_count} оплачено`,
+    color: 'success',
+  },
+  {
+    icon: 'bx-time-five',
+    amount: props.today.expected_revenue_formatted || props.today.revenue_formatted,
+    label: 'Ожидаемая',
+    sub: `всего ${props.today.orders_count} заказов`,
     color: 'info',
   },
-]
-
-const moreList = [
   {
-    title: 'Share',
-    value: 'Share',
+    icon: 'bx-history',
+    amount: props.yesterday.revenue_formatted,
+    label: 'Вчера',
+    sub: `${props.yesterday.orders_count} заказов`,
+    color: 'secondary',
   },
-  {
-    title: 'Refresh',
-    value: 'Refresh',
-  },
-  {
-    title: 'Update',
-    value: 'Update',
-  },
-]
+])
 </script>
 
 <template>
@@ -319,18 +219,15 @@ const moreList = [
         :class="$vuetify.display.smAndUp ? 'border-e' : 'border-b'"
       >
         <VCardItem class="pb-0">
-          <VCardTitle>Общая выручка</VCardTitle>
-
-          <template #append>
-            <MoreBtn :menu-list="moreList" />
-          </template>
+          <VCardTitle>Динамика выручки за 7 дней</VCardTitle>
+          <VCardSubtitle>Общая сумма за неделю: <strong class="text-primary">{{ props.weekSummary.total_revenue_formatted }}</strong> ({{ props.weekSummary.total_orders }} заказов)</VCardSubtitle>
         </VCardItem>
 
         <!-- bar chart -->
-        <VCardText class="pb-0">
+        <VCardText class="pb-2">
           <VueApexCharts
             type="bar"
-            :height="335"
+            :height="320"
             :options="chartOptions.bar"
             :series="series"
           />
@@ -342,56 +239,42 @@ const moreList = [
         sm="5"
         xl="4"
       >
-        <VCardText class="text-center pt-10">
-          <VBtn
-            variant="tonal"
-            class="mb-2"
-            append-icon="bx-chevron-down"
-          >
-            2023
-            <VMenu activator="parent">
-              <VList>
-                <VListItem
-                  v-for="(item, index) in ['2023', '2022', '2021']"
-                  :key="index"
-                  :value="item"
-                >
-                  <VListItemTitle>{{ item }}</VListItemTitle>
-                </VListItem>
-              </VList>
-            </VMenu>
-          </VBtn>
+        <VCardText class="text-center pt-6">
+          <div class="text-subtitle-2 font-weight-bold mb-2">
+            Темп дня vs Средняя недельная
+          </div>
 
           <!-- radial chart -->
           <VueApexCharts
             type="radialBar"
-            :height="200"
+            :height="190"
             :options="chartOptions.radial"
-            :series="[78]"
+            :series="[radialPercentage]"
           />
 
-          <h6 class="text-h6 text-medium-emphasis mb-8 mt-1">
-            Рост компании: 62%
-          </h6>
-          <div class="d-flex align-center justify-center flex-wrap gap-x-6 gap-y-3">
+          <div class="d-flex flex-column gap-3 mt-4 px-3">
             <div
-              v-for="data in balanceData"
-              :key="data.year"
-              class="d-flex align-center gap-2"
+              v-for="item in balanceCards"
+              :key="item.label"
+              class="d-flex align-center justify-space-between p-2 rounded"
+              style="background-color: rgba(var(--v-theme-on-surface), 0.04); padding: 8px 12px;"
             >
-              <VAvatar
-                :icon="data.icon"
-                :color="data.color"
-                size="38"
-                rounded
-                variant="tonal"
-              />
-
-              <div class="text-start">
-                <span class="text-sm"> {{ data.year }}</span>
-                <h6 class="text-h6">
-                  {{ data.amount }}
-                </h6>
+              <div class="d-flex align-center gap-3">
+                <VAvatar
+                  size="36"
+                  rounded
+                  variant="tonal"
+                  :color="item.color"
+                >
+                  <VIcon :icon="item.icon" size="20" />
+                </VAvatar>
+                <div class="text-start">
+                  <div class="text-caption text-medium-emphasis">{{ item.label }}</div>
+                  <div class="text-body-2 font-weight-medium">{{ item.sub }}</div>
+                </div>
+              </div>
+              <div class="text-end">
+                <span class="font-weight-bold text-subtitle-2">{{ item.amount }}</span>
               </div>
             </div>
           </div>
@@ -400,7 +283,3 @@ const moreList = [
     </VRow>
   </VCard>
 </template>
-
-<style lang="scss">
-@use "@core-scss/template/libs/apex-chart.scss"
-</style>

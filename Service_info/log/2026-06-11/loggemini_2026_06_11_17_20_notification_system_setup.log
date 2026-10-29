@@ -1,0 +1,17 @@
+[2026-06-11 17:20:00] [INFO] Gemini session started. Task: Overhaul cascade mailing system (5 tabs layout).
+[2026-06-11 17:21:00] [INFO] Verified database models and migrations. Created/confirmed tables: order_reviews, customer_reminders, sent_reminders, customer_broadcasts, customer_message_logs, short_links.
+[2026-06-11 17:22:00] [INFO] Updated backend services:
+  - Appended FSM logic to handle_bot_commands_and_fsm for state 'awaiting_feedback_comment' in app/services/vk_service.py.
+  - Added handle_rate_order_payload and handle_message_event in app/services/vk_service.py to process order rating buttons.
+  - Updated trigger_cascade and execute_step in app/services/mailing_cascade_service.py to support reminders and broadcasts.
+  - Rewrote app/tasks/mailing_tasks.py Celery tasks for cascade steps, inactive reminders, and broadcasts.
+[2026-06-11 17:23:00] [INFO] Updated frontend layouts:
+  - Renamed 'Настройка каскада' to 'Уведомления и рассылки' in admin/resources/js/layouts/components/NavItems.vue.
+  - Re-routed '/mailings/cascades' in admin/resources/js/plugins/router/routes.js.
+  - Created full Vue component admin/resources/js/pages/mailings/notifications-and-mailings.vue.
+[2026-06-11 17:24:00] [INFO] Cleaned workspace: moved deprecated cascades.vue to trash.
+[2026-06-11 17:25:00] [INFO] Executed deploy script sync_to_vps.py.
+  - Database schema migrations ran successfully.
+  - Vite compiled production build.
+  - Containers backend, worker, nginx restarted.
+[2026-06-11 17:26:00] [INFO] Deploy verification completed successfully. Task resolved.

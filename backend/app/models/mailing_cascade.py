@@ -17,6 +17,8 @@ class MailingCascade(SQLModel, table=True):
     name: str = Field(max_length=255, description="Название каскада (напр. Уведомления по заказам)")
     trigger_event: str = Field(index=True, description="Событие-триггер (например, order_confirmed, order_delivered)")
     is_active: bool = Field(default=True, description="Активен ли каскад")
+    order_type: Optional[str] = Field(default=None, max_length=50, description="Тип заказа (delivery, pickup, any)")
+    is_system: bool = Field(default=False, description="Системный каскад статусов заказа")
     
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)
@@ -48,6 +50,10 @@ class MailingCascadeStep(SQLModel, table=True):
     condition: str = Field(default="always", max_length=50, description="Условие выполнения шага")
     
     template: str = Field(description="Шаблон сообщения с поддержкой переменных {order_number}, {status} и т.д.")
+    image_path: Optional[str] = Field(default=None, max_length=255, description="Путь к прикрепленному изображению")
+    buttons_json: Optional[str] = Field(default=None, description="JSON кнопок клавиатуры (VK, TG, MAX)")
+    max_bot_id: Optional[int] = Field(default=None, foreign_key="max_bots.id", nullable=True, description="ID бота MAX для шага каскада")
+    max_send_mode: Optional[str] = Field(default="cascade", max_length=50, description="Режим отправки MAX: cascade, bot_only, bridge_only")
     
     # Обратная связь с каскадом
     cascade: MailingCascade = Relationship(back_populates="steps")

@@ -59,6 +59,11 @@ class IikoService:
         self._resto_token_cache: Dict[str, tuple[str, datetime]] = {}
         self._resto_token_lock = None
 
+        # Кэш смен курьеров (employee_id -> (terminal_group_ids, expires_at))
+        # Снижает нагрузку на /api/1/employees/shifts/by_courier (Restriction group: Employees: shifts)
+        self._courier_shifts_cache: Dict[str, tuple[List[str], datetime]] = {}
+        self._courier_shifts_ttl = 180  # 3 минуты TTL кэша смен
+
     def _get_token_lock(self):
         """Ленивая инициализация Lock для предотвращения RuntimeError: no running event loop"""
         if self._token_lock is None:
@@ -304,6 +309,27 @@ class IikoService:
                 logger.error(f"Критическая ошибка при получении токена iiko: {e}")
                 raise
 
+    @staticmethod
+    def _sanitize_for_json(obj: Any) -> Any:
+        """
+        Рекурсивная санитизация данных для json-сериализации:
+        UUID -> str, Decimal -> float, datetime/date -> isoformat()
+        """
+        import uuid
+        from decimal import Decimal
+        from datetime import date, datetime
+        if isinstance(obj, uuid.UUID):
+            return str(obj)
+        elif isinstance(obj, Decimal):
+            return float(obj)
+        elif isinstance(obj, (datetime, date)):
+            return obj.isoformat()
+        elif isinstance(obj, dict):
+            return {str(k): IikoService._sanitize_for_json(v) for k, v in obj.items()}
+        elif isinstance(obj, (list, tuple, set)):
+            return [IikoService._sanitize_for_json(item) for item in obj]
+        return obj
+
     async def _request(
         self,
         method: str,
@@ -333,6 +359,8 @@ class IikoService:
 
         # Подготовка данных (копия чтобы не менять оригинал)
         payload = json_data.copy() if json_data else {}
+        # Рекурсивная санитизация данных для исключения ошибок несериализуемых типов (UUID, Decimal и т.д.)
+        payload = self._sanitize_for_json(payload)
 
         # Если в payload есть organizationId или organizationIds - подменяем если передали organization_id
         if org_id:
@@ -340,11 +368,13 @@ class IikoService:
             if "organizationId" in payload or any(k in endpoint for k in ["/by_id", "/create", "/nomenclature", "/stop_lists"]):
                 payload["organizationId"] = org_id
             
-            if "organizationIds" in payload or any(k in endpoint for k in [
+            is_singular_shift_ep = any(k in endpoint for k in ["/employees/shift/clockin", "/employees/shift/clockout", "/employees/shift/is_session_opened"])
+
+            if not is_singular_shift_ep and ("organizationIds" in payload or any(k in endpoint for k in [
                 "/organizations", "/terminal_groups", "/payment_types", "/deliveries/order_types", 
                 "/discounts", "/menu", "/stop_lists", "/by_delivery_date_and_status", "/employees", 
                 "/shift", "/schedule", "/reports/olap"
-            ]):
+            ])):
                 if "organizationIds" not in payload or not isinstance(payload["organizationIds"], list):
                     payload["organizationIds"] = [org_id]
                 elif not payload["organizationIds"]:
@@ -358,7 +388,7 @@ class IikoService:
             cooling_until = self._cooling_endpoints[endpoint]
             if now < cooling_until:
                 wait_left = int((cooling_until - now).total_seconds())
-                logger.warning(f"Endpoint {endpoint} is in Cooling Period. Skipping request. Wait {wait_left}s.")
+                logger.debug(f"Endpoint {endpoint} is in Cooling Period. Skipping request. Wait {wait_left}s.")
                 return {"status": "error", "error": "TOO_MANY_REQUESTS_COOLING", "message": f"Пожалуйста, подождите {wait_left} сек. перед повторной попыткой."}
             else:
                 del self._cooling_endpoints[endpoint]
@@ -723,24 +753,30 @@ class IikoService:
     async def get_menu_v2(
         self,
         api_login: Optional[str] = None,
-        organization_id: Optional[str] = None
+        organization_id: Optional[str] = None,
+        external_menu_id: Optional[str] = None,
+        price_category_id: Optional[str] = None
     ) -> Dict[str, Any]:
         """
         Получение меню через API v2 (/api/2/menu/by_id)
         Возвращает данные о внешних меню.
         """
         org_id = organization_id or self.organization_id
-        # Сначала получаем список внешних меню
-        menus = await self.get_external_menus(api_login=api_login, organization_id=org_id)
-        if not menus:
-            logger.warning(f"No external menus found for org {org_id}")
-            return {"groups": [], "products": []}
+        
+        menu_id = external_menu_id
+        if not menu_id:
+            # Сначала получаем список внешних меню
+            menus = await self.get_external_menus(api_login=api_login, organization_id=org_id)
+            if not menus:
+                logger.warning(f"No external menus found for org {org_id}")
+                return {"groups": [], "products": []}
+            # Берем первое доступное меню
+            menu_id = menus[0].get("id")
             
-        # Берем первое доступное меню
-        menu_id = menus[0].get("id")
-        logger.info(f"Using external menu {menu_id} for org {org_id}")
+        logger.info(f"Using external menu {menu_id} (priceCategoryId={price_category_id}) for org {org_id}")
         return await self.get_external_menu_by_id(
             external_menu_id=menu_id, 
+            price_category_id=price_category_id,
             api_login=api_login, 
             organization_id=org_id
         )
@@ -799,7 +835,8 @@ class IikoService:
         async def _do_raw_request(pcid: Optional[str] = None) -> httpx.Response:
             payload: Dict[str, Any] = {
                 "externalMenuId": external_menu_id,
-                "organizationIds": [org_id]
+                "organizationIds": [org_id],
+                "version": 2
             }
             if pcid:
                 payload["priceCategoryId"] = pcid
@@ -813,16 +850,21 @@ class IikoService:
                 )
             return resp
 
+        # Если ценовая категория равна 00000000-0000-0000-0000-000000000000 или не задана, запрашиваем меню без категории цен
+        effective_pcid = price_category_id
+        if effective_pcid in ("00000000-0000-0000-0000-000000000000", "none", "", None):
+            effective_pcid = None
+
         # 1. Пробуем основной запрос
-        response = await _do_raw_request(price_category_id)
+        response = await _do_raw_request(effective_pcid)
         
         if response.status_code == 401:
             self.access_token = None
             self.token_expires_at = None
             token = await self._get_access_token(api_login=api_login)
-            response = await _do_raw_request(price_category_id)
+            response = await _do_raw_request(effective_pcid)
             
-        # 2. Если 400 и ошибка в ценовой категории — пробуем авто-исправление
+        # 2. Если 400 и ошибка в ценовой категории — сначала пробуем БЕЗ категории цен, затем авто-подбор
         if response.status_code == 400:
             try:
                 err_body = response.json()
@@ -830,16 +872,13 @@ class IikoService:
                 err_body = {}
             
             if "Price category" in err_body.get("errorDescription", "") or err_body.get("error") == "EXTERNAL_MENU_DATA_MISSED":
-                logger.warning(f"iiko требует priceCategoryId для меню {external_menu_id} (переданный PCID: {price_category_id}). Ответ: {err_body}. Пробуем авто-подбор...")
+                logger.warning(f"iiko требует валидный priceCategoryId для меню {external_menu_id} (переданный PCID: {price_category_id}). Пробуем запрос БЕЗ категории цен...")
                 
-                # Сначала пробуем "нулевую" (базовую) категорию
-                base_pcid = "00000000-0000-0000-0000-000000000000"
-                if price_category_id != base_pcid:
-                    logger.info(f"Пробуем базовую ценовую категорию: {base_pcid}")
-                    response = await _do_raw_request(base_pcid)
-                
-                # Если всё еще 400 — запрашиваем список всех доступных ценовых категорий для этого меню
+                # Мгновенная попытка без ценовой категории
+                response = await _do_raw_request(None)
+
                 if response.status_code == 400:
+                    logger.info("Запрос без категории цен вернул 400. Ищем доступные ценовые категории...")
                     try:
                         async with httpx.AsyncClient(timeout=30.0) as client:
                             menu_list_resp = await client.post(
@@ -849,24 +888,23 @@ class IikoService:
                             )
                         if menu_list_resp.status_code == 200:
                             menus_data = menu_list_resp.json()
-                            # Ищем наше меню в списке
                             found_pcid = None
                             for menu in menus_data.get("externalMenus", []):
                                 if str(menu.get("id")) == str(external_menu_id):
                                     price_cats = menu.get("priceCategories", [])
                                     if price_cats:
-                                        found_pcid = price_cats[0].get("id") or price_cats[0].get("priceCategoryId")
-                                        break
+                                        for pc in price_cats:
+                                            pcid_candidate = pc.get("id") or pc.get("priceCategoryId")
+                                            if pcid_candidate and pcid_candidate != price_category_id:
+                                                found_pcid = pcid_candidate
+                                                break
+                                    break
                             
-                            # Если не нашли в меню, попробуем первую из общего списка priceCategories (если есть)
-                            if not found_pcid and menus_data.get("priceCategories"):
-                                found_pcid = menus_data["priceCategories"][0].get("id")
-
                             if found_pcid:
-                                logger.info(f"Найдена подходящая категория: {found_pcid}. Повторяем запрос.")
+                                logger.info(f"Найдена ценовая категория: {found_pcid}. Повторяем запрос.")
                                 response = await _do_raw_request(found_pcid)
                     except Exception as e:
-                        logger.error(f"Ошибка при попытке авто-подбора ценовой категории: {e}")
+                        logger.error(f"Ошибка при авто-подборе ценовой категории: {e}")
 
         if response.status_code >= 400:
             logger.error(f"iiko /api/2/menu/by_id критическая ошибка {response.status_code}: {response.text}")
@@ -916,7 +954,15 @@ class IikoService:
                     {
                         "productId": item["product_id"],
                         "amount": item["quantity"],
-                        "price": float(item["price"])
+                        "price": float(item["price"]),
+                        **({"modifiers": [
+                            {
+                                "productId": mod["iiko_id"],
+                                "amount": mod["quantity"],
+                                "price": float(mod.get("price", 0))
+                            }
+                            for mod in item["modifiers"]
+                        ]} if item.get("modifiers") else {})
                     }
                     for item in items
                 ],
@@ -1781,6 +1827,54 @@ class IikoService:
             logger.error(f"Unexpected error getting customer info from iiko Card: {e}")
             return {"found": False, "walletBalances": [], "id": None}
 
+    async def add_customer_bonuses(
+        self,
+        customer_id: str,
+        sum_change: float,
+        comment: str = "VK Activity",
+        organization_id: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """Начисление/списание бонусов гостя в iikoCard (wallet/topup или wallet/charge)"""
+        org_id = organization_id or self.organization_id
+        
+        # Получаем настройки iiko для этой организации
+        settings = await self._get_settings_by_org_id(org_id)
+        if not settings or not settings.bonus_program_ids:
+            raise ValueError("iiko Settings or bonus_program_ids not found in DB")
+            
+        # Берем первую программу лояльности из списка настроек
+        wallet_id = settings.bonus_program_ids[0]
+        
+        # Если sum_change положительное - делаем topup
+        # Если sum_change отрицательное - делаем charge (списание)
+        if sum_change > 0:
+            payload = {
+                "customerId": customer_id,
+                "walletId": wallet_id,
+                "sum": float(sum_change),
+                "comment": comment,
+                "organizationId": org_id
+            }
+            return await self._request(
+                "POST", "/api/1/loyalty/iiko/customer/wallet/topup", 
+                payload,
+                organization_id=org_id
+            )
+        elif sum_change < 0:
+            payload = {
+                "customerId": customer_id,
+                "walletId": wallet_id,
+                "sum": float(abs(sum_change)),
+                "comment": comment,
+                "organizationId": org_id
+            }
+            return await self._request(
+                "POST", "/api/1/loyalty/iiko/customer/wallet/chargeoff", 
+                payload,
+                organization_id=org_id
+            )
+        return {"status": "skipped", "message": "Sum change is 0"}
+
     async def get_customers(
         self,
         skip: int = 0,
@@ -2502,11 +2596,108 @@ class IikoService:
         
         return []
 
+    def _get_local_customer_analytics(self, session: Session, phone: str) -> Dict[str, Any]:
+        """
+        Локальный расчет аналитики клиента по таблице orders.
+        Используется в качестве фоллбэка, если iiko API недоступно.
+        """
+        from app.models.order import Order, OrderStatus
+        
+        clean_phone = "".join(filter(str.isdigit, phone))
+        if clean_phone.startswith("8") and len(clean_phone) == 11:
+            clean_phone = "7" + clean_phone[1:]
+        elif len(clean_phone) == 10:
+            clean_phone = "7" + clean_phone
+            
+        # Ищем заказы клиента, которые не отменены
+        phone_variants = [clean_phone, f"+{clean_phone}", phone]
+        
+        orders = session.exec(
+            select(Order)
+            .where(Order.customer_phone.in_(phone_variants))
+            .where(Order.status != OrderStatus.cancelled)
+        ).all()
+        
+        if not orders:
+            return {
+                "total_sum": 0.0,
+                "total_revenue": 0.0,
+                "total_count": 0,
+                "orders_count": 0,
+                "total_discount": 0.0,
+                "total_items": 0.0,
+                "average_check": 0.0,
+                "first_order_date": None,
+                "last_order_date": None,
+                "days_since_last_order": None,
+                "frequency_days": 0.0,
+                "is_local_fallback": True
+            }
+            
+        total_sum = sum(float(o.total_with_discount or o.total_amount or 0.0) for o in orders)
+        total_discount = sum(float(o.total_discount or 0.0) for o in orders)
+        total_count = len(orders)
+        
+        # Подсчет общего количества товаров в заказах
+        total_items = 0.0
+        for o in orders:
+            if o.order_items_details:
+                try:
+                    items = o.order_items_details
+                    if isinstance(items, list):
+                        for item in items:
+                            total_items += float(item.get("amount") or item.get("qty") or 1.0)
+                    else:
+                        total_items += 1.0
+                except:
+                    total_items += 1.0
+            else:
+                total_items += 1.0
+                
+        # Даты заказов
+        dates = []
+        for o in orders:
+            dt = o.iiko_creation_time or o.created_at
+            if dt:
+                dates.append(dt)
+                
+        first_order = min(dates) if dates else None
+        last_order = max(dates) if dates else None
+        
+        # Дней с последнего заказа
+        days_since_last = None
+        if last_order:
+            now = datetime.now()
+            if last_order.tzinfo:
+                now = datetime.now(timezone.utc)
+            days_since_last = (now - last_order).days
+            
+        # Частота заказов
+        frequency = 0.0
+        if total_count > 1 and first_order and last_order:
+            frequency = round((last_order - first_order).days / total_count, 1)
+            
+        return {
+            "total_sum": round(total_sum, 2),
+            "total_revenue": round(total_sum, 2),
+            "total_count": total_count,
+            "orders_count": total_count,
+            "total_discount": round(total_discount, 2),
+            "total_items": total_items,
+            "average_check": round(total_sum / total_count, 2) if total_count > 0 else 0.0,
+            "first_order_date": first_order.isoformat() if first_order else None,
+            "last_order_date": last_order.isoformat() if last_order else None,
+            "days_since_last_order": days_since_last,
+            "frequency_days": frequency,
+            "is_local_fallback": True
+        }
+
     async def get_customer_analytics_olap(
         self,
         phone: str,
         session: Session,
-        organization_id: Optional[str] = None
+        organization_id: Optional[str] = None,
+        bypass_cache: bool = False
     ) -> Dict[str, Any]:
         """
         Получение расширенной аналитики гостя через OLAP (Server API).
@@ -2515,7 +2706,7 @@ class IikoService:
         
         # Кэширование аналитики клиента на 1 час
         cache_key = f"customer_analytics_olap_{phone}_{org_id}"
-        if settings.CACHE_ENABLED:
+        if settings.CACHE_ENABLED and not bypass_cache:
             try:
                 cached = await redis_client.get(cache_key)
                 if cached: return json.loads(cached)
@@ -2536,99 +2727,121 @@ class IikoService:
         phone_variants = [clean_phone, f"+{clean_phone}", phone]
         possible_fields = ["Delivery.CustomerPhone", "Delivery.Phone", "OrderCustomer.Phone"]
 
-        
-        # Попробуем получить данные
-        for field in possible_fields:
-            filters = {
-                field: {
-                    "filterType": "IncludeValues",
-                    "values": phone_variants
-                },
-                "OrderDeleted": {
-                    "filterType": "IncludeValues",
-                    "values": ["NOT_DELETED"]
+        # Попробуем получить данные из iiko OLAP
+        try:
+            for field in possible_fields:
+                filters = {
+                    field: {
+                        "filterType": "IncludeValues",
+                        "values": phone_variants
+                    },
+                    "OrderDeleted": {
+                        "filterType": "IncludeValues",
+                        "values": ["NOT_DELETED"]
+                    }
                 }
-            }
 
-            # Список полей агрегации для пробы (могут отличаться в разных версиях iiko)
-            aggregate_variants = [
-                ["DishDiscountSumInt", "fullSum", "DiscountSum", "UniqOrderId", "DishAmountInt"],
-                ["fullSum", "DiscountSum", "UniqOrderId"] # Минимальный набор
-            ]
+                # Список полей агрегации для пробы (могут отличаться в разных версиях iiko)
+                aggregate_variants = [
+                    ["DishDiscountSumInt", "fullSum", "DiscountSum", "UniqOrderId", "DishAmountInt"],
+                    ["fullSum", "DiscountSum", "UniqOrderId"] # Минимальный набор
+                ]
 
-            for agg_fields in aggregate_variants:
-                try:
-                    rows = await self.get_custom_olap_report(
-                        report_type="SALES",
-                        group_by_fields=["OpenDate.Typed"],
-                        aggregate_fields=agg_fields,
-                        date_from=date_from,
-                        date_to=date_to,
-                        organization_id=org_id,
-                        filters=filters,
-                        log_error=False
-                    )
-                    
-                    if rows:
-                        # Суммируем с учетом возможных имен полей
-                        def get_val(r, names):
-                            for n in names:
-                                if n in r: return float(r[n] or 0)
-                            return 0.0
+                for agg_fields in aggregate_variants:
+                    try:
+                        rows = await self.get_custom_olap_report(
+                            report_type="SALES",
+                            group_by_fields=["OpenDate.Typed"],
+                            aggregate_fields=agg_fields,
+                            date_from=date_from,
+                            date_to=date_to,
+                            organization_id=org_id,
+                            filters=filters,
+                            log_error=False
+                        )
+                        
+                        if rows:
+                            # Суммируем с учетом возможных имен полей
+                            def get_val(r, names):
+                                for n in names:
+                                    if n in r: return float(r[n] or 0)
+                                return 0.0
 
-                        total_sum = sum(get_val(r, ["DishDiscountSumInt", "fullSum"]) for r in rows)
-                        total_count = sum(int(r.get("UniqOrderId", 1)) for r in rows)
-                        total_discount = sum(get_val(r, ["DiscountSum"]) for r in rows)
-                        total_items = sum(get_val(r, ["DishAmountInt"]) for r in rows)
-                        
-                        dates = []
-                        for r in rows:
-                            d = r.get("OpenDate.Typed")
-                            if d:
-                                try:
-                                    dates.append(datetime.fromisoformat(str(d).replace(" ", "T")))
-                                except:
-                                    pass
-                        
-                        first_order = min(dates) if dates else None
-                        last_order = max(dates) if dates else None
-                        
-                        result = {
-                            "total_sum": round(total_sum, 2),
-                            "total_revenue": round(total_sum, 2), # Для совместимости
-                            "total_count": total_count,
-                            "orders_count": total_count, # Для совместимости
-                            "total_discount": round(total_discount, 2),
-                            "total_items": total_items,
-                            "average_check": round(total_sum / total_count, 2) if total_count > 0 else 0,
-                            "first_order_date": first_order.isoformat() if first_order else None,
-                            "last_order_date": last_order.isoformat() if last_order else None,
-                            "days_since_last_order": (datetime.now() - last_order).days if last_order else None,
-                            "frequency_days": round((last_order - first_order).days / total_count, 1) if (total_count > 1 and first_order and last_order) else 0
-                        }
-                        
-                        if settings.CACHE_ENABLED:
-                            try: await redis_client.setex(cache_key, 3600, json.dumps(result))
-                            except: pass
+                            total_sum = sum(get_val(r, ["DishDiscountSumInt", "fullSum"]) for r in rows)
+                            total_count = sum(int(r.get("UniqOrderId", 1)) for r in rows)
+                            total_discount = sum(get_val(r, ["DiscountSum"]) for r in rows)
+                            total_items = sum(get_val(r, ["DishAmountInt"]) for r in rows)
                             
-                        return result
-                    else:
-                        # Если отчет пустой, пробуем следующий вариант агрегации или выходим
-                        break
-                except Exception as e:
-                    if "REST_API" in str(e):
-                        raise e
-                    logger.debug(f"OLAP analytics aggregate variant {agg_fields} failed with field {field}: {e}")
-                    # Пробуем следующий вариант агрегации для этого же фильтра по телефону
-                    continue
+                            dates = []
+                            for r in rows:
+                                d = r.get("OpenDate.Typed")
+                                if d:
+                                    try:
+                                        dates.append(datetime.fromisoformat(str(d).replace(" ", "T")))
+                                    except:
+                                        pass
+                            
+                            first_order = min(dates) if dates else None
+                            last_order = max(dates) if dates else None
+                            
+                            result = {
+                                "total_sum": round(total_sum, 2),
+                                "total_revenue": round(total_sum, 2), # Для совместимости
+                                "total_count": total_count,
+                                "orders_count": total_count, # Для совместимости
+                                "total_discount": round(total_discount, 2),
+                                "total_items": total_items,
+                                "average_check": round(total_sum / total_count, 2) if total_count > 0 else 0,
+                                "first_order_date": first_order.isoformat() if first_order else None,
+                                "last_order_date": last_order.isoformat() if last_order else None,
+                                "days_since_last_order": (datetime.now() - last_order).days if last_order else None,
+                                "frequency_days": round((last_order - first_order).days / total_count, 1) if (total_count > 1 and first_order and last_order) else 0
+                            }
+                            
+                            if settings.CACHE_ENABLED:
+                                try: await redis_client.setex(cache_key, 3600, json.dumps(result))
+                                except: pass
+                                
+                            return result
+                        else:
+                            # Если отчет пустой, пробуем следующий вариант агрегации или выходим
+                            break
+                    except Exception as e:
+                        if "REST_API" in str(e):
+                            raise e
+                        logger.debug(f"OLAP analytics aggregate variant {agg_fields} failed with field {field}: {e}")
+                        # Пробуем следующий вариант агрегации для этого же фильтра по телефону
+                        continue
+            
+            # Если дошли сюда и ничего не нашли в iiko, пробуем локальную базу
+            local_stats = self._get_local_customer_analytics(session, phone)
+            if local_stats and local_stats.get("total_count", 0) > 0:
+                if settings.CACHE_ENABLED:
+                    try: await redis_client.setex(cache_key, 3600, json.dumps(local_stats))
+                    except: pass
+                return local_stats
                 
-        return {
-            "total_sum": 0,
-            "total_count": 0,
-            "total_discount": 0,
-            "average_check": 0,
-            "error": "Data not found or Resto API unavailable"
-        }
+            return {
+                "total_sum": 0.0,
+                "total_revenue": 0.0,
+                "total_count": 0,
+                "orders_count": 0,
+                "total_discount": 0.0,
+                "total_items": 0.0,
+                "average_check": 0.0,
+                "first_order_date": None,
+                "last_order_date": None,
+                "days_since_last_order": None,
+                "frequency_days": 0.0,
+                "error": "Data not found or Resto API unavailable"
+            }
+        except Exception as e:
+            logger.warning(f"Failed to get iiko OLAP analytics for {phone}, using local database: {e}")
+            local_stats = self._get_local_customer_analytics(session, phone)
+            if settings.CACHE_ENABLED:
+                try: await redis_client.setex(cache_key, 3600, json.dumps(local_stats))
+                except: pass
+            return local_stats
 
     def _parse_olap_response(self, response: Any) -> List[Dict[str, Any]]:
         """Универсальный парсер для OLAP ответов iiko (v1/v2, Cloud/Server)"""
@@ -3812,17 +4025,41 @@ class IikoService:
         courier_id: str,
         api_login: Optional[str] = None
     ) -> Dict[str, Any]:
-        """Назначение курьера на заказ в iiko Cloud"""
+        """
+        Назначение курьера на заказ в iiko Cloud.
+        Используется актуальный эндпоинт Transport API: /api/1/deliveries/update_order_courier
+        Параметры: organizationId, orderId, employeeId.
+        """
         payload = {
-            "organizationId": organization_id,
-            "orderId": order_id,
-            "courierId": courier_id
+            "organizationId": str(organization_id),
+            "orderId": str(order_id),
+            "employeeId": str(courier_id)
         }
         return await self._request(
-            "POST", "/api/1/deliveries/assign_courier", 
+            "POST", "/api/1/deliveries/update_order_courier", 
             payload,
             api_login=api_login,
-            organization_id=organization_id
+            organization_id=str(organization_id)
+        )
+
+    async def confirm_delivery(
+        self,
+        organization_id: str,
+        order_id: str,
+        api_login: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """
+        Подтверждение доставки в iiko Cloud (/api/1/deliveries/confirm).
+        """
+        payload = {
+            "organizationId": str(organization_id),
+            "orderId": str(order_id)
+        }
+        return await self._request(
+            "POST", "/api/1/deliveries/confirm",
+            payload,
+            api_login=api_login,
+            organization_id=str(organization_id)
         )
 
     async def change_delivery_status(
@@ -3837,15 +4074,15 @@ class IikoService:
         Возможные статусы: Waiting, OnWay, Delivered, Unconfirmed, Cancelled
         """
         payload = {
-            "organizationId": organization_id,
-            "orderId": order_id,
-            "deliveryStatus": delivery_status
+            "organizationId": str(organization_id),
+            "orderId": str(order_id),
+            "deliveryStatus": str(delivery_status)
         }
         return await self._request(
             "POST", "/api/1/deliveries/update_order_delivery_status", 
             payload,
             api_login=api_login,
-            organization_id=organization_id
+            organization_id=str(organization_id)
         )
 
     async def change_order_payments(
@@ -3951,6 +4188,161 @@ class IikoService:
             organization_id=organization_id
         )
         return data.get("cashShifts", [])
+
+    async def get_couriers(
+        self,
+        organization_id: str,
+        api_login: Optional[str] = None
+    ) -> List[Dict[str, Any]]:
+        """Получение списка всех зарегистрированных водителей доставки (курьеров) iiko"""
+        payload = {
+            "organizationIds": [organization_id]
+        }
+        data = await self._request(
+            "POST", "/api/1/employees/couriers", 
+            payload,
+            api_login=api_login,
+            organization_id=organization_id
+        )
+        if isinstance(data, dict):
+            emp_groups = data.get("employees", [])
+            couriers_list = []
+            for eg in emp_groups:
+                if isinstance(eg, dict) and "items" in eg:
+                    couriers_list.extend(eg.get("items", []))
+                elif isinstance(eg, dict) and "id" in eg:
+                    couriers_list.append(eg)
+            return couriers_list
+        return []
+
+    def invalidate_courier_shift_cache(self, employee_id: Optional[str] = None):
+        """Инвалидация кэша смен курьеров при открытии/закрытии смены"""
+        if employee_id:
+            self._courier_shifts_cache.pop(employee_id, None)
+        else:
+            self._courier_shifts_cache.clear()
+
+    async def get_courier_shifts(
+        self,
+        employee_id: str,
+        organization_id: Optional[str] = None,
+        force: bool = False,
+        api_login: Optional[str] = None
+    ) -> List[str]:
+        """Получение списка ID терминальных групп, где у курьера открыта персональная смена (с кэшированием 3 мин)"""
+        now = datetime.now(timezone.utc)
+        if not force and employee_id in self._courier_shifts_cache:
+            cached_tg_ids, expires_at = self._courier_shifts_cache[employee_id]
+            if now < expires_at:
+                return cached_tg_ids
+
+        payload = {
+            "employeeId": employee_id
+        }
+        data = await self._request(
+            "POST", "/api/1/employees/shifts/by_courier", 
+            payload,
+            api_login=api_login,
+            organization_id=organization_id
+        )
+        if isinstance(data, dict):
+            tg_ids = data.get("terminalGroupIds", [])
+            self._courier_shifts_cache[employee_id] = (
+                tg_ids,
+                now + timedelta(seconds=self._courier_shifts_ttl)
+            )
+            return tg_ids
+        return []
+
+    async def is_courier_shift_open(
+        self,
+        organization_id: str,
+        terminal_group_id: str,
+        employee_id: str,
+        api_login: Optional[str] = None
+    ) -> bool:
+        """Проверка открыта ли персональная смена курьера для терминальной группы"""
+        payload = {
+            "organizationId": organization_id,
+            "terminalGroupId": terminal_group_id,
+            "employeeId": employee_id
+        }
+        data = await self._request(
+            "POST", "/api/1/employees/shift/is_open", 
+            payload,
+            api_login=api_login,
+            organization_id=organization_id
+        )
+        if isinstance(data, dict):
+            return bool(data.get("isSessionOpened", False))
+        return False
+
+    async def clockin_courier_shift(
+        self,
+        organization_id: str,
+        terminal_group_id: str,
+        employee_id: str,
+        role_id: Optional[str] = None,
+        api_login: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """Открытие персональной смены курьера в iiko Front/Office"""
+        self.invalidate_courier_shift_cache(employee_id)
+        payload = {
+            "organizationId": organization_id,
+            "terminalGroupId": terminal_group_id,
+            "employeeId": employee_id
+        }
+        if role_id:
+            payload["roleId"] = role_id
+        res = await self._request(
+            "POST", "/api/1/employees/shift/clockin", 
+            payload,
+            api_login=api_login,
+            organization_id=organization_id
+        )
+        self.invalidate_courier_shift_cache(employee_id)
+        return res
+
+    async def get_command_status(
+        self,
+        organization_id: str,
+        correlation_id: str,
+        api_login: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """Проверка статуса выполнения асинхронной команды (например, открытия смены курьера)"""
+        payload = {
+            "organizationId": organization_id,
+            "correlationId": correlation_id
+        }
+        return await self._request(
+            "POST", "/api/1/commands/status",
+            payload,
+            api_login=api_login,
+            organization_id=organization_id
+        )
+
+    async def clockout_courier_shift(
+        self,
+        organization_id: str,
+        terminal_group_id: str,
+        employee_id: str,
+        api_login: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """Закрытие персональной смены курьера в iiko Front/Office"""
+        self.invalidate_courier_shift_cache(employee_id)
+        payload = {
+            "organizationId": organization_id,
+            "terminalGroupId": terminal_group_id,
+            "employeeId": employee_id
+        }
+        res = await self._request(
+            "POST", "/api/1/employees/shift/clockout", 
+            payload,
+            api_login=api_login,
+            organization_id=organization_id
+        )
+        self.invalidate_courier_shift_cache(employee_id)
+        return res
 
 # Глобальный экземпляр сервиса
 iiko_service = IikoService()

@@ -32,9 +32,15 @@ def get_customers(
     categories: Optional[List[str]] = Query(None),
     filter_duplicates_phone: bool = Query(False),
     filter_duplicates_uid: bool = Query(False),
+    social_channel: Optional[str] = Query(None),
+    sort_social: bool = Query(False),
     session: Session = Depends(get_session)
 ):
     """Список клиентов с пагинацией и расширенным поиском"""
+    from app.models.vk_user import VkUser
+    from app.models.max_settings import MaxSettings
+    from sqlalchemy import case, Integer
+    
     skip = (page - 1) * limit
     
     # Базовый запрос
@@ -73,16 +79,161 @@ def get_customers(
         if category_filters:
             query = query.where(or_(*category_filters))
             count_query = count_query.where(or_(*category_filters))
+            
+    # Фильтрация по каналам связи
+    if social_channel:
+        if social_channel == "vk":
+            vk_subquery = select(VkUser.phone).where(VkUser.is_linked == True)
+            query = query.where(or_(Customer.vk_user_id != None, Customer.phone.in_(vk_subquery)))
+            count_query = count_query.where(or_(Customer.vk_user_id != None, Customer.phone.in_(vk_subquery)))
+        elif social_channel == "telegram":
+            query = query.where(Customer.telegram_id != None)
+            count_query = count_query.where(Customer.telegram_id != None)
+        elif social_channel in ("whatsapp", "max"):
+            # Для WhatsApp/MAX считаем по согласию гостя на уведомления
+            query = query.where(Customer.is_system_notifications_consented == True).where(Customer.is_blocked == False)
+            count_query = count_query.where(Customer.is_system_notifications_consented == True).where(Customer.is_blocked == False)
+        elif social_channel == "sms":
+            # Только телефон (нет VK и TG)
+            query = query.where(Customer.vk_user_id == None).where(Customer.telegram_id == None)
+            count_query = count_query.where(Customer.vk_user_id == None).where(Customer.telegram_id == None)
         
-    # Сортировка и пагинация
-    query = query.order_by(Customer.created_at.desc()).offset(skip).limit(limit)
+    # Сортировка
+    if sort_social:
+        sort_expr = case(
+            (Customer.vk_user_id != None, 1),
+            else_=0
+        ) + case(
+            (Customer.telegram_id != None, 1),
+            else_=0
+        )
+        query = query.order_by(sort_expr.desc(), Customer.created_at.desc())
+    else:
+        query = query.order_by(Customer.created_at.desc())
+        
+    # Пагинация
+    query = query.offset(skip).limit(limit)
     
     # Выполнение запросов
     total = session.exec(count_query).one()
     customers = session.exec(query).all()
     
+    # Обогащение социальными сетями
+    max_settings = session.exec(select(MaxSettings)).first()
+    has_whatsapp_bot = False
+    has_max_bot = False
+    if max_settings and max_settings.is_active:
+        for bot in max_settings.bots:
+            if bot.is_active:
+                if bot.bot_type.lower() == "whatsapp":
+                    has_whatsapp_bot = True
+                elif bot.bot_type.lower() == "max":
+                    has_max_bot = True
+                    
+    phones = [c.phone for c in customers if c.phone]
+    vk_ids = [c.vk_user_id for c in customers if c.vk_user_id]
+    
+    vk_users = []
+    if phones or vk_ids:
+        vk_users_query = select(VkUser)
+        filters = []
+        if phones:
+            filters.append(VkUser.phone.in_(phones))
+        if vk_ids:
+            filters.append(VkUser.vk_id.in_(vk_ids))
+        vk_users = session.exec(vk_users_query.where(or_(*filters))).all()
+        
+    vk_user_by_phone = {u.phone: u for u in vk_users if u.phone}
+    vk_user_by_vk_id = {u.vk_id: u for u in vk_users}
+    
+    response_items = []
+    for c in customers:
+        channels = {}
+        
+        # 1. VK
+        vk_user = vk_user_by_vk_id.get(c.vk_user_id) if c.vk_user_id else None
+        if not vk_user and c.phone:
+            vk_user = vk_user_by_phone.get(c.phone)
+            
+        if vk_user:
+            channels["vk"] = {
+                "connected": True,
+                "active": bool(vk_user.is_subscribed and vk_user.notifications_enabled and not vk_user.is_blocked),
+                "blocked": bool(vk_user.is_blocked or not vk_user.notifications_enabled or not vk_user.is_subscribed)
+            }
+        else:
+            channels["vk"] = {
+                "connected": False,
+                "active": False,
+                "blocked": False
+            }
+            
+        # 2. Telegram
+        if c.telegram_id:
+            is_active = bool(c.is_system_notifications_consented and not c.is_blocked)
+            channels["telegram"] = {
+                "connected": True,
+                "active": is_active,
+                "blocked": not is_active
+            }
+        else:
+            channels["telegram"] = {
+                "connected": False,
+                "active": False,
+                "blocked": False
+            }
+            
+        # 3. WhatsApp
+        if has_whatsapp_bot and c.phone:
+            is_active = bool(c.is_system_notifications_consented and not c.is_blocked)
+            channels["whatsapp"] = {
+                "connected": True,
+                "active": is_active,
+                "blocked": not is_active
+            }
+        else:
+            channels["whatsapp"] = {
+                "connected": False,
+                "active": False,
+                "blocked": False
+            }
+            
+        # 4. MAX
+        if has_max_bot and c.phone:
+            is_active = bool(c.is_system_notifications_consented and not c.is_blocked)
+            channels["max"] = {
+                "connected": True,
+                "active": is_active,
+                "blocked": not is_active
+            }
+        else:
+            channels["max"] = {
+                "connected": False,
+                "active": False,
+                "blocked": False
+            }
+            
+        # 5. SMS (если нет VK и TG)
+        if c.phone and not channels["vk"]["connected"] and not channels["telegram"]["connected"]:
+            is_active = bool(c.is_system_notifications_consented and not c.is_blocked)
+            channels["sms"] = {
+                "connected": True,
+                "active": is_active,
+                "blocked": not is_active
+            }
+        else:
+            channels["sms"] = {
+                "connected": False,
+                "active": False,
+                "blocked": False
+            }
+            
+        res_customer = CustomerResponse.model_validate(c)
+        res_customer.social_channels = channels
+        response_items.append(res_customer)
+    
     return {
-        "items": customers,
+        "items": response_items,
         "total": total
     }
 
@@ -132,6 +283,31 @@ def get_customer(customer_id: int, session: Session = Depends(get_session)):
     if not customer:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Customer not found")
     
+    # Автозамена пустого/placeholder имени из связанного VK-профиля
+    name_val = customer.name.strip() if customer.name else ""
+    if not name_val or name_val.lower() in ("не задано", "гость"):
+        from app.models.vk_user import VkUser
+        vk_user = session.exec(
+            select(VkUser)
+            .where((VkUser.phone == customer.phone) | (VkUser.vk_id == customer.vk_user_id))
+            .where(VkUser.is_linked == True)
+        ).first()
+        
+        if vk_user and (vk_user.first_name or vk_user.last_name):
+            new_name = vk_user.first_name or "Гость"
+            new_surname = vk_user.last_name or ""
+            
+            customer.name = new_name
+            customer.first_name = new_name
+            customer.surname = new_surname
+            customer.last_name = new_surname
+            customer.updated_at = datetime.now(timezone.utc)
+            
+            session.add(customer)
+            session.commit()
+            session.refresh(customer)
+            logger.info(f"Synchronously updated customer {customer.phone} placeholder name to '{new_name} {new_surname}' from VK user")
+            
     # Запускаем фоновую синхронизацию, чтобы при следующем просмотре или обновлении страницы данные были свежими
     try:
         sync_single_customer_task.delay(customer.phone)
@@ -247,6 +423,15 @@ def create_customer(
     session.add(customer)
     session.commit()
     session.refresh(customer)
+
+    # Фоновый поиск и привязка аккаунта MAX
+    if customer.phone and not customer.max_user_id:
+        try:
+            from app.tasks.customer_tasks import link_customer_max_task
+            link_customer_max_task.delay(customer.id)
+        except Exception as e:
+            logger.warning(f"Could not queue link_customer_max_task for customer #{customer.id}: {e}")
+
     return customer
 
 @router.put("/{customer_id}", response_model=CustomerResponse)
@@ -295,8 +480,35 @@ def update_customer(
         export_customer_to_iiko_task.delay(customer.id)
     except Exception as e:
         logger.warning(f"Failed to trigger export after update for {customer.phone}: {e}")
+
+    # Если телефон есть, но max_user_id не привязан — запускаем поиск в MAX
+    if customer.phone and not customer.max_user_id:
+        try:
+            from app.tasks.customer_tasks import link_customer_max_task
+            link_customer_max_task.delay(customer.id)
+        except Exception as e:
+            logger.warning(f"Could not queue link_customer_max_task for customer #{customer.id}: {e}")
         
     return customer
+
+@router.post("/{customer_id}/link-max")
+async def link_customer_max_endpoint(customer_id: int, session: Session = Depends(get_session)):
+    """Поиск и привязка аккаунта MAX для конкретного клиента по номеру телефона"""
+    customer = session.get(Customer, customer_id)
+    if not customer:
+        raise HTTPException(status_code=404, detail="Customer not found")
+    if not customer.phone:
+        raise HTTPException(status_code=400, detail="Customer phone is empty")
+    from app.services.max_bridge_service import max_bridge_service
+    res = await max_bridge_service.search_user_by_phone(customer.phone, session)
+    if res.get("found") and res.get("user_id"):
+        customer.max_user_id = str(res["user_id"])
+        session.add(customer)
+        session.commit()
+        session.refresh(customer)
+        return {"success": True, "max_user_id": customer.max_user_id, "data": res}
+    return {"success": False, "error": res.get("error", "Пользователь не найден в MAX")}
+
 
 @router.post("/{customer_id}/sync", response_model=CustomerResponse)
 async def sync_customer(customer_id: int, session: Session = Depends(get_session)):
@@ -306,60 +518,9 @@ async def sync_customer(customer_id: int, session: Session = Depends(get_session
         raise HTTPException(status_code=404, detail="Customer not found")
         
     try:
-        # Получаем данные из iiko
-        iiko_data = await iiko_service.get_customer_info(customer.phone)
-        
-        if iiko_data.get("id"): # Если клиент найден (есть ID)
-            # Основные данные
-            if iiko_data.get("name"):
-                customer.name = iiko_data["name"]
-            if iiko_data.get("email"):
-                customer.email = iiko_data["email"]
-            
-            # Дата рождения
-            if iiko_data.get("birthday"):
-                try:
-                    from datetime import date
-                    # iiko обычно присылает дату в формате "2024-03-27 00:00:00.000"
-                    bday_str = iiko_data["birthday"].split(" ")[0]
-                    customer.birthday = datetime.fromisoformat(bday_str)
-                except Exception:
-                    pass
-            
-            # Расширенные данные
-            customer.iiko_customer_id = iiko_data.get("id")
-            customer.city = iiko_data.get("city")
-            customer.notes = iiko_data.get("comment")
-            
-            # Риски
-            if "shouldBeCheckedForRisk" in iiko_data:
-                customer.is_high_risk = bool(iiko_data.get("shouldBeCheckedForRisk", False))
-            
-            # Категории (сохраняем только имена для фронтенда)
-            if "categories" in iiko_data:
-                category_names = []
-                for cat in iiko_data["categories"]:
-                    if isinstance(cat, dict) and cat.get("name"):
-                        category_names.append(cat["name"])
-                customer.loyalty_categories = json.dumps(category_names, ensure_ascii=False)
-                customer.categories = customer.loyalty_categories
-            
-            # Адреса
-            if "deliveryAddresses" in iiko_data:
-                customer.addresses = json.dumps(iiko_data["deliveryAddresses"], ensure_ascii=False)
-
-            # Бонусы и кошельки
-            if "walletBalances" in iiko_data:
-                total_bonuses = sum(float(b.get("balance", 0)) for b in iiko_data["walletBalances"])
-                customer.bonus_points = Decimal(str(total_bonuses))
-                customer.wallet_balances = json.dumps(iiko_data["walletBalances"], ensure_ascii=False)
-            
-            customer.updated_at = datetime.now(timezone.utc)
-            
-            session.add(customer)
-            session.commit()
-            session.refresh(customer)
-            
+        from app.services.iiko_sync_service import iiko_sync_service
+        await iiko_sync_service.sync_single_customer(session, customer.phone, bypass_cache=True)
+        session.refresh(customer)
         return customer
     except Exception as e:
         import traceback
@@ -799,6 +960,151 @@ def link_customer_vk(
     return {"status": "success", "vk_user_id": vk_user_id}
 
 
+@router.get("/{customer_id}/social-accounts")
+def get_customer_social_accounts(customer_id: int, session: Session = Depends(get_session)):
+    """Получение связанных аккаунтов социальных сетей гостя"""
+    from app.models.vk_user import VkUser
+    
+    customer = session.get(Customer, customer_id)
+    if not customer:
+        raise HTTPException(status_code=404, detail="Customer not found")
+        
+    social_accounts = []
+    
+    # Ищем ВКонтакте аккаунт
+    vk_user = None
+    if customer.vk_user_id:
+        vk_user = session.exec(select(VkUser).where(VkUser.vk_id == customer.vk_user_id)).first()
+    elif customer.phone:
+        vk_user = session.exec(select(VkUser).where(VkUser.phone == customer.phone)).first()
+        
+    if vk_user:
+        social_accounts.append({
+            "provider": "vk",
+            "vk_id": vk_user.vk_id,
+            "first_name": vk_user.first_name,
+            "last_name": vk_user.last_name,
+            "photo_50": vk_user.photo_50,
+            "screen_name": vk_user.screen_name,
+            "is_subscribed": vk_user.is_subscribed,
+            "notifications_enabled": vk_user.notifications_enabled,
+            "is_blocked": vk_user.is_blocked,
+            "linked_at": vk_user.linked_at
+        })
+        
+    # Ищем Telegram аккаунт
+    if customer.telegram_id:
+        social_accounts.append({
+            "provider": "telegram",
+            "telegram_id": customer.telegram_id,
+            "first_name": customer.first_name or customer.name or "Telegram User",
+            "last_name": customer.last_name or customer.surname or "",
+            "photo_50": None,
+            "screen_name": None,
+            "is_subscribed": True,
+            "notifications_enabled": customer.is_system_notifications_consented,
+            "is_blocked": customer.is_blocked,
+            "linked_at": None
+        })
+        
+    # Ищем MAX аккаунт
+    if customer.max_user_id:
+        social_accounts.append({
+            "provider": "max",
+            "max_user_id": customer.max_user_id,
+            "first_name": customer.first_name or customer.name or "MAX User",
+            "last_name": customer.last_name or customer.surname or "",
+            "photo_50": None,
+            "screen_name": None,
+            "is_subscribed": True,
+            "notifications_enabled": customer.is_system_notifications_consented,
+            "is_blocked": customer.is_blocked,
+            "linked_at": None
+        })
+        
+    return social_accounts
+
+
+@router.patch("/{customer_id}/social-accounts/vk/{vk_id}")
+def update_customer_vk_flags(
+    customer_id: int,
+    vk_id: int,
+    data: Dict[str, Any],
+    session: Session = Depends(get_session)
+):
+    """Обновление флагов блокировки и получения сообщений в ВК для гостя"""
+    from app.models.vk_user import VkUser
+    
+    vk_user = session.exec(select(VkUser).where(VkUser.vk_id == vk_id)).first()
+    if not vk_user:
+        raise HTTPException(status_code=404, detail="VK-профиль не найден")
+        
+    if "is_blocked" in data:
+        vk_user.is_blocked = bool(data["is_blocked"])
+    if "notifications_enabled" in data:
+        vk_user.notifications_enabled = bool(data["notifications_enabled"])
+        
+    session.add(vk_user)
+    session.commit()
+    session.refresh(vk_user)
+    return vk_user
+
+
+@router.patch("/{customer_id}/social-accounts/{provider}/{social_id}")
+def update_customer_social_flags(
+    customer_id: int,
+    provider: str,
+    social_id: str,
+    data: Dict[str, Any],
+    session: Session = Depends(get_session)
+):
+    """Обновление флагов блокировки и получения уведомлений для соцсетей гостя (VK, Telegram, MAX)"""
+    if provider == "vk":
+        from app.models.vk_user import VkUser
+        try:
+            vk_id_int = int(social_id)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Неверный VK ID")
+            
+        vk_user = session.exec(select(VkUser).where(VkUser.vk_id == vk_id_int)).first()
+        if not vk_user:
+            raise HTTPException(status_code=404, detail="VK-профиль не найден")
+            
+        if "is_blocked" in data:
+            vk_user.is_blocked = bool(data["is_blocked"])
+        if "notifications_enabled" in data:
+            vk_user.notifications_enabled = bool(data["notifications_enabled"])
+            
+        session.add(vk_user)
+        session.commit()
+        session.refresh(vk_user)
+        return vk_user
+        
+    elif provider in ("telegram", "max"):
+        customer = session.get(Customer, customer_id)
+        if not customer:
+            raise HTTPException(status_code=404, detail="Customer not found")
+            
+        if "is_blocked" in data:
+            customer.is_blocked = bool(data["is_blocked"])
+        if "notifications_enabled" in data:
+            customer.is_system_notifications_consented = bool(data["notifications_enabled"])
+            
+        session.add(customer)
+        session.commit()
+        session.refresh(customer)
+        
+        return {
+            "provider": provider,
+            "telegram_id": customer.telegram_id if provider == "telegram" else None,
+            "max_user_id": customer.max_user_id if provider == "max" else None,
+            "notifications_enabled": customer.is_system_notifications_consented,
+            "is_blocked": customer.is_blocked
+        }
+    else:
+        raise HTTPException(status_code=400, detail="Неподдерживаемый провайдер")
+
+
 @router.get("/maintenance/check-ids")
 async def check_customers_ids(session: Session = Depends(get_session)):
     """Поиск клиентов с отсутствующими идентификаторами iiko"""
@@ -831,14 +1137,18 @@ async def merge_customers_phone(session: Session = Depends(get_session)):
 # ================= PREMIUM GUEST CARD ENDPOINTS =================
 
 @router.get("/{customer_id}/olap-stats")
-async def get_customer_olap_stats(customer_id: int, session: Session = Depends(get_session)):
+async def get_customer_olap_stats(
+    customer_id: int, 
+    refresh: bool = Query(default=True, description="Принудительно обновить кэш и БД"),
+    session: Session = Depends(get_session)
+):
     """Получение расширенной аналитики гостя из iiko Server (OLAP)"""
     customer = session.get(Customer, customer_id)
     if not customer:
         raise HTTPException(status_code=404, detail="Customer not found")
     
     try:
-        stats = await iiko_service.get_customer_analytics_olap(customer.phone, session)
+        stats = await iiko_service.get_customer_analytics_olap(customer.phone, session, bypass_cache=refresh)
         
         # [NEW] Сохраняем в базу данных для кэширования
         if stats and not stats.get("error"):
@@ -898,7 +1208,7 @@ async def sync_customer_premium(customer_id: int, session: Session = Depends(get
     try:
         from app.services.iiko_sync_service import iiko_sync_service
         # Запускаем полную синхронизацию
-        await iiko_sync_service.sync_single_customer(session, customer.phone)
+        await iiko_sync_service.sync_single_customer(session, customer.phone, bypass_cache=True)
         
         # Обновляем объект в текущей сессии
         session.refresh(customer)

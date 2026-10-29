@@ -1,6 +1,7 @@
 <script setup>
 import { ref, computed, onMounted, watch } from 'vue'
 import { formatDateTime } from '@/utils/date'
+import { getAuthHeaders } from '@/utils/auth'
 
 const employees = ref([])
 const loading = ref(false)
@@ -79,11 +80,69 @@ const loadAllShifts = async () => {
   }
 }
 
+const resetShiftsLoading = ref(false)
+
+const resetActiveShifts = async () => {
+  if (!confirm('Вы уверены, что хотите принудительно закрыть все открытые смены в локальной базе данных?')) {
+    return
+  }
+  
+  resetShiftsLoading.value = true
+  try {
+    const response = await fetch('/api/v1/employees/shifts/reset-active', {
+      method: 'POST',
+      headers: getAuthHeaders()
+    })
+    const data = await response.json()
+    if (data.success) {
+      alert(data.message || 'Зависшие смены успешно сброшены')
+      await loadAllShifts()
+    } else {
+      alert(data.detail || 'Не удалось сбросить смены')
+    }
+  } catch (error) {
+    console.error('Ошибка сброса смен:', error)
+    alert('Ошибка сети при сбросе смен')
+  } finally {
+    resetShiftsLoading.value = false
+  }
+}
+
+const recalculateShiftsLoading = ref(false)
+
+const recalculateShifts = async () => {
+  if (!confirm('Пересчитать выручку и показатели для всех смен поваров, курьеров и администраторов?')) {
+    return
+  }
+  
+  recalculateShiftsLoading.value = true
+  try {
+    const response = await fetch('/api/v1/employees/shifts/recalculate-all', {
+      method: 'POST',
+      headers: getAuthHeaders()
+    })
+    const data = await response.json()
+    if (data.success) {
+      alert(data.message || 'Смены успешно пересчитаны')
+      await loadAllShifts()
+    } else {
+      alert(data.detail || 'Не удалось пересчитать смены')
+    }
+  } catch (error) {
+    console.error('Ошибка пересчета смен:', error)
+    alert('Ошибка сети при пересчете смен')
+  } finally {
+    recalculateShiftsLoading.value = false
+  }
+}
+
 // Загрузка сотрудников
 const loadEmployees = async () => {
   loading.value = true
   try {
-    const response = await fetch('/api/v1/employees')
+    const response = await fetch('/api/v1/employees', {
+      headers: getAuthHeaders()
+    })
     const data = await response.json()
     if (data.status === 'success') {
       employees.value = data.data
@@ -99,7 +158,10 @@ const loadEmployees = async () => {
 const syncEmployees = async () => {
   syncLoading.value = true
   try {
-    const response = await fetch('/api/v1/employees/sync', { method: 'POST' })
+    const response = await fetch('/api/v1/employees/sync', {
+      method: 'POST',
+      headers: getAuthHeaders()
+    })
     const data = await response.json()
     alert(data.message || 'Синхронизация запущена')
 
@@ -126,7 +188,9 @@ const loadEmployeeShifts = async () => {
   if (!selectedEmployee.value) return
   employeeShiftsLoading.value = true
   try {
-    const res = await fetch(`/api/v1/employees/shifts/all?employee_id=${selectedEmployee.value.id}`)
+    const res = await fetch(`/api/v1/employees/shifts/all?employee_id=${selectedEmployee.value.id}`, {
+      headers: getAuthHeaders()
+    })
     const data = await res.json()
     if (data.status === 'success') {
       employeeShifts.value = data.data
@@ -142,7 +206,9 @@ const loadStats = async () => {
   if (!selectedEmployee.value) return
   statsLoading.value = true
   try {
-    const res = await fetch(`/api/v1/employees/${selectedEmployee.value.id}/stats`)
+    const res = await fetch(`/api/v1/employees/${selectedEmployee.value.id}/stats`, {
+      headers: getAuthHeaders()
+    })
     const data = await res.json()
     if (data.status === 'success') {
       employeeStats.value = data.data
@@ -158,7 +224,9 @@ const loadStats = async () => {
 const loadCourierReport = async () => {
   reportLoading.value = true
   try {
-    const res = await fetch(`/api/v1/employees/reports/courier-detail?date_from=${reportDates.value.from}&date_to=${reportDates.value.to}`)
+    const res = await fetch(`/api/v1/employees/reports/courier-detail?date_from=${reportDates.value.from}&date_to=${reportDates.value.to}`, {
+      headers: getAuthHeaders()
+    })
     const data = await res.json()
     if (data.status === 'success') {
       courierReport.value = data.data
@@ -173,7 +241,10 @@ const loadCourierReport = async () => {
 const syncCourierReports = async () => {
   syncCourierLoading.value = true
   try {
-    const response = await fetch('/api/v1/employees/sync/couriers', { method: 'POST' })
+    const response = await fetch('/api/v1/employees/sync/couriers', {
+      method: 'POST',
+      headers: getAuthHeaders()
+    })
     const data = await response.json()
     alert(data.message || 'Синхронизация доставок запущена')
   } catch (error) {
@@ -507,6 +578,25 @@ watch(detailsTab, (newTab) => {
                 >
                   Найти
                 </VBtn>
+                <VSpacer />
+                <VBtn
+                  color="info"
+                  variant="outlined"
+                  prepend-icon="bx-calculator"
+                  :loading="recalculateShiftsLoading"
+                  @click="recalculateShifts"
+                >
+                  Пересчитать выручку
+                </VBtn>
+                <VBtn
+                  color="warning"
+                  variant="outlined"
+                  prepend-icon="bx-reset"
+                  :loading="resetShiftsLoading"
+                  @click="resetActiveShifts"
+                >
+                  Сбросить смены
+                </VBtn>
               </div>
 
               <VDataTable
@@ -518,7 +608,7 @@ watch(detailsTab, (newTab) => {
                   { title: 'Открыта', key: 'time_open', align: 'center' },
                   { title: 'Закрыта', key: 'time_close', align: 'center' },
                   { title: 'Работа (ч)', key: 'work_hours', align: 'center' },
-                  { title: 'Выручка (заведение)', key: 'revenue_at_close', align: 'end' },
+                  { title: 'Выручка за смену', key: 'revenue_at_close', align: 'end' },
                   { title: 'Отмены', key: 'cancelled_orders_count', align: 'center' },
                   { title: 'Статус', key: 'status', align: 'center' }
                 ]"
@@ -556,9 +646,15 @@ watch(detailsTab, (newTab) => {
                 </template>
                 
                 <template #item.revenue_at_close="{ item }">
-                  <span v-if="item.revenue_at_close" class="font-weight-bold text-success">
-                    {{ item.revenue_at_close.toLocaleString('ru-RU') }} ₽
-                  </span>
+                  <div v-if="item.revenue_at_close !== undefined && item.revenue_at_close !== null" class="d-flex flex-column align-end">
+                    <span class="font-weight-bold" :class="item.revenue_at_close > 0 ? 'text-success' : 'text-grey'">
+                      {{ item.revenue_at_close.toLocaleString('ru-RU') }} ₽
+                    </span>
+                    <div v-if="item.kitchen_revenue || item.hot_revenue" class="d-flex ga-1 text-caption text-grey" style="font-size: 0.72rem; line-height: 1.1;">
+                      <span v-if="item.kitchen_revenue" title="Цех Кухня">🍳 {{ item.kitchen_revenue.toLocaleString('ru-RU') }} ₽</span>
+                      <span v-if="item.hot_revenue" title="Горячий цех">🔥 {{ item.hot_revenue.toLocaleString('ru-RU') }} ₽</span>
+                    </div>
+                  </div>
                   <span v-else class="text-disabled">—</span>
                 </template>
                 
@@ -754,7 +850,18 @@ watch(detailsTab, (newTab) => {
                     <td>{{ shift.time_open }}</td>
                     <td>{{ shift.time_close || '—' }}</td>
                     <td>{{ shift.work_hours || '0' }}</td>
-                    <td>{{ shift.revenue_at_close ? shift.revenue_at_close.toLocaleString('ru-RU') + ' ₽' : '—' }}</td>
+                    <td>
+                      <div v-if="shift.revenue_at_close !== undefined && shift.revenue_at_close !== null" class="d-flex flex-column">
+                        <span class="font-weight-bold" :class="shift.revenue_at_close > 0 ? 'text-success' : 'text-grey'">
+                          {{ shift.revenue_at_close.toLocaleString('ru-RU') }} ₽
+                        </span>
+                        <span v-if="shift.kitchen_revenue || shift.hot_revenue" class="text-caption text-grey" style="font-size: 0.72rem;">
+                          <span v-if="shift.kitchen_revenue">🍳 {{ (shift.kitchen_revenue || 0).toLocaleString('ru-RU') }} ₽ </span>
+                          <span v-if="shift.hot_revenue">🔥 {{ (shift.hot_revenue || 0).toLocaleString('ru-RU') }} ₽</span>
+                        </span>
+                      </div>
+                      <span v-else class="text-disabled">—</span>
+                    </td>
                     <td>
                       <VChip
                         size="x-small"

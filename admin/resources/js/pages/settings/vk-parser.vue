@@ -1,28 +1,284 @@
 <script setup>
-import { ref, onMounted } from "vue"
+import { ref, onMounted, computed } from "vue"
+import { hasPermission, getAuthHeaders } from "@/utils/auth"
+
+const tabs = computed(() => {
+  const allTabs = [
+    { id: 0, title: 'Настройки и статистика', permission: 'vk_parser_tab_settings_view' },
+    { id: 1, title: 'Настройка уведомлений ВК', permission: 'vk_parser_tab_notifications_view' },
+    { id: 2, title: 'Мониторинг сообщений', permission: 'vk_parser_tab_monitoring_view' },
+    { id: 3, title: 'Связанные аккаунты ВК', permission: 'vk_parser_tab_accounts_view' }
+  ]
+  return allTabs.filter(t => hasPermission(t.permission))
+})
 
 const loading = ref(false)
 const saving = ref(false)
 const snackbar = ref(false)
+
+const notifications = ref([])
+const globalDeliveryEnabled = ref(false)
+const globalPickupEnabled = ref(false)
+
+const dialogOpen = ref(false)
+const dialogMode = ref('create')
+const editIndex = ref(-1)
+
+const formNotification = ref({
+  type: 'delivery',
+  status: '',
+  enabled: true,
+  template: ''
+})
 const snackbarColor = ref("success")
 const snackbarText = ref("")
+
+const deliveryStatusList = [
+  { value: "confirmed", title: "Заказ подтвержден" },
+  { value: "cooking", title: "Заказ готовится" },
+  { value: "ready", title: "Заказ готов" },
+  { value: "delivering", title: "Курьер в пути" },
+  { value: "delivered", title: "Заказ доставлен" },
+  { value: "cancelled", title: "Заказ отменен" }
+]
+
+const pickupStatusList = [
+  { value: "confirmed", title: "Заказ подтвержден" },
+  { value: "cooking", title: "Заказ готовится" },
+  { value: "ready", title: "Заказ готов к выдаче" },
+  { value: "cancelled", title: "Заказ отменен" }
+]
+
+const ensureNotificationSettings = (rawSettings) => {
+  const defaultSettings = {
+    delivery: {
+      enabled: false,
+      statuses: {
+        confirmed: { enabled: false, template: "" },
+        cooking: { enabled: false, template: "" },
+        ready: { enabled: false, template: "" },
+        delivering: { enabled: false, template: "" },
+        delivered: { enabled: false, template: "" },
+        cancelled: { enabled: false, template: "" }
+      }
+    },
+    pickup: {
+      enabled: false,
+      statuses: {
+        confirmed: { enabled: false, template: "" },
+        cooking: { enabled: false, template: "" },
+        ready: { enabled: false, template: "" },
+        cancelled: { enabled: false, template: "" }
+      }
+    }
+  }
+
+  if (!rawSettings) return defaultSettings
+
+  const merged = { ...defaultSettings }
+
+  // Слияние доставки
+  if (rawSettings.delivery) {
+    merged.delivery.enabled = !!rawSettings.delivery.enabled
+    if (rawSettings.delivery.statuses) {
+      Object.keys(defaultSettings.delivery.statuses).forEach(status => {
+        if (rawSettings.delivery.statuses[status]) {
+          merged.delivery.statuses[status].enabled = !!rawSettings.delivery.statuses[status].enabled
+          merged.delivery.statuses[status].template = rawSettings.delivery.statuses[status].template || ""
+        }
+      })
+    } else if (rawSettings.delivery.enabled_statuses && rawSettings.delivery.templates) {
+      rawSettings.delivery.enabled_statuses.forEach(status => {
+        if (merged.delivery.statuses[status]) {
+          merged.delivery.statuses[status].enabled = true
+          merged.delivery.statuses[status].template = rawSettings.delivery.templates[status] || ""
+        }
+      })
+    }
+  }
+
+  // Слияние самовывоза
+  if (rawSettings.pickup) {
+    merged.pickup.enabled = !!rawSettings.pickup.enabled
+    if (rawSettings.pickup.statuses) {
+      Object.keys(defaultSettings.pickup.statuses).forEach(status => {
+        if (rawSettings.pickup.statuses[status]) {
+          merged.pickup.statuses[status].enabled = !!rawSettings.pickup.statuses[status].enabled
+          merged.pickup.statuses[status].template = rawSettings.pickup.statuses[status].template || ""
+        }
+      })
+    } else if (rawSettings.pickup.enabled_statuses && rawSettings.pickup.templates) {
+      rawSettings.pickup.enabled_statuses.forEach(status => {
+        if (merged.pickup.statuses[status]) {
+          merged.pickup.statuses[status].enabled = true
+          merged.pickup.statuses[status].template = rawSettings.pickup.templates[status] || ""
+        }
+      })
+    }
+  }
+
+  return merged
+}
 
 const settings = ref({
   vk_parser_enabled: false,
   vk_parser_phrase: "здравствуйте! Ваш заказ {order_id} принят и мы приступили к его приготовлению",
-  vk_notification_settings: {
-    delivery: {
-      enabled_statuses: [],
-      templates: {}
-    },
-    pickup: {
-      enabled_statuses: [],
-      templates: {}
-    }
-  }
+  vk_parser_mask: "",
+  vk_parser_ignored_ids: "",
+  vk_app_id: "",
+  vk_app_secret: "",
+  vk_notification_settings: ensureNotificationSettings(null)
 })
 
+const insertVariable = (type, statusValue, variable) => {
+  const textarea = document.getElementById(`template-${type}-${statusValue}`)
+  if (textarea) {
+    const text = settings.value.vk_notification_settings[type].statuses[statusValue].template || ""
+    const start = textarea.selectionStart || 0
+    const end = textarea.selectionEnd || 0
+    const newText = text.substring(0, start) + variable + text.substring(end)
+    settings.value.vk_notification_settings[type].statuses[statusValue].template = newText
+    
+    setTimeout(() => {
+      textarea.focus()
+      textarea.setSelectionRange(start + variable.length, start + variable.length)
+    }, 50)
+  } else {
+    settings.value.vk_notification_settings[type].statuses[statusValue].template = 
+      (settings.value.vk_notification_settings[type].statuses[statusValue].template || "") + variable
+  }
+}
+
+const availableStatuses = computed(() => {
+  const list = formNotification.value.type === 'delivery' ? deliveryStatusList : pickupStatusList
+  return list.filter(s => {
+    if (dialogMode.value === 'edit' && s.value === notifications.value[editIndex.value]?.status) {
+      return true
+    }
+    return !notifications.value.some(n => n.type === formNotification.value.type && n.status === s.value)
+  })
+})
+
+const availableStatusesCount = computed(() => {
+  const deliveryLeft = deliveryStatusList.filter(s => !notifications.value.some(n => n.type === 'delivery' && n.status === s.value)).length
+  const pickupLeft = pickupStatusList.filter(s => !notifications.value.some(n => n.type === 'pickup' && n.status === s.value)).length
+  return deliveryLeft + pickupLeft
+})
+
+const onFormTypeChange = () => {
+  const statuses = availableStatuses.value
+  if (statuses.length > 0) {
+    formNotification.value.status = statuses[0].value
+  } else {
+    formNotification.value.status = ''
+  }
+}
+
+const openCreateDialog = () => {
+  dialogMode.value = 'create'
+  editIndex.value = -1
+  
+  const availableDelivery = deliveryStatusList.filter(s => !notifications.value.some(n => n.type === 'delivery' && n.status === s.value))
+  const availablePickup = pickupStatusList.filter(s => !notifications.value.some(n => n.type === 'pickup' && n.status === s.value))
+  
+  let defaultType = 'delivery'
+  let defaultStatus = ''
+  
+  if (availableDelivery.length > 0) {
+    defaultStatus = availableDelivery[0].value
+  } else if (availablePickup.length > 0) {
+    defaultType = 'pickup'
+    defaultStatus = availablePickup[0].value
+  }
+  
+  formNotification.value = {
+    type: defaultType,
+    status: defaultStatus,
+    enabled: true,
+    template: ''
+  }
+  dialogOpen.value = true
+}
+
+const openEditDialog = (index) => {
+  dialogMode.value = 'edit'
+  editIndex.value = index
+  const item = notifications.value[index]
+  formNotification.value = {
+    type: item.type,
+    status: item.status,
+    enabled: item.enabled,
+    template: item.template
+  }
+  dialogOpen.value = true
+}
+
+const deleteNotification = (index) => {
+  if (confirm("Вы уверены, что хотите удалить это уведомление?")) {
+    notifications.value.splice(index, 1)
+    saveSettings()
+  }
+}
+
+const saveNotificationForm = () => {
+  if (!formNotification.value.status) {
+    showMessage("Пожалуйста, выберите событие", "error")
+    return
+  }
+  
+  if (dialogMode.value === 'create') {
+    const exists = notifications.value.some(n => n.type === formNotification.value.type && n.status === formNotification.value.status)
+    if (exists) {
+      showMessage("Уведомление для этого события уже создано", "error")
+      return
+    }
+    notifications.value.push({ ...formNotification.value })
+  } else {
+    notifications.value[editIndex.value] = { ...formNotification.value }
+  }
+  
+  dialogOpen.value = false
+  saveSettings()
+}
+
+const insertVariableToDialog = (variable) => {
+  const textarea = document.getElementById('dialog-template-textarea')
+  if (textarea) {
+    const text = formNotification.value.template || ""
+    const start = textarea.selectionStart || 0
+    const end = textarea.selectionEnd || 0
+    const newText = text.substring(0, start) + variable + text.substring(end)
+    formNotification.value.template = newText
+    
+    setTimeout(() => {
+      textarea.focus()
+      textarea.setSelectionRange(start + variable.length, start + variable.length)
+    }, 50)
+  } else {
+    formNotification.value.template = (formNotification.value.template || "") + variable
+  }
+}
+
+const getStatusName = (type, value) => {
+  const list = type === 'delivery' ? deliveryStatusList : pickupStatusList
+  const found = list.find(s => s.value === value)
+  return found ? found.title : value
+}
+
+const getStatusColor = (value) => {
+  const colors = {
+    confirmed: 'info',
+    cooking: 'warning',
+    ready: 'success',
+    delivering: 'primary',
+    delivered: 'success',
+    cancelled: 'error'
+  }
+  return colors[value] || 'grey'
+}
+
 const API_BASE = "/api/v1/vk"
+
 
 const showMessage = (text, color = "success") => {
   snackbarText.value = text
@@ -41,13 +297,50 @@ const userToUnlink = ref(null)
 const loadSettings = async () => {
   loading.value = true
   try {
-    const res = await fetch(`${API_BASE}/settings`)
+    const res = await fetch(`${API_BASE}/settings`, { headers: getAuthHeaders() })
     if (res.ok) {
       const data = await res.json()
       settings.value.vk_parser_enabled = !!data.vk_parser_enabled
       if (data.vk_parser_phrase) {
         settings.value.vk_parser_phrase = data.vk_parser_phrase
       }
+      settings.value.vk_parser_mask = data.vk_parser_mask || ""
+      settings.value.vk_parser_ignored_ids = data.vk_parser_ignored_ids || ""
+      settings.value.vk_app_id = data.vk_app_id || ""
+      settings.value.vk_app_secret = data.vk_app_secret || ""
+      const notifSettings = ensureNotificationSettings(data.vk_notification_settings)
+      settings.value.vk_notification_settings = notifSettings
+      globalDeliveryEnabled.value = !!notifSettings.delivery?.enabled
+      globalPickupEnabled.value = !!notifSettings.pickup?.enabled
+      
+      const parsed = []
+      if (notifSettings.delivery?.statuses) {
+        Object.keys(notifSettings.delivery.statuses).forEach(status => {
+          const s = notifSettings.delivery.statuses[status]
+          if (s.enabled || s.template) {
+            parsed.push({
+              type: 'delivery',
+              status: status,
+              enabled: !!s.enabled,
+              template: s.template || ''
+            })
+          }
+        })
+      }
+      if (notifSettings.pickup?.statuses) {
+        Object.keys(notifSettings.pickup.statuses).forEach(status => {
+          const s = notifSettings.pickup.statuses[status]
+          if (s.enabled || s.template) {
+            parsed.push({
+              type: 'pickup',
+              status: status,
+              enabled: !!s.enabled,
+              template: s.template || ''
+            })
+          }
+        })
+      }
+      notifications.value = parsed
       
       // Загружаем статус сканирования
       if (data.vk_parser_scan_status) {
@@ -68,7 +361,7 @@ const loadSettings = async () => {
 // Проверка статуса сканирования
 const checkScanStatus = async () => {
   try {
-    const res = await fetch(`${API_BASE}/parser/scan/status`)
+    const res = await fetch(`${API_BASE}/parser/scan/status`, { headers: getAuthHeaders() })
     if (res.ok) {
       const data = await res.json()
       scanStatus.value = data
@@ -93,7 +386,10 @@ const checkScanStatus = async () => {
 const startScan = async () => {
   isScanning.value = true
   try {
-    const res = await fetch(`${API_BASE}/parser/scan`, { method: "POST" })
+    const res = await fetch(`${API_BASE}/parser/scan`, {
+      method: "POST",
+      headers: getAuthHeaders()
+    })
     if (res.ok) {
       showMessage("Задача сканирования добавлена в очередь")
       scanStatus.value = { status: "running", progress: 0, total: 0, matches: 0 }
@@ -121,7 +417,8 @@ const unlinkUser = async () => {
   unlinking.value = true
   try {
     const res = await fetch(`${API_BASE}/parser/users/${userToUnlink.value.vk_id}/link`, {
-      method: "DELETE"
+      method: "DELETE",
+      headers: getAuthHeaders()
     })
     
     if (res.ok) {
@@ -143,9 +440,45 @@ const unlinkUser = async () => {
 // Сохранение настроек
 const saveSettings = async () => {
   saving.value = true
+  
+  // Собираем vk_notification_settings из notifications и глобальных флагов
+  const notifSettings = {
+    delivery: {
+      enabled: globalDeliveryEnabled.value,
+      statuses: {
+        confirmed: { enabled: false, template: "" },
+        cooking: { enabled: false, template: "" },
+        ready: { enabled: false, template: "" },
+        delivering: { enabled: false, template: "" },
+        delivered: { enabled: false, template: "" },
+        cancelled: { enabled: false, template: "" }
+      }
+    },
+    pickup: {
+      enabled: globalPickupEnabled.value,
+      statuses: {
+        confirmed: { enabled: false, template: "" },
+        cooking: { enabled: false, template: "" },
+        ready: { enabled: false, template: "" },
+        cancelled: { enabled: false, template: "" }
+      }
+    }
+  }
+
+  notifications.value.forEach(n => {
+    if (notifSettings[n.type]?.statuses[n.status]) {
+      notifSettings[n.type].statuses[n.status] = {
+        enabled: n.enabled,
+        template: n.template
+      }
+    }
+  })
+
+  settings.value.vk_notification_settings = notifSettings
+
   try {
     // Сначала получаем все настройки, чтобы не затереть другие поля
-    const currentRes = await fetch(`${API_BASE}/settings`)
+    const currentRes = await fetch(`${API_BASE}/settings`, { headers: getAuthHeaders() })
     let currentData = {}
     if (currentRes.ok) {
       currentData = await currentRes.json()
@@ -155,12 +488,19 @@ const saveSettings = async () => {
       ...currentData,
       vk_parser_enabled: settings.value.vk_parser_enabled,
       vk_parser_phrase: settings.value.vk_parser_phrase,
+      vk_parser_mask: settings.value.vk_parser_mask,
+      vk_parser_ignored_ids: settings.value.vk_parser_ignored_ids,
       vk_notification_settings: settings.value.vk_notification_settings,
+      vk_app_id: settings.value.vk_app_id,
+      vk_app_secret: settings.value.vk_app_secret,
     }
 
     const res = await fetch(`${API_BASE}/settings`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: {
+        ...getAuthHeaders(),
+        "Content-Type": "application/json"
+      },
       body: JSON.stringify(payload),
     })
 
@@ -178,7 +518,8 @@ const saveSettings = async () => {
 }
 
 const stats = ref({ summary: { total_linked: 0, linked_realtime: 0, linked_history: 0 }, recent_links: [] })
-const activeTab = ref(0)
+const activeTab = ref(null)
+const notificationTypeTab = ref("delivery")
 
 // Сообщения
 const messages = ref([])
@@ -195,7 +536,7 @@ const loadMessageStats = async () => {
     let url = `${API_BASE}/parser/messages/stats`
     if (messageDate.value) url += `?date=${messageDate.value}`
     
-    const res = await fetch(url)
+    const res = await fetch(url, { headers: getAuthHeaders() })
     if (res.ok) {
       messageStats.value = await res.json()
     }
@@ -212,7 +553,7 @@ const loadMessages = async () => {
     if (messageDirection.value) url += `&direction=${messageDirection.value}`
     if (messageDate.value) url += `&date=${messageDate.value}`
     
-    const res = await fetch(url)
+    const res = await fetch(url, { headers: getAuthHeaders() })
     if (res.ok) {
       const data = await res.json()
       messages.value = data.items
@@ -232,7 +573,10 @@ const cleanupMessages = async () => {
   
   cleaning.value = true
   try {
-    const res = await fetch(`${API_BASE}/parser/messages/cleanup`, { method: "POST" })
+    const res = await fetch(`${API_BASE}/parser/messages/cleanup`, {
+      method: "POST",
+      headers: getAuthHeaders()
+    })
     if (res.ok) {
       const data = await res.json()
       showMessage(data.message || "Очистка завершена")
@@ -250,7 +594,7 @@ const cleanupMessages = async () => {
 
 const loadStats = async () => {
   try {
-    const res = await fetch(`${API_BASE}/parser/stats`)
+    const res = await fetch(`${API_BASE}/parser/stats`, { headers: getAuthHeaders() })
     if (res.ok) {
       stats.value = await res.json()
     }
@@ -259,27 +603,90 @@ const loadStats = async () => {
   }
 }
 
+// Связанные аккаунты гостей
+const linkedAccounts = ref([])
+const linkedAccountsLoading = ref(false)
+const linkedAccountsPage = ref(1)
+const totalLinkedAccountsPages = ref(1)
+const linkedAccountsSearch = ref("")
+const linkedAccountsFilterStatus = ref("all") // all, active, blocked
+
+const loadLinkedAccounts = async () => {
+  linkedAccountsLoading.value = true
+  try {
+    let url = `/api/v1/vk/parser/linked-accounts?page=${linkedAccountsPage.value}`
+    if (linkedAccountsSearch.value) {
+      url += `&search=${encodeURIComponent(linkedAccountsSearch.value)}`
+    }
+    if (linkedAccountsFilterStatus.value) {
+      url += `&filter_status=${linkedAccountsFilterStatus.value}`
+    }
+    const res = await fetch(url, { headers: getAuthHeaders() })
+    if (res.ok) {
+      const data = await res.json()
+      linkedAccounts.value = data.items
+      totalLinkedAccountsPages.value = data.total_pages
+    }
+  } catch (e) {
+    console.error("Error loading linked accounts:", e)
+    showMessage("Ошибка загрузки связанных аккаунтов", "error")
+  } finally {
+    linkedAccountsLoading.value = false
+  }
+}
+
+const toggleLinkedAccountFlag = async (account, flagName) => {
+  try {
+    const updatedValue = !account[flagName]
+    const payload = {
+      [flagName]: updatedValue
+    }
+    const res = await fetch(`/api/v1/vk/parser/linked-accounts/${account.vk_id}`, {
+      method: "PATCH",
+      headers: {
+        ...getAuthHeaders(),
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify(payload)
+    })
+    if (res.ok) {
+      account[flagName] = updatedValue
+      showMessage("Настройки аккаунта обновлены")
+    } else {
+      showMessage("Ошибка обновления настроек", "error")
+    }
+  } catch (e) {
+    showMessage("Ошибка подключения к серверу", "error")
+  }
+}
+
 onMounted(async () => {
   await loadSettings()
   await loadStats()
   await loadMessageStats()
   await loadMessages()
+  await loadLinkedAccounts()
+  activeTab.value = tabs.value.length ? tabs.value[0].id : null
 })
 </script>
 
 <template>
-  <VTabs v-model="activeTab" class="mb-4">
-    <VTab :value="0">
-      <VIcon icon="mdi-cog" class="me-2" />
-      Настройки и статистика
-    </VTab>
-    <VTab :value="1">
-      <VIcon icon="mdi-bell-ring" class="me-2" />
-      Настройка уведомлений
-    </VTab>
-    <VTab :value="2">
-      <VIcon icon="mdi-message-text" class="me-2" />
-      Мониторинг сообщений
+  <VTabs v-model="activeTab" class="mb-4" v-if="tabs.length">
+    <VTab
+      v-for="tab in tabs"
+      :key="tab.id"
+      :value="tab.id"
+    >
+      <VIcon
+        :icon="
+          tab.id === 0 ? 'mdi-cog' :
+          tab.id === 1 ? 'mdi-bell-ring' :
+          tab.id === 2 ? 'mdi-message-text' :
+          'mdi-account-multiple'
+        "
+        class="me-2"
+      />
+      {{ tab.title }}
     </VTab>
   </VTabs>
 
@@ -299,6 +706,7 @@ onMounted(async () => {
             профиль пользователя VK с его картой гостя в базе данных.
           </p>
 
+          <fieldset :disabled="!hasPermission('vk_parser_tab_settings_edit')" class="border-0 pa-0 ma-0 w-100">
           <VRow>
             <VCol cols="12">
               <VSwitch
@@ -321,6 +729,28 @@ onMounted(async () => {
               />
             </VCol>
 
+            <VCol cols="12" class="mt-4">
+              <VTextField
+                v-model="settings.vk_parser_mask"
+                label="Маска номера заказа (order_id)"
+                hint="Допускаются символы, буквы, цифры для фиксированных значений и звездочки (*) для случайных (например, 'RU-***'). Оставьте пустым или '*', чтобы принимать любые заказы."
+                persistent-hint
+                placeholder="Например, RU-***"
+                clearable
+              />
+            </VCol>
+
+            <VCol cols="12" class="mt-4">
+              <VTextField
+                v-model="settings.vk_parser_ignored_ids"
+                label="Игнорируемые ID аккаунтов VK"
+                hint="ID аккаунтов ВКонтакте через запятую, которые не участвуют в парсинге (сообщения от них не будут привязываться и сохраняться в базу)."
+                persistent-hint
+                placeholder="Например: 12345, 67890"
+                clearable
+              />
+            </VCol>
+
             <VCol cols="12">
               <VAlert
                 type="info"
@@ -337,7 +767,7 @@ onMounted(async () => {
               </VAlert>
             </VCol>
 
-            <VCol cols="12" class="d-flex gap-4 mt-4">
+            <VCol cols="12" class="d-flex gap-4 mt-4" v-if="hasPermission('vk_parser_tab_settings_edit')">
               <VBtn
                 color="primary"
                 :loading="saving"
@@ -348,6 +778,75 @@ onMounted(async () => {
               </VBtn>
             </VCol>
           </VRow>
+          </fieldset>
+        </VCardText>
+      </VCard>
+    </VCol>
+
+    <VCol cols="12" class="mt-6">
+      <VCard>
+        <VCardTitle class="d-flex align-center">
+          <VIcon icon="bxl-vk" class="me-2" color="primary" />
+          Настройки Авторизации ВК (OAuth App)
+        </VCardTitle>
+        <VCardText>
+          <p class="text-body-1 mb-6">
+            Укажите ID приложения (VK App ID) и защищенный ключ (VK App Secret) для работы OAuth-авторизации, 
+            которая позволяет сотрудникам привязывать личные аккаунты ВКонтакте в профиле.
+          </p>
+
+          <fieldset :disabled="!hasPermission('vk_parser_tab_settings_edit')" class="border-0 pa-0 ma-0 w-100">
+            <VRow>
+              <VCol cols="12" md="6">
+                <VTextField
+                  v-model="settings.vk_app_id"
+                  label="VK App ID (ID приложения)"
+                  hint="ID созданного Standalone/Веб-приложения в кабинете разработчика VK"
+                  persistent-hint
+                  placeholder="Например: 51234567"
+                  clearable
+                />
+              </VCol>
+
+              <VCol cols="12" md="6">
+                <VTextField
+                  v-model="settings.vk_app_secret"
+                  label="VK App Secret (Защищенный ключ)"
+                  hint="Защищенный ключ приложения (из вкладки Настройки вашего VK App)"
+                  persistent-hint
+                  placeholder="Например: aBcDeFgHiJkLmNoP"
+                  type="password"
+                  clearable
+                />
+              </VCol>
+
+              <VCol cols="12">
+                <VAlert
+                  type="warning"
+                  variant="tonal"
+                  class="mt-4"
+                >
+                  <strong>Важно для работы привязки ВК:</strong>
+                  <ul class="mt-2">
+                    <li>В настройках вашего приложения ВКонтакте (в разделе <strong>Настройки -> Доверенный URL</strong>) должен быть строго указан Redirect URI:</li>
+                    <li><code class="text-primary font-weight-bold bg-grey-lighten-3 px-2 py-1 rounded">https://vezuroll.ru/api/v1/auth/vk/callback</code></li>
+                    <li>Доверенный домен приложения должен быть настроен как: <code class="font-weight-bold bg-grey-lighten-3 px-2 py-1 rounded">vezuroll.ru</code></li>
+                  </ul>
+                </VAlert>
+              </VCol>
+
+              <VCol cols="12" class="d-flex gap-4 mt-4" v-if="hasPermission('vk_parser_tab_settings_edit')">
+                <VBtn
+                  color="primary"
+                  :loading="saving"
+                  prepend-icon="mdi-content-save"
+                  @click="saveSettings"
+                >
+                  Сохранить настройки OAuth
+                </VBtn>
+              </VCol>
+            </VRow>
+          </fieldset>
         </VCardText>
       </VCard>
     </VCol>
@@ -404,6 +903,7 @@ onMounted(async () => {
               color="secondary"
               :loading="isScanning"
               prepend-icon="mdi-refresh-circle"
+              v-if="hasPermission('vk_parser_tab_settings_edit')"
               @click="startScan"
             >
               Запустить полное сканирование истории
@@ -545,109 +1045,162 @@ onMounted(async () => {
       <VRow>
         <VCol cols="12">
           <VCard>
-            <VCardTitle class="d-flex align-center">
-              <VIcon icon="mdi-bell-cog-outline" class="me-2" color="primary" />
-              Настройка уведомлений о заказах
+            <VCardTitle class="d-flex align-center flex-wrap gap-4 py-4">
+              <div>
+                <VIcon icon="mdi-bell-cog-outline" class="me-2" color="primary" />
+                Конструктор уведомлений клиентов
+              </div>
               <VSpacer />
               <VBtn
                 color="primary"
-                :loading="saving"
-                prepend-icon="mdi-content-save"
-                @click="saveSettings"
-                size="small"
+                prepend-icon="mdi-plus"
+                v-if="hasPermission('vk_parser_tab_notifications_edit')"
+                @click="openCreateDialog"
+                :disabled="availableStatusesCount === 0"
               >
-                Сохранить всё
+                Создать уведомление
               </VBtn>
             </VCardTitle>
             <VCardText>
               <p class="text-body-2 mb-6">
-                Здесь вы можете настроить автоматические сообщения, которые будут приходить клиенту в ВК при изменении статуса его заказа.
-                Уведомления приходят только тем пользователям, чей VK профиль привязан к системе.
+                Настройте автоматические сообщения, которые будут приходить клиенту в ЛС ВКонтакте при изменении статуса его заказа. 
+                Уведомления приходят только привязанным гостям, разрешившим отправку сообщений.
               </p>
 
-              <VTabs v-model="notificationTypeTab" density="compact" color="primary" class="mb-4">
-                <VTab value="delivery">Доставка</VTab>
-                <VTab value="pickup">Самовывоз</VTab>
-              </VTabs>
+              <!-- Глобальные переключатели каналов -->
+              <VRow class="mb-6">
+                <VCol cols="12" md="6">
+                  <VCard variant="outlined" class="pa-4 d-flex align-center">
+                    <VIcon icon="mdi-truck-delivery-outline" size="36" class="me-4" color="primary" />
+                    <div>
+                      <div class="text-subtitle-1 font-weight-bold">Доставка заказов</div>
+                      <div class="text-caption text-medium-emphasis">Глобальный переключатель рассылки на доставку</div>
+                    </div>
+                    <VSpacer />
+                    <VSwitch
+                      v-model="globalDeliveryEnabled"
+                      color="success"
+                      hide-details
+                      :disabled="!hasPermission('vk_parser_tab_notifications_edit')"
+                      @update:model-value="saveSettings"
+                    />
+                  </VCard>
+                </VCol>
+                <VCol cols="12" md="6">
+                  <VCard variant="outlined" class="pa-4 d-flex align-center">
+                    <VIcon icon="mdi-storefront-outline" size="36" class="me-4" color="primary" />
+                    <div>
+                      <div class="text-subtitle-1 font-weight-bold">Самовывоз заказов</div>
+                      <div class="text-caption text-medium-emphasis">Глобальный переключатель рассылки на самовывоз</div>
+                    </div>
+                    <VSpacer />
+                    <VSwitch
+                      v-model="globalPickupEnabled"
+                      color="success"
+                      hide-details
+                      :disabled="!hasPermission('vk_parser_tab_notifications_edit')"
+                      @update:model-value="saveSettings"
+                    />
+                  </VCard>
+                </VCol>
+              </VRow>
 
-              <VWindow v-model="notificationTypeTab">
-                <!-- ДОСТАВКА -->
-                <VWindowItem value="delivery">
-                  <VRow>
-                    <VCol 
-                      cols="12" 
-                      v-for="status in deliveryStatusList" 
-                      :key="status.value"
-                      class="border-bottom pb-4"
-                    >
-                      <div class="d-flex align-center mb-2">
-                        <VCheckbox
-                          v-model="settings.vk_notification_settings.delivery.enabled_statuses"
-                          :value="status.value"
-                          :label="status.title"
-                          hide-details
-                          density="compact"
-                          color="success"
-                        />
-                        <VChip size="x-small" class="ms-2" variant="flat">{{ status.value }}</VChip>
+              <VDivider class="mb-6" />
+
+              <!-- Список уведомлений -->
+              <div v-if="notifications.length === 0" class="text-center py-12 text-disabled border rounded-lg bg-var-theme-background">
+                <VIcon icon="mdi-bell-off-outline" size="64" class="mb-4" color="grey-lighten-1" />
+                <div class="text-h6 font-weight-bold mb-2">Уведомления не созданы</div>
+                <p class="text-body-2 mb-6 text-medium-emphasis">
+                  Вы можете добавить уведомления для событий доставки или самовывоза, нажав кнопку ниже.
+                </p>
+                <VBtn
+                  color="primary"
+                  prepend-icon="mdi-plus"
+                  v-if="hasPermission('vk_parser_tab_notifications_edit')"
+                  @click="openCreateDialog"
+                >
+                  Создать первое уведомление
+                </VBtn>
+              </div>
+
+              <VRow v-else>
+                <VCol
+                  cols="12"
+                  md="6"
+                  v-for="(notif, idx) in notifications"
+                  :key="`${notif.type}-${notif.status}`"
+                >
+                  <VCard variant="outlined" class="d-flex flex-column h-100 position-relative overflow-hidden" style="border-left: 6px solid !important;" :style="{ 'border-left-color': notif.type === 'delivery' ? 'var(--v-theme-primary)' : 'var(--v-theme-secondary)' + ' !important' }">
+                    <VCardItem class="pb-2">
+                      <div class="d-flex align-center justify-space-between w-100">
+                        <div class="d-flex align-center">
+                          <VIcon 
+                            :icon="notif.type === 'delivery' ? 'mdi-truck-delivery-outline' : 'mdi-storefront-outline'" 
+                            class="me-2" 
+                            :color="notif.type === 'delivery' ? 'primary' : 'secondary'"
+                          />
+                          <span class="text-caption text-medium-emphasis font-weight-bold uppercase">
+                            {{ notif.type === 'delivery' ? 'Доставка' : 'Самовывоз' }}
+                          </span>
+                        </div>
+                        <VChip
+                          size="small"
+                          :color="getStatusColor(notif.status)"
+                          variant="tonal"
+                          class="font-weight-bold"
+                        >
+                          {{ getStatusName(notif.type, notif.status) }}
+                        </VChip>
                       </div>
-                      
-                      <VTextarea
-                        v-if="settings.vk_notification_settings.delivery.enabled_statuses.includes(status.value)"
-                        v-model="settings.vk_notification_settings.delivery.templates[status.value]"
-                        label="Шаблон сообщения"
-                        rows="2"
-                        density="comfortable"
-                        variant="outlined"
-                        hide-details
-                        placeholder="Введите текст уведомления..."
-                        class="mt-2"
-                      />
-                    </VCol>
-                  </VRow>
-                </VWindowItem>
+                    </VCardItem>
 
-                <!-- САМОВЫВОЗ -->
-                <VWindowItem value="pickup">
-                  <VRow>
-                    <VCol 
-                      cols="12" 
-                      v-for="status in pickupStatusList" 
-                      :key="status.value"
-                      class="border-bottom pb-4"
-                    >
-                      <div class="d-flex align-center mb-2">
-                        <VCheckbox
-                          v-model="settings.vk_notification_settings.pickup.enabled_statuses"
-                          :value="status.value"
-                          :label="status.title"
-                          hide-details
-                          density="compact"
-                          color="success"
-                        />
-                        <VChip size="x-small" class="ms-2" variant="flat">{{ status.value }}</VChip>
+                    <VCardText class="flex-grow-1 py-2">
+                      <div class="bg-grey-lighten-4 pa-3 rounded-lg text-body-2 text-pre-wrap font-monospace overflow-y-auto" style="max-height: 120px; height: 120px;">
+                        {{ notif.template || 'Шаблон сообщения пуст...' }}
                       </div>
-                      
-                      <VTextarea
-                        v-if="settings.vk_notification_settings.pickup.enabled_statuses.includes(status.value)"
-                        v-model="settings.vk_notification_settings.pickup.templates[status.value]"
-                        label="Шаблон сообщения"
-                        rows="2"
-                        density="comfortable"
-                        variant="outlined"
-                        hide-details
-                        placeholder="Введите текст уведомления..."
-                        class="mt-2"
-                      />
-                    </VCol>
-                  </VRow>
-                </VWindowItem>
-              </VWindow>
+                    </VCardText>
 
-              <VDivider class="my-6" />
+                    <VDivider />
+
+                    <VCardActions class="pa-3">
+                      <VSwitch
+                        v-model="notif.enabled"
+                        color="success"
+                        density="compact"
+                        hide-details
+                        :disabled="!hasPermission('vk_parser_tab_notifications_edit')"
+                        @update:model-value="saveSettings"
+                        label="Активно"
+                      />
+                      <VSpacer />
+                      <VBtn
+                        icon="mdi-pencil-outline"
+                        variant="text"
+                        size="small"
+                        color="info"
+                        v-if="hasPermission('vk_parser_tab_notifications_edit')"
+                        @click="openEditDialog(idx)"
+                        title="Редактировать"
+                      />
+                      <VBtn
+                        icon="mdi-delete-outline"
+                        variant="text"
+                        size="small"
+                        color="error"
+                        v-if="hasPermission('vk_parser_tab_notifications_edit')"
+                        @click="deleteNotification(idx)"
+                        title="Удалить"
+                      />
+                    </VCardActions>
+                  </VCard>
+                </VCol>
+              </VRow>
+
+              <VDivider class="my-8" />
               
               <VAlert type="info" variant="tonal" density="compact">
-                <div class="text-subtitle-2 mb-1">Доступные переменные для шаблонов:</div>
+                <div class="text-subtitle-2 mb-1">Доступные переменные для использования в шаблонах:</div>
                 <VRow no-gutters>
                   <VCol cols="12" md="4" class="text-caption"><code>{order_number}</code> — Номер заказа</VCol>
                   <VCol cols="12" md="4" class="text-caption"><code>{total_sum}</code> — Сумма к оплате</VCol>
@@ -658,17 +1211,6 @@ onMounted(async () => {
                   <VCol cols="12" md="4" class="text-caption"><code>{order_type}</code> — Тип заказа</VCol>
                 </VRow>
               </VAlert>
-
-              <div class="mt-6">
-                <VBtn
-                  color="primary"
-                  :loading="saving"
-                  prepend-icon="mdi-content-save"
-                  @click="saveSettings"
-                >
-                  Сохранить настройки уведомлений
-                </VBtn>
-              </div>
             </VCardText>
           </VCard>
         </VCol>
@@ -730,6 +1272,7 @@ onMounted(async () => {
                   variant="text"
                   title="Очистить старые (>90 дней)"
                   :loading="cleaning"
+                  v-if="hasPermission('vk_parser_tab_monitoring_edit')"
                   @click="cleanupMessages"
                 />
               </div>
@@ -800,8 +1343,8 @@ onMounted(async () => {
                             <VIcon v-else icon="mdi-account" />
                           </VAvatar>
                           <div class="text-truncate" style="max-width: 150px;">
-                            <a :href="`https://vk.com/id${msg.vk_user_id}`" target="_blank" class="text-subtitle-2 text-decoration-none">
-                              {{ msg.user?.first_name ? `${msg.user.first_name} ${msg.user.last_name}` : `ID ${msg.vk_user_id}` }}
+                            <a :href="`https://vk.com/id${msg.peer_id}`" target="_blank" class="text-subtitle-2 text-decoration-none">
+                              {{ msg.user?.first_name ? `${msg.user.first_name} ${msg.user.last_name}` : `ID ${msg.peer_id}` }}
                             </a>
                           </div>
                         </div>
@@ -851,6 +1394,177 @@ onMounted(async () => {
         </VCol>
       </VRow>
     </VWindowItem>
+
+    <VWindowItem :value="3">
+      <VRow>
+        <VCol cols="12">
+          <VCard>
+            <VCardTitle class="d-flex align-center flex-wrap gap-4">
+              <VIcon icon="mdi-account-multiple-outline" class="me-2" color="primary" />
+              Связанные аккаунты гостей (VK)
+              <VSpacer />
+              <div class="d-flex gap-2 flex-wrap" style="max-width: 600px;">
+                <VSelect
+                  v-model="linkedAccountsFilterStatus"
+                  :items="[
+                    { title: 'Все', value: 'all' },
+                    { title: 'Активные', value: 'active' },
+                    { title: 'Заблокированные', value: 'blocked' }
+                  ]"
+                  label="Фильтр"
+                  density="compact"
+                  variant="outlined"
+                  hide-details
+                  style="width: 170px;"
+                  @update:model-value="() => { linkedAccountsPage = 1; loadLinkedAccounts(); }"
+                />
+                <VTextField
+                  v-model="linkedAccountsSearch"
+                  prepend-inner-icon="mdi-magnify"
+                  label="Поиск по имени/телефону"
+                  density="compact"
+                  variant="outlined"
+                  hide-details
+                  @keyup.enter="() => { linkedAccountsPage = 1; loadLinkedAccounts(); }"
+                />
+                <VBtn
+                  color="primary"
+                  icon="mdi-refresh"
+                  variant="text"
+                  :loading="linkedAccountsLoading"
+                  @click="loadLinkedAccounts"
+                />
+              </div>
+            </VCardTitle>
+
+            <VCardText>
+              <div v-if="linkedAccountsLoading && linkedAccounts.length === 0" class="text-center py-10">
+                <VProgressCircular indeterminate color="primary" />
+                <div class="mt-2">Загрузка привязок...</div>
+              </div>
+
+              <template v-else>
+                <VTable density="comfortable">
+                  <thead>
+                    <tr>
+                      <th style="width: 250px;">Гость (VK)</th>
+                      <th>Телефон</th>
+                      <th>Дата привязки</th>
+                      <th>Статус подписки</th>
+                      <th>Уведомления</th>
+                      <th>Рассылки</th>
+                      <th style="width: 100px;">Действия</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr v-for="acc in linkedAccounts" :key="acc.vk_id">
+                      <td>
+                        <div class="d-flex align-center py-2">
+                          <VAvatar size="36" class="me-2" color="grey-lighten-3">
+                            <VImg v-if="acc.photo_50" :src="acc.photo_50" />
+                            <VIcon v-else icon="mdi-account" />
+                          </VAvatar>
+                          <div>
+                            <a :href="`https://vk.com/id${acc.vk_id}`" target="_blank" class="text-subtitle-2 text-decoration-none d-flex align-center">
+                              {{ acc.first_name }} {{ acc.last_name }}
+                              <VIcon icon="mdi-open-in-new" size="x-small" class="ms-1" />
+                            </a>
+                            <div class="text-caption text-medium-emphasis">
+                              ID: {{ acc.vk_id }} ({{ acc.screen_name || 'domain' }})
+                            </div>
+                          </div>
+                        </div>
+                      </td>
+                      <td>
+                        <div>{{ acc.phone || '—' }}</div>
+                        <div v-if="acc.customer" class="text-caption text-primary">
+                          Профиль: {{ acc.customer.name }} {{ acc.customer.surname }}
+                        </div>
+                      </td>
+                      <td class="text-caption text-medium-emphasis">
+                        {{ acc.linked_at ? new Date(acc.linked_at).toLocaleString() : '—' }}
+                      </td>
+                      <td>
+                        <VChip
+                          size="x-small"
+                          :color="acc.is_subscribed ? 'success' : 'error'"
+                          variant="tonal"
+                        >
+                          {{ acc.is_subscribed ? 'Подписан' : 'Отписан' }}
+                        </VChip>
+                      </td>
+                      <td>
+                        <div class="d-flex align-center gap-2">
+                          <VSwitch
+                            :model-value="acc.notifications_enabled"
+                            @update:model-value="toggleLinkedAccountFlag(acc, 'notifications_enabled')"
+                            :disabled="!hasPermission('vk_parser_tab_accounts_edit')"
+                            color="success"
+                            density="compact"
+                            hide-details
+                          />
+                          <span class="text-caption">{{ acc.notifications_enabled ? 'Разрешено' : 'Запрещено' }}</span>
+                        </div>
+                      </td>
+                      <td>
+                        <div class="d-flex align-center gap-2">
+                          <VSwitch
+                            :model-value="acc.is_blocked"
+                            @update:model-value="toggleLinkedAccountFlag(acc, 'is_blocked')"
+                            :disabled="!hasPermission('vk_parser_tab_accounts_edit')"
+                            color="error"
+                            density="compact"
+                            hide-details
+                          />
+                          <span class="text-caption text-error" v-if="acc.is_blocked">Заблокирован</span>
+                          <span class="text-caption" v-else>Активен</span>
+                        </div>
+                      </td>
+                      <td>
+                        <div class="d-flex gap-1">
+                          <VBtn
+                            icon="mdi-account-details"
+                            variant="text"
+                            size="small"
+                            color="info"
+                            title="Перейти к клиенту"
+                            :to="acc.customer?.id ? `/clients?search=${encodeURIComponent(acc.phone)}` : null"
+                            :disabled="!acc.customer?.id"
+                          />
+                          <VBtn
+                            icon="mdi-delete-outline"
+                            variant="text"
+                            size="small"
+                            color="error"
+                            title="Удалить привязку"
+                            v-if="hasPermission('vk_parser_tab_accounts_edit')"
+                            @click="confirmUnlink(acc)"
+                          />
+                        </div>
+                      </td>
+                    </tr>
+                    <tr v-if="linkedAccounts.length === 0">
+                      <td colspan="7" class="text-center py-10 text-medium-emphasis">
+                        Связанные аккаунты не найдены
+                      </td>
+                    </tr>
+                  </tbody>
+                </VTable>
+
+                <div class="d-flex justify-center mt-4" v-if="totalLinkedAccountsPages > 1">
+                  <VPagination
+                    v-model="linkedAccountsPage"
+                    :length="totalLinkedAccountsPages"
+                    :total-visible="7"
+                    @update:model-value="loadLinkedAccounts"
+                  />
+                </div>
+              </template>
+            </VCardText>
+          </VCard>
+        </VCol>
+      </VRow>
+    </VWindowItem>
   </VWindow>
 
   <!-- Snackbar -->
@@ -876,6 +1590,95 @@ onMounted(async () => {
         <VSpacer />
         <VBtn variant="text" @click="confirmUnlinkDialog = false">Отмена</VBtn>
         <VBtn color="error" :loading="unlinking" @click="unlinkUser">Удалить</VBtn>
+      </VCardActions>
+    </VCard>
+  </VDialog>
+
+  <!-- Диалог создания/редактирования уведомления -->
+  <VDialog v-model="dialogOpen" max-width="600" persistent>
+    <VCard>
+      <VCardTitle class="d-flex align-center py-4 bg-primary text-white">
+        <VIcon :icon="dialogMode === 'create' ? 'mdi-bell-plus-outline' : 'mdi-bell-ring-outline'" class="me-2" />
+        <span>{{ dialogMode === 'create' ? 'Создать уведомление' : 'Редактировать уведомление' }}</span>
+        <VSpacer />
+        <VBtn icon="mdi-close" variant="text" color="white" @click="dialogOpen = false" />
+      </VCardTitle>
+      <VCardText class="pt-6">
+        <VRow>
+          <VCol cols="12" md="6">
+            <VSelect
+              v-model="formNotification.type"
+              :items="[
+                { title: 'Доставка', value: 'delivery' },
+                { title: 'Самовывоз', value: 'pickup' }
+              ]"
+              label="Тип заказа"
+              variant="outlined"
+              :disabled="dialogMode === 'edit'"
+              @update:model-value="onFormTypeChange"
+            />
+          </VCol>
+          <VCol cols="12" md="6">
+            <VSelect
+              v-model="formNotification.status"
+              :items="availableStatuses"
+              item-title="title"
+              item-value="value"
+              label="Событие iiko"
+              variant="outlined"
+              :disabled="dialogMode === 'edit' || availableStatuses.length === 0"
+              no-data-text="Все события уже настроены"
+            />
+          </VCol>
+          <VCol cols="12">
+            <VTextarea
+              id="dialog-template-textarea"
+              v-model="formNotification.template"
+              label="Шаблон сообщения"
+              rows="5"
+              variant="outlined"
+              placeholder="Введите текст уведомления..."
+              hint="Используйте переменные ниже для динамической подстановки"
+              persistent-hint
+            />
+          </VCol>
+          <VCol cols="12">
+            <div class="d-flex flex-wrap gap-1 mt-1">
+              <span class="text-caption text-medium-emphasis me-2 align-self-center">Быстрая вставка:</span>
+              <VChip
+                v-for="variable in ['{order_number}', '{customer_name}', '{total_sum}', '{ready_time}', '{address}', '{items}', '{comment}']"
+                :key="variable"
+                size="x-small"
+                variant="outlined"
+                color="primary"
+                class="cursor-pointer"
+                @click="insertVariableToDialog(variable)"
+              >
+                {{ variable }}
+              </VChip>
+            </div>
+          </VCol>
+          <VCol cols="12" class="pt-0">
+            <VSwitch
+              v-model="formNotification.enabled"
+              label="Активировать уведомление сразу"
+              color="success"
+              hide-details
+            />
+          </VCol>
+        </VRow>
+      </VCardText>
+      <VCardActions class="pa-4 pt-0">
+        <VSpacer />
+        <VBtn variant="text" @click="dialogOpen = false">Отмена</VBtn>
+        <VBtn 
+          color="primary" 
+          variant="elevated" 
+          @click="saveNotificationForm"
+          :disabled="availableStatuses.length === 0 && dialogMode === 'create'"
+        >
+          Сохранить
+        </VBtn>
       </VCardActions>
     </VCard>
   </VDialog>

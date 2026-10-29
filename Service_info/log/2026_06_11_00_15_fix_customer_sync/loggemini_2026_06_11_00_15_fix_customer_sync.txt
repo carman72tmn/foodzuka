@@ -1,0 +1,13 @@
+Лог сессии: 2026-06-11 00:15
+Задача: Исправление ошибок синхронизации имени/фамилии и ошибки "categories" в списке клиентов.
+
+1. Ошибка "categories":
+В backend/app/api/customers.py на строке 496 написано:
+customer.categories = customer.loyalty_categories
+У модели Customer нет свойства categories, правильное поле iiko_categories.
+Решение: заменить на customer.iiko_categories = category_names или полностью переписать метод sync_customer на использование iiko_sync_service.sync_single_customer.
+
+2. Неработающее обновление имени/фамилии при открытии карточки гостя:
+При открытии карточки GET /api/v1/customers/{customer_id} запускает Celery задачу sync_single_customer_task.delay(customer.phone) асинхронно, из-за чего данные возвращаются до завершения синхронизации.
+Для моментального обновления имени в карточке добавим синхронную локальную проверку: если имя гостя пустое или "не задано"/"гость" и у него есть связанный VK-профиль, мы обновим имя у Customer из VkUser локально прямо в GET-обработчике перед возвратом ответа. А Celery задача отправит это обновление в iiko и подтянет актуальные данные.
+Также исправим sync_customer в backend/app/api/customers.py на использование iiko_sync_service.sync_single_customer для консолидации логики.

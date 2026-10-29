@@ -1,25 +1,36 @@
 <script setup>
+import { ref, watch } from 'vue'
+import { useRoute } from 'vue-router'
 import AccountSettingsAccount from '@/views/pages/account-settings/AccountSettingsAccount.vue'
-import AccountSettingsNotification from '@/views/pages/account-settings/AccountSettingsNotification.vue'
+import AccountSettingsNotification from '@/pages/settings/notifications.vue'
 import AccountSettingsSecurity from '@/views/pages/account-settings/AccountSettingsSecurity.vue'
 
 const route = useRoute()
-const activeTab = ref(route.params.tab)
+const activeTab = ref(route.query.tab || 'account')
+
+watch(
+  () => route.query.tab,
+  (newTab) => {
+    if (newTab) {
+      activeTab.value = newTab
+    }
+  }
+)
 
 // tabs
 const tabs = [
   {
-    title: 'Account',
+    title: 'Аккаунт',
     icon: 'bx-user',
     tab: 'account',
   },
   {
-    title: 'Security',
+    title: 'Безопасность',
     icon: 'bx-lock-open',
     tab: 'security',
   },
   {
-    title: 'Notifications',
+    title: 'Уведомления',
     icon: 'bx-bell',
     tab: 'notification',
   },

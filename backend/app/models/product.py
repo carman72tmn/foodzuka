@@ -1,12 +1,41 @@
 """
 Модель товара/продукта
 """
-from typing import Optional
+from typing import Optional, List, Dict, Any
 from datetime import datetime
 from app.core.datetime_utils import utc_now
 from decimal import Decimal
 from sqlmodel import Field, SQLModel, Relationship, Column, JSON
 from sqlalchemy import Numeric
+
+class KitchenZone(SQLModel, table=True):
+    """Таблица зон приготовления блюд на кухне (цехов)"""
+    __tablename__ = "kitchen_zones"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    name: str = Field(max_length=255, unique=True, index=True)
+    color: str = Field(default="#2196F3", max_length=7)
+    description: Optional[str] = Field(default=None)
+    created_at: datetime = Field(default_factory=utc_now)
+    updated_at: datetime = Field(default_factory=utc_now)
+
+    products: List["Product"] = Relationship(back_populates="kitchen_zone")
+
+
+class ProductRecipe(SQLModel, table=True):
+    """Таблица технологических карт (рецептов) блюд"""
+    __tablename__ = "product_recipes"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    product_id: int = Field(foreign_key="products.id", unique=True, index=True)
+    ingredients: List[Dict[str, Any]] = Field(default=[], sa_column=Column(JSON)) # [{"name": "Томаты", "gross": 50, "net": 45, "output": 40}]
+    technology: Optional[str] = Field(default=None) # Технология приготовления (описание этапов)
+    appearance: Optional[str] = Field(default=None) # Требования к внешнему виду / подаче
+    critical_points: Optional[str] = Field(default=None) # Критические точки / Хранение
+    updated_at: datetime = Field(default_factory=utc_now)
+
+    product: "Product" = Relationship(back_populates="recipe")
+
 
 class ProductSize(SQLModel, table=True):
     """Таблица размеров товара (например, 25см, 30см, 35см)"""
@@ -17,6 +46,7 @@ class ProductSize(SQLModel, table=True):
     iiko_id: str = Field(index=True, max_length=255)
     name: str = Field(max_length=255)
     price: Decimal = Field(sa_type=Numeric(10, 2))
+    weight_grams: Optional[int] = Field(default=None)
     is_default: bool = Field(default=False)
     updated_at: Optional[datetime] = Field(default=None)
     
@@ -53,6 +83,7 @@ class ProductModifier(SQLModel, table=True):
     default_amount: int = Field(default=0)
     min_amount: int = Field(default=0)
     max_amount: int = Field(default=1)
+    is_visible: bool = Field(default=True)
     
     group: "ProductModifierGroup" = Relationship(back_populates="modifiers")
 
@@ -86,11 +117,15 @@ class Product(SQLModel, table=True):
     old_price: Optional[Decimal] = Field(default=None, sa_type=Numeric(10, 2))
     max_discount_percent: Optional[int] = Field(default=None, description="Максимальная скидка в %")
     bonus_accrual_percent: Optional[int] = Field(default=None, description="% начисления бонусов")
+    tags: Optional[str] = Field(default=None, max_length=255, description="Метки и бейджи (через запятую)")
     
     # Синхронизация стоп-листов (список branch_ids)
     stop_list_branch_ids: list[int] = Field(default=[], sa_column=Column(JSON))
     is_stopped: bool = Field(default=False)
     stopped_at: Optional[datetime] = Field(default=None)
+
+    # Привязка к кухонной зоне приготовления
+    kitchen_zone_id: Optional[int] = Field(default=None, foreign_key="kitchen_zones.id", nullable=True)
 
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)
@@ -102,6 +137,11 @@ class Product(SQLModel, table=True):
     modifier_groups: list[ProductModifierGroup] = Relationship(
         back_populates="product",
         sa_relationship_kwargs={"cascade": "all, delete-orphan"}
+    )
+    kitchen_zone: Optional[KitchenZone] = Relationship(back_populates="products")
+    recipe: Optional[ProductRecipe] = Relationship(
+        back_populates="product",
+        sa_relationship_kwargs={"cascade": "all, delete-orphan", "uselist": False}
     )
 
     class Config:
@@ -115,3 +155,4 @@ class Product(SQLModel, table=True):
                 "is_available": True
             }
         }
+

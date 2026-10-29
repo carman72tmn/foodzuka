@@ -55,7 +55,7 @@ import avatar1 from '@images/avatars/avatar-1.png'
           <VDivider class="my-2" />
 
           <!-- 👉 Profile -->
-          <VListItem link>
+          <VListItem :to="{ path: '/account-settings', query: { tab: 'account' } }">
             <template #prepend>
               <VIcon
                 class="me-2"
@@ -68,7 +68,7 @@ import avatar1 from '@images/avatars/avatar-1.png'
           </VListItem>
 
           <!-- 👉 Settings -->
-          <VListItem link>
+          <VListItem :to="{ path: '/account-settings', query: { tab: 'notification' } }">
             <template #prepend>
               <VIcon
                 class="me-2"
@@ -78,32 +78,6 @@ import avatar1 from '@images/avatars/avatar-1.png'
             </template>
 
             <VListItemTitle>Настройки</VListItemTitle>
-          </VListItem>
-
-          <!-- 👉 Pricing -->
-          <VListItem link>
-            <template #prepend>
-              <VIcon
-                class="me-2"
-                icon="bx-dollar"
-                size="22"
-              />
-            </template>
-
-            <VListItemTitle>Цены</VListItemTitle>
-          </VListItem>
-
-          <!-- 👉 FAQ -->
-          <VListItem link>
-            <template #prepend>
-              <VIcon
-                class="me-2"
-                icon="bx-help-circle"
-                size="22"
-              />
-            </template>
-
-            <VListItemTitle>FAQ</VListItemTitle>
           </VListItem>
 
           <!-- Divider -->

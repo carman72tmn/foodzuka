@@ -1,0 +1,30 @@
+Сессия логов: 2026-07-13 12:48
+Задача: Добавление нового конкурса «Битва за поле» (Битва на пляже) ВКонтакте
+
+Список изменений:
+1. c:\Users\v_kva\.gemini\antigravity\scratch\foodtech\backend\app\models\vk_contest.py
+   - Добавлены новые поля penalty_percent и bonus_percent в модель VkContest.
+   - Добавлены поля penalties_hit и is_game_over в модель VkContestPlayer для учета штрафов игрока в битвах.
+
+2. c:\Users\v_kva\.gemini\antigravity\scratch\foodtech\backend\app\scripts\update_vk_contest_battle_fields.py
+   - Создан скрипт миграции базы данных для добавления колонок penalty_percent, bonus_percent в vk_contests и penalties_hit, is_game_over в vk_contest_players.
+
+3. c:\Users\v_kva\.gemini\antigravity\scratch\foodtech\backend\app\api\vk_contests.py
+   - Добавлены penalty_percent и bonus_percent в Pydantic схемы VkContestCreateSchema и VkContestUpdateSchema.
+   - Добавлен роут POST /api/v1/vk-contests/{contest_id}/finish для ручного/досрочного подведения итогов игры и автоматического раздачи призов лидерам.
+
+4. c:\Users\v_kva\.gemini\antigravity\scratch\foodtech\backend\app\services\vk_contest_service.py
+   - Добавлена логика инициализации поля battle (генерация мин/штрафов и подарков/бонусов по процентам) в initialize_game_field.
+   - Внедрена проверка player.is_game_over при каждом входящем ходе.
+   - Реализована логика хода для battle: проверка занятости ячейки, захват, обработка попаданий на мины (при 2-х минах GAME OVER), обработка бонусов (+2 попытки).
+   - Написан метод отрисовки игрового поля пляжной битвы generate_battle_image (сетка 10x10 в теплых песочных тонах, закрашивание занятых ячеек с именем игрока, отображение мин и бонусов на открытых клетках).
+   - Реализован метод finish_battle_contest для определения лидеров по ячейкам, генерации промокодов, отправки ЛС победителям и деактивации игры.
+
+5. c:\Users\v_kva\.gemini\antigravity\scratch\foodtech\admin\resources\js\pages\marketing\vk-bots.vue
+   - Добавлен тип игры battle в селект типов.
+   - Внедрены слайдеры penalty_percent и bonus_percent в форму создания/редактирования конкурса.
+   - Добавлен метод finishBattleContest и кнопка "Подвести итоги" во вкладку списка конкурсов.
+   - Обновлен метод getGameTypeLabel для отображения пляжной битвы.
+
+6. c:\Users\v_kva\.gemini\antigravity\scratch\foodtech\sync_to_vps.py
+   - Зарегистрированы файлы и прописан запуск миграции пляжной битвы на VPS перед пересборкой фронтенда.

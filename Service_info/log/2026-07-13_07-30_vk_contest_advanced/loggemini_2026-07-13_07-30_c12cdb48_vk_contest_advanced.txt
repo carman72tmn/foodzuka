@@ -1,0 +1,41 @@
+Сессия логов: 2026-07-13 07:30
+Задача: Добавление продвинутых настроек конкурсов ВК (по типу ActiveBot)
+
+Список изменений:
+1. c:\Users\v_kva\.gemini\antigravity\scratch\foodtech\backend\app\models\vk_contest.py
+   - Добавлены поля can_win_once, help_draw_prizes, black_list, white_list, remind_winner_pm, remind_attempts, remind_attempts_count, remind_attempts_quiet_from, remind_attempts_quiet_to, anti_prize_hunters, draw_type, draw_probability_interval в модель VkContest.
+   - Добавлено поле reminders_sent в модель VkContestPlayer.
+
+2. c:\Users\v_kva\.gemini\antigravity\scratch\foodtech\backend\app\scripts\update_vk_contest_advanced_fields.py
+   - Создан скрипт миграции базы данных для автоматического добавления новых колонок с дефолтными значениями в таблицы vk_contests и vk_contest_players.
+
+3. c:\Users\v_kva\.gemini\antigravity\scratch\foodtech\backend\app\api\vk_contests.py
+   - Обновлены Pydantic-схемы VkContestCreateSchema и VkContestUpdateSchema.
+   - Обновлен роут создания конкурса create_contest для сохранения продвинутых полей в БД.
+
+4. c:\Users\v_kva\.gemini\antigravity\scratch\foodtech\backend\app\services\vk_contest_service.py
+   - Добавлен вспомогательный асинхронный метод is_prize_hunter для автоматического выявления призоловов по критериям ВК (кол-во друзей < 10, отсутствие аватара).
+   - Внедрена фильтрация ходов по black_list и white_list.
+   - Внедрено ограничение на один выигрыш can_win_once.
+   - Внедрена защита от призоловов anti_prize_hunters (сброс шанса выигрыша до 0%).
+   - Адаптирована логика розыгрыша под draw_probability_interval и автоматическое ускорение шанса help_draw_prizes при затягивании конкурса.
+   - Исправлена критическая ошибка NameError (first_name) при проверке подписки.
+
+5. c:\Users\v_kva\.gemini\antigravity\scratch\foodtech\backend\app\tasks\vk_contest_reminders_task.py
+   - Создана Celery-задача vk_contest_reminders_task для автоматического комментирования-напоминания пользователям о неиспользованных попытках (интервалы 10м/30м/3ч) с учетом «тихого часа» по московскому времени.
+
+6. c:\Users\v_kva\.gemini\antigravity\scratch\foodtech\backend\app\core\celery_app.py
+   - Добавлен импорт новой задачи в массив include Celery.
+
+7. c:\Users\v_kva\.gemini\antigravity\scratch\foodtech\backend\app\core\scheduler.py
+   - Добавлен враппер задачи напоминаний vk_contest_reminders_task_wrapper.
+   - Добавлена периодическая задача в инициализационный список планировщика при старте (запуск каждые 10 минут).
+
+8. c:\Users\v_kva\.gemini\antigravity\scratch\foodtech\admin\resources\js\pages\marketing\vk-bots.vue
+   - Импортирован computed из vue.
+   - Добавлены новые поля в структуру contestForm.
+   - Реализованы computed свойства blackListText и whiteListText для удобного ввода через запятую.
+   - Добавлена полноценная вкладка настроек «⚙️ Продвинутые настройки игры» с Vuetify элементами управления.
+
+9. c:\Users\v_kva\.gemini\antigravity\scratch\foodtech\sync_to_vps.py
+   - Зарегистрированы новые файлы для синхронизации и прописан запуск миграционного скрипта на сервере перед пересборкой.

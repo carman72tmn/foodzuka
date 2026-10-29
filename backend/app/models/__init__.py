@@ -27,14 +27,16 @@ from .funnel import Funnel
 from .olap_revenue import OlapRevenueRecord
 from .employee import Employee, Shift, CourierOrder
 from .vk_user import VkUser
-from .vk_activity import VkActivity
+from .vk_activity import VkActivity, VkActivityPenaltyTimer
 from .vk_settings import VkSettings
 from .vk_webhook_log import VkWebhookLog
 from .vk_message import VkMessage
+from .vk_bot_connection import VkBotConnection
 from .bot_settings import BotSettings
 from .payment_type import PaymentType
 from .yandex_settings import YandexSettings
 from .max_settings import MaxSettings, MaxBot
+from .tbank_settings import TBankSettings, TBankAccountStatement
 from .vk_bot import (
     VkBotAccount, 
     VkBotGroup, 
@@ -42,16 +44,65 @@ from .vk_bot import (
     VkBotSubscription, 
     VkBotMessageLog,
     DeliveryMode,
-    MessageStatus
+    MessageStatus,
+    OrderPaymentQrShare
 )
 from .scheduled_task import ScheduledTask
 from .mailing_cascade import MailingCascade, MailingCascadeStep
+from .bot_command import BotCommand, BotUserState
+from .review import OrderReview
+from .reminder import CustomerReminder, SentReminder
+from .broadcast import CustomerBroadcast
+from .message_log import CustomerMessageLog, ShortLink
+from .purchase import Supplier, PurchasePosition, PurchaseList, PurchaseListItem
+from .push_subscription import PushSubscription
+from .admin_notification_settings import AdminNotificationSettings
+from .admin_notification import AdminNotification
+from .vk_birthday_bot import VkBirthdayBot, VkBirthdayPost
+from .vk_cover_bot import VkCoverBot, VkCoverSubscriberActivity
+from .vk_contest import VkContest, VkContestPlayer, VkContestWinner
+from .vk_activity_settings import VkActivitySettings
+from .vk_first_comment_settings import VkFirstCommentSettings
+from .senler import SenlerSettings, SenlerSubscriber
+from .ai_agent import AiProxy, AiProviderConnection, AiSiteAgent
+from .ai_assistant import AiSiteAssistant, AiAssistantMessage
+from .validation_settings import ValidationSettings
+from .vk_post_scheduler import VkPostScheduler
+from .mango_settings import MangoSettings, MangoCallLog
+from .vk_group_posting import VkGroupPreset, VkGroupPostCampaign, VkGroupPostHistory
+
 
 __all__ = [
+    "VkGroupPreset",
+    "VkGroupPostCampaign",
+    "VkGroupPostHistory",
+    "VkPostScheduler",
+    "ValidationSettings",
+    "VkActivitySettings",
+    "VkContest",
+    "VkContestPlayer",
+    "VkContestWinner",
+    "VkCoverBot",
+    "VkCoverSubscriberActivity",
+    "AdminNotification",
     "User",
+    "BotCommand",
+    "BotUserState",
     "Role",
     "Permission",
     "RolePermissionLink",
+    "OrderReview",
+    "CustomerReminder",
+    "SentReminder",
+    "CustomerBroadcast",
+    "CustomerMessageLog",
+    "ShortLink",
+    "Supplier",
+    "PurchasePosition",
+    "PurchaseList",
+    "PurchaseListItem",
+    "PushSubscription",
+    "AdminNotificationSettings",
 
     "Category",
     "Product",
@@ -90,8 +141,10 @@ __all__ = [
     "CourierOrder",
     "VkUser",
     "VkActivity",
+    "VkActivityPenaltyTimer",
     "VkSettings",
     "VkWebhookLog",
+    "VkBotConnection",
     "BotSettings",
     "PaymentType",
     "YandexSettings",
@@ -102,12 +155,27 @@ __all__ = [
     "VkBotMessageLog",
     "DeliveryMode",
     "MessageStatus",
+    "OrderPaymentQrShare",
     "ScheduledTask",
     "VkMessage",
     "MaxSettings",
     "MaxBot",
     "MailingCascade",
     "MailingCascadeStep",
+    "TBankSettings",
+    "TBankAccountStatement",
+    "VkBirthdayBot",
+    "VkBirthdayPost",
+    "VkFirstCommentSettings",
+    "SenlerSettings",
+    "SenlerSubscriber",
+    "AiProxy",
+    "AiProviderConnection",
+    "AiSiteAgent",
+    "AiSiteAssistant",
+    "AiAssistantMessage",
+    "MangoSettings",
+    "MangoCallLog",
 ]
 
 # Форсируем инициализацию всех мапперов SQLAlchemy
@@ -116,4 +184,3 @@ try:
     configure_mappers()
 except Exception:
     pass
-

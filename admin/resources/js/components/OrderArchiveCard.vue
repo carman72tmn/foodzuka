@@ -48,19 +48,65 @@ const getDuration = (start, end) => {
 }
 
 const formatAddress = order => {
-  if (!order.address && !order.delivery_address) return 'Адрес не указан'
+  if (!order) return 'Адрес не указан'
+  if (order.order_type === 'Самовывоз') return '🙍 Самовывоз'
 
-  const a = order.address || order.delivery_address
-  if (typeof a === 'string') return a
-  if (a.line1) return a.line1
-  
+  const a = (order.address && typeof order.address === 'object') ? order.address : {}
+  const baseAddr = (order.delivery_address || (typeof order.address === 'string' ? order.address : (a.line1 || '')) || '').trim()
+
+  const ent = (order.entrance || a.entrance || '').toString().trim()
+  const flr = (order.floor || a.floor || '').toString().trim()
+  const flt = (order.flat || a.flat || '').toString().trim()
+  const dp = (order.doorphone || a.doorphone || '').toString().trim()
+
+  if (baseAddr && baseAddr !== 'Самовывоз' && baseAddr !== 'Адрес не указан') {
+    let resultAddr = baseAddr
+    const extras = []
+
+    if (ent && ent !== '0' && ent !== '-') {
+      const hasEnt = new RegExp(`(?:под(?:ъезд|\\.|\\s*)|(?<=[,\\s])п\\.\\s*)\\s*${ent}\\b`, 'i').test(resultAddr)
+      if (!hasEnt) extras.push(`под. ${ent}`)
+    }
+    if (flr && flr !== '0' && flr !== '-') {
+      const hasFlr = new RegExp(`(?:эт(?:аж|\\.|\\s*)|(?<=[,\\s])э\\.\\s*)\\s*${flr}\\b`, 'i').test(resultAddr)
+      if (!hasFlr) extras.push(`эт. ${flr}`)
+    }
+    if (flt && flt !== '0' && flt !== '-') {
+      const hasFlt = new RegExp(`(?:кв(?:артира|\\.|\\s*)|оф(?:ис|\\.|\\s*)|пом(?:ещение|\\.|\\s*))\\s*${flt}\\b`, 'i').test(resultAddr)
+      if (!hasFlt) extras.push(`кв. ${flt}`)
+    }
+    if (dp && dp !== '0' && dp !== '-') {
+      const hasDp = new RegExp(`(?:код|домофон|д/ф|код\\s*домофона)\\s*[:#]?\\s*${dp}\\b`, 'i').test(resultAddr)
+      if (!hasDp) extras.push(`код ${dp}`)
+    }
+
+    if (extras.length > 0) {
+      resultAddr = `${resultAddr}, ${extras.join(', ')}`
+    }
+    return resultAddr
+  }
+
   const parts = []
+  const city = order.city || a.city
+  if (city) {
+    parts.push(city.toLowerCase().startsWith('г.') ? city : `г. ${city}`)
+  }
+  const street = order.street || a.street
+  if (street) {
+    if (!/ул\.|пр\.|пер\.|б-р|тракт|шоссе|проезд/i.test(street)) {
+      parts.push(`ул. ${street}`)
+    } else {
+      parts.push(street)
+    }
+  }
+  const house = order.house || a.house || a.home
+  if (house && house !== '0' && house !== '-') parts.push(`д. ${house}`)
+  if (ent && ent !== '0' && ent !== '-') parts.push(`под. ${ent}`)
+  if (flr && flr !== '0' && flr !== '-') parts.push(`эт. ${flr}`)
+  if (flt && flt !== '0' && flt !== '-') parts.push(`кв. ${flt}`)
+  if (dp && dp !== '0' && dp !== '-') parts.push(`код ${dp}`)
 
-  if (a.city) parts.push(a.city)
-  if (a.street) parts.push(a.street)
-  if (a.house || a.home) parts.push(`д. ${a.house || a.home}`)
-
-  return parts.join(', ') || 'Адрес не указан'
+  return parts.length > 0 ? parts.join(', ') : 'Адрес не указан'
 }
 
 const openMaps = (order, type = 'yandex') => {
@@ -129,7 +175,7 @@ const getPaymentStatusColor = order => {
     variant="flat"
   >
     <!-- 1. Header: Status & Timers -->
-    <div class="card-header-status d-flex align-center justify-space-between">
+    <div class="card-header-compact d-flex align-center justify-space-between">
       <div class="d-flex align-center ga-2">
         <VChip 
           :color="getStatusColor(order.status)" 
@@ -139,7 +185,7 @@ const getPaymentStatusColor = order => {
         >
           {{ getStatusText(order.status) }}
         </VChip>
-        <span class="text-card-small text-slate-400">
+        <span class="text-card-caption font-weight-bold">
           {{ formatDate(order.iiko_creation_time || order.created_at) }}
         </span>
       </div>
@@ -155,19 +201,19 @@ const getPaymentStatusColor = order => {
     </div>
 
     <!-- 2. Identity -->
-    <div class="section-divider">
+    <div class="section-compact py-1.5">
       <div class="d-flex justify-space-between align-center">
         <div>
-          <div class="text-card-title">№{{ order.external_number || order.number || '???' }}</div>
-          <div class="text-card-caption d-flex align-center ga-1 mt-1">
-            <VIcon icon="bx-user" size="14" />
-            <span class="text-truncate">{{ order.courier_name || '—' }}</span>
+          <div class="text-card-title" style="font-size: 1rem !important;">№{{ order.external_number || order.number || '???' }}</div>
+          <div class="text-card-caption d-flex align-center ga-1 mt-0.5" style="font-size: 0.75rem !important;">
+            <VIcon icon="bx-user" size="12" />
+            <span class="text-truncate font-weight-medium">{{ order.courier_name || '—' }}</span>
           </div>
         </div>
         <VBtn
           icon="bx-dots-vertical-rounded"
           variant="text"
-          color="slate-400"
+          color="medium-emphasis"
           size="small"
           @click="emit('open-details', order)"
         />
@@ -175,55 +221,54 @@ const getPaymentStatusColor = order => {
     </div>
 
     <!-- 3. Client & Address -->
-    <div class="section-divider">
-      <div class="d-flex align-center mb-3">
-        <VAvatar size="32" color="primary-lighten-5" class="me-2">
-          <VIcon icon="bx-user" size="16" color="primary" />
-        </VAvatar>
-        <span class="text-card-body font-weight-bold text-truncate">
+    <div class="section-compact py-1.5">
+      <div class="d-flex align-center mb-1 ga-1.5">
+        <VIcon icon="bx-user" size="14" color="primary" />
+        <span class="text-card-body font-weight-bold text-truncate" style="font-size: 0.8125rem !important;">
           {{ order.customer_name || 'Гость' }}
         </span>
       </div>
       
-      <div class="address-premium-box d-flex align-start ga-2" @click="openMaps(order)">
-        <VIcon icon="bx-map" color="primary" class="mt-1" size="16" />
-        <div class="text-card-caption font-weight-bold line-height-sm flex-grow-1">
+      <div class="address-premium-box d-flex align-start ga-1.5 py-1 px-2" @click="openMaps(order)">
+        <VIcon icon="bx-map" color="primary" class="mt-0.5" size="14" />
+        <div class="text-card-caption font-weight-bold line-height-xs flex-grow-1 text-slate-800" style="font-size: 0.75rem !important;">
           {{ formatAddress(order) }}
         </div>
       </div>
     </div>
 
     <!-- 4. Time Metrics -->
-    <div class="section-divider bg-slate-50 py-2">
-      <div class="d-flex justify-space-between mb-1">
-        <span class="text-card-small text-slate-400">В пути:</span>
-        <span class="text-card-small font-weight-bold">{{ getDuration(order.on_the_way_time, order.actual_time) || '—' }}</span>
+    <div class="section-compact py-1 px-3" style="background: var(--courier-slate-100);">
+      <div class="d-flex justify-space-between mb-0.5">
+        <span class="text-card-small text-medium-emphasis" style="font-size: 0.65rem !important;">В пути:</span>
+        <span class="text-card-caption font-weight-bold text-slate-800" style="font-size: 0.75rem !important;">{{ getDuration(order.on_the_way_time, order.actual_time) || '—' }}</span>
       </div>
       <div class="d-flex justify-space-between">
-        <span class="text-card-small text-slate-400">Завершено:</span>
-        <span class="text-card-small font-weight-bold text-success">{{ formatTime(order.actual_time) }}</span>
+        <span class="text-card-small text-medium-emphasis" style="font-size: 0.65rem !important;">Завершено:</span>
+        <span class="text-card-caption font-weight-bold text-success" style="font-size: 0.75rem !important;">{{ formatTime(order.actual_time) }}</span>
       </div>
     </div>
 
     <!-- 5. Payment Footer -->
-    <div class="card-footer-payment mt-auto">
+    <div class="card-footer-compact mt-auto">
       <div class="d-flex justify-space-between align-center">
         <div class="d-flex flex-column">
-          <span class="text-card-small text-slate-400 leading-none mb-1">Сумма</span>
-          <span class="text-body-1 font-weight-black text-slate-900 leading-none">
+          <span class="text-card-small text-medium-emphasis leading-none mb-0.5" style="font-size: 0.65rem !important;">Сумма</span>
+          <span class="text-body-1 font-weight-black text-high-emphasis leading-none">
             {{ formatPrice(order.total_with_discount || order.sum) }} ₽
           </span>
         </div>
         <div class="text-right">
-          <div class="d-flex align-center justify-end ga-1 mb-1">
-            <VIcon icon="bx-wallet" size="14" color="slate-400" />
-            <span class="text-card-small text-slate-600">{{ order.payment_method || '—' }}</span>
+          <div class="d-flex align-center justify-end ga-1 mb-0.5">
+            <VIcon icon="bx-wallet" size="12" class="text-medium-emphasis" />
+            <span class="text-card-caption text-medium-emphasis font-weight-medium" style="font-size: 0.75rem !important;">{{ order.payment_method || '—' }}</span>
           </div>
           <VChip 
             :color="getPaymentStatusColor(order)" 
             size="x-small" 
             variant="flat" 
-            class="font-weight-black"
+            class="font-weight-black text-white"
+            style="height: 16px; font-size: 0.65rem !important;"
           >
             {{ getPaymentStatusText(order) }}
           </VChip>

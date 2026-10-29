@@ -5,19 +5,24 @@ import {
 } from 'vuetify'
 import { hexToRgb } from '@core/utils/colorConverter'
 
+const props = defineProps({
+  weekSummary: {
+    type: Object,
+    default: () => ({
+      total_orders: 0,
+      total_revenue_formatted: '0 ₽',
+      daily_trend: [],
+    }),
+  },
+})
+
 const vuetifyTheme = useTheme()
 const display = useDisplay()
 
-const series = [{
-  data: [
-    30,
-    58,
-    35,
-    53,
-    50,
-    68,
-  ],
-}]
+const series = computed(() => [{
+  name: 'Заказов',
+  data: (props.weekSummary.daily_trend || []).map(d => d.orders_count),
+}])
 
 const chartOptions = computed(() => {
   const currentTheme = vuetifyTheme.current.value.colors
@@ -27,7 +32,7 @@ const chartOptions = computed(() => {
       parentHeightOffset: 0,
       toolbar: { show: false },
       dropShadow: {
-        top: 12,
+        top: 8,
         blur: 4,
         left: 0,
         enabled: true,
@@ -35,7 +40,12 @@ const chartOptions = computed(() => {
         color: currentTheme.warning,
       },
     },
-    tooltip: { enabled: false },
+    tooltip: {
+      enabled: true,
+      y: {
+        formatter: val => `${val} заказов`,
+      },
+    },
     colors: [`rgba(${ hexToRgb(String(currentTheme.warning)) }, 1)`],
     stroke: {
       width: 4,
@@ -61,7 +71,7 @@ const chartOptions = computed(() => {
         breakpoint: display.thresholds.value.lg,
         options: {
           chart: {
-            height: 151,
+            height: 140,
             width: '100%',
           },
         },
@@ -70,7 +80,7 @@ const chartOptions = computed(() => {
         breakpoint: display.thresholds.value.md,
         options: {
           chart: {
-            height: 131,
+            height: 120,
             width: '100%',
           },
         },
@@ -83,39 +93,40 @@ const chartOptions = computed(() => {
 <template>
   <VCard>
     <VCardText class="d-flex justify-space-between h-100">
-      <div class="d-flex flex-column justify-space-between gap-y-4">
+      <div class="d-flex flex-column justify-space-between gap-y-3">
         <div>
-          <h5 class="text-h5 mb-1">
-            Отчет профиля
+          <h5 class="text-h6 mb-1 font-weight-bold">
+            Объем заказов
           </h5>
           <VChip
             color="warning"
             size="small"
+            variant="tonal"
           >
-            2022 год
+            За 7 дней
           </VChip>
         </div>
 
         <div>
-          <div class="d-flex gap-1 align-center text-success">
+          <div class="d-flex gap-1 align-center text-success mb-1">
             <VIcon
-              icon="bx-up-arrow-alt"
-              size="20"
+              icon="bx-trending-up"
+              size="18"
             />
-            <span class="text-base d-inline-block">68.2%</span>
+            <span class="text-caption font-weight-medium">Активность</span>
           </div>
 
-          <h4 class="text-h4">
-            84,686k ₽
+          <h4 class="text-h4 font-weight-bold">
+            {{ props.weekSummary.total_orders }} шт
           </h4>
         </div>
       </div>
 
-      <div class="h-100 d-flex align-center">
+      <div class="h-100 d-flex align-center" style="min-width: 140px;">
         <VueApexCharts
           type="line"
-          :height="131"
-          width="80%"
+          :height="120"
+          width="100%"
           :options="chartOptions"
           :series="series"
         />

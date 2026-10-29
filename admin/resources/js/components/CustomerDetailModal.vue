@@ -171,9 +171,9 @@
             </VTabs>
 
             <VWindow v-model="activeTab" class="flex-grow-1 overflow-y-auto" style="height: 600px;">
-              <!-- 1. Анкета -->
               <VWindowItem value="profile">
                 <VContainer class="pa-6">
+                  <fieldset :disabled="!hasPermission('customer_tab_profile_edit')" class="border-0 pa-0 ma-0">
                   <VRow>
                     <VCol 
                       cols="12" 
@@ -420,7 +420,8 @@
                     </div>
                   </div>
 
-                  <div class="d-flex justify-end mt-6">
+                  </fieldset>
+                  <div class="d-flex justify-end mt-6" v-if="hasPermission('customer_tab_profile_edit')">
                     <VBtn color="primary" @click="saveProfile">Сохранить изменения</VBtn>
                   </div>
                 </VContainer>
@@ -438,7 +439,7 @@
                     </VCol>
                   </VRow>
                   
-                  <VRow class="mt-4">
+                  <VRow class="mt-4" v-if="hasPermission('customer_tab_bonuses_edit')">
                     <VCol cols="12">
                       <VCard variant="outlined" class="pa-4">
                         <div class="text-subtitle-1 font-weight-bold mb-3">Ручное изменение баланса</div>
@@ -554,13 +555,15 @@
               <!-- 5. Риски -->
               <VWindowItem value="risks">
                 <VContainer class="pa-6">
+                  <fieldset :disabled="!hasPermission('customer_tab_risks_edit')" class="border-0 pa-0 ma-0">
                   <VRow>
                     <VCol cols="12">
                       <VSwitch v-model="form.isHighRisk" label="Статус высокого риска" color="error" />
                       <VTextarea v-model="form.riskReason" label="Причина риска" variant="outlined" density="compact" rows="3" />
                     </VCol>
                   </VRow>
-                  <div class="d-flex justify-end mt-4">
+                  </fieldset>
+                  <div class="d-flex justify-end mt-4" v-if="hasPermission('customer_tab_risks_edit')">
                     <VBtn color="error" @click="saveProfile">Обновить статус</VBtn>
                   </div>
                 </VContainer>
@@ -711,6 +714,117 @@
                   </VTable>
                 </VContainer>
               </VWindowItem>
+
+              <!-- 10. Социальные сети -->
+              <VWindowItem value="social">
+                <VContainer class="pa-6">
+                  <div v-if="socialLoading" class="text-center py-10">
+                    <VProgressCircular indeterminate color="primary" />
+                    <div class="mt-2">Загрузка данных соцсетей...</div>
+                  </div>
+                  
+                  <div v-else-if="!socialAccounts.length" class="text-center py-10 text-disabled">
+                    <VIcon icon="ri-share-line" size="48" class="mb-2" />
+                    <div>У гостя нет привязанных социальных сетей. Привязка осуществляется автоматически при указании номера телефона или заказа в соответствующей соцсети.</div>
+                  </div>
+
+                  <div v-else>
+                    <VRow>
+                      <VCol cols="12" v-for="acc in socialAccounts" :key="acc.vk_id || acc.telegram_id || acc.max_user_id || acc.provider">
+                        <VCard variant="outlined" class="pa-4 border rounded-lg">
+                          <div class="d-flex align-center mb-4">
+                            <VAvatar size="64" class="me-4 border" style="background-color: var(--v-theme-surface);">
+                              <VImg v-if="acc.photo_50" :src="acc.photo_50" />
+                              <VIcon v-else-if="acc.provider === 'vk'" icon="ri-vk-fill" color="#4c75a3" size="32" />
+                              <VIcon v-else-if="acc.provider === 'telegram'" icon="ri-telegram-fill" color="#0088cc" size="32" />
+                              <VIcon v-else-if="acc.provider === 'max'" icon="ri-message-3-line" color="#7360F2" size="32" />
+                              <VIcon v-else icon="ri-user-line" />
+                            </VAvatar>
+                            
+                            <div>
+                              <div class="text-h6 font-weight-bold">
+                                {{ acc.first_name }} {{ acc.last_name }}
+                              </div>
+                              <div class="text-caption text-medium-emphasis">
+                                Провайдер: 
+                                <VChip size="x-small" :color="acc.provider === 'vk' ? 'primary' : (acc.provider === 'telegram' ? 'info' : 'secondary')" class="font-weight-bold text-uppercase ms-1">
+                                  {{ acc.provider }}
+                                </VChip>
+                              </div>
+                              <div class="text-caption text-medium-emphasis mt-1">
+                                <span v-if="acc.provider === 'vk'">
+                                  Ссылка: 
+                                  <a :href="`https://vk.com/id${acc.vk_id}`" target="_blank" class="text-decoration-none">
+                                    {{ acc.screen_name || `id${acc.vk_id}` }}
+                                    <VIcon icon="ri-external-link-line" size="xs" />
+                                  </a>
+                                </span>
+                                <span v-else-if="acc.provider === 'telegram'">
+                                  ID Telegram: <strong>{{ acc.telegram_id }}</strong>
+                                </span>
+                                <span v-else-if="acc.provider === 'max'">
+                                  ID MAX: <strong>{{ acc.max_user_id }}</strong>
+                                </span>
+                              </div>
+                            </div>
+                          </div>
+
+                          <VDivider class="my-4" />
+
+                          <!-- Статусы и настройки -->
+                          <div class="d-flex flex-column gap-3">
+                            <div class="d-flex align-center justify-space-between">
+                              <div class="d-flex align-center">
+                                <VIcon icon="ri-message-2-line" class="me-2" />
+                                <div>
+                                  <div class="text-subtitle-2">Разрешить сообщения и уведомления</div>
+                                  <div class="text-caption text-medium-emphasis">Получение уведомлений о статусе заказов в личные сообщения</div>
+                                </div>
+                              </div>
+                              <VSwitch
+                                :model-value="acc.notifications_enabled"
+                                @update:model-value="toggleSocialFlag(acc, 'notifications_enabled')"
+                                :disabled="!hasPermission('customer_tab_socials_edit')"
+                                color="success"
+                                hide-details
+                              />
+                            </div>
+
+                            <div class="d-flex align-center justify-space-between">
+                              <div class="d-flex align-center">
+                                <VIcon icon="ri-spam-line" class="me-2" />
+                                <div>
+                                  <div class="text-subtitle-2">Блокировка рассылок</div>
+                                  <div class="text-caption text-medium-emphasis">Принудительно запретить любые сообщения/рассылки от имени группы</div>
+                                </div>
+                              </div>
+                              <VSwitch
+                                :model-value="acc.is_blocked"
+                                @update:model-value="toggleSocialFlag(acc, 'is_blocked')"
+                                :disabled="!hasPermission('customer_tab_socials_edit')"
+                                color="error"
+                                hide-details
+                              />
+                            </div>
+
+                            <VDivider v-if="acc.provider === 'vk'" class="my-2" />
+
+                            <div v-if="acc.provider === 'vk'" class="d-flex align-center justify-space-between bg-var-theme-background pa-3 rounded-lg border">
+                              <div class="d-flex align-center">
+                                <VIcon :icon="acc.is_subscribed ? 'ri-checkbox-circle-line' : 'ri-close-circle-line'" :color="acc.is_subscribed ? 'success' : 'error'" class="me-2" />
+                                <div>
+                                  <div class="text-subtitle-2">Статус подписки на бота: <strong>{{ acc.is_subscribed ? 'Подписан' : 'Не подписан' }}</strong></div>
+                                  <div class="text-caption text-medium-emphasis">Определяется автоматически на основе разрешений пользователя в VK</div>
+                                </div>
+                              </div>
+                            </div>
+                          </div>
+                        </VCard>
+                      </VCol>
+                    </VRow>
+                  </div>
+                </VContainer>
+              </VWindowItem>
             </VWindow>
           </VCol>
         </VRow>
@@ -731,6 +845,7 @@ import axios from 'axios'
 import { useToast } from 'vue-toastification'
 import JsBarcode from 'jsbarcode'
 import { isLongTimeAgo } from '@/utils/date'
+import { hasPermission } from '@/utils/auth'
 
 const props = defineProps({
   modelValue: Boolean,
@@ -744,7 +859,7 @@ const emit = defineEmits(['update:modelValue', 'updated'])
 
 const toast = useToast()
 
-const activeTab = ref('profile')
+const activeTab = ref(null)
 const isSyncing = ref(false)
 const olapLoading = ref(false)
 const olapError = ref(null)
@@ -818,22 +933,27 @@ const availableCategories = computed(() => {
   return allIikoCategories.value.filter(cat => !form.value.iikoCategories.includes(cat.name))
 })
 
-const tabs = [
-  { id: 'profile', title: 'Анкета', icon: 'ri-id-card-line' },
-  { id: 'bonuses', title: 'Бонусы', icon: 'ri-coin-line' },
-  { id: 'orders', title: 'Заказы', icon: 'ri-shopping-bag-line' },
-  { id: 'analytics', title: 'Аналитика', icon: 'ri-bar-chart-line' },
-  { 
-    id: 'risks', 
-    title: 'Риски', 
-    icon: props.customer?.is_high_risk ? 'ri-error-warning-fill' : 'ri-error-warning-line',
-    color: props.customer?.is_high_risk ? 'error' : ''
-  },
-  { id: 'addresses', title: 'Адреса', icon: 'ri-map-pin-line' },
-  { id: 'notifications', title: 'Инфо', icon: 'ri-notification-line' },
-  { id: 'local-orders', title: 'Локальные заказы', icon: 'ri-history-line' },
-  { id: 'extra', title: 'Лог', icon: 'ri-code-line' },
-]
+const tabs = computed(() => {
+  const allTabs = [
+    { id: 'profile', title: 'Анкета', icon: 'ri-id-card-line', permission: 'customer_tab_profile_view' },
+    { id: 'bonuses', title: 'Бонусы', icon: 'ri-coin-line', permission: 'customer_tab_bonuses_view' },
+    { id: 'orders', title: 'Заказы', icon: 'ri-shopping-bag-line', permission: 'customer_tab_orders_view' },
+    { id: 'analytics', title: 'Аналитика', icon: 'ri-bar-chart-line', permission: 'customer_tab_analytics_view' },
+    { 
+      id: 'risks', 
+      title: 'Риски', 
+      icon: props.customer?.is_high_risk ? 'ri-error-warning-fill' : 'ri-error-warning-line',
+      color: props.customer?.is_high_risk ? 'error' : '',
+      permission: 'customer_tab_risks_view'
+    },
+    { id: 'addresses', title: 'Адреса', icon: 'ri-map-pin-line', permission: 'customer_tab_addresses_view' },
+    { id: 'notifications', title: 'Инфо', icon: 'ri-notification-line', permission: 'customer_tab_notifications_view' },
+    { id: 'local-orders', title: 'Локальные заказы', icon: 'ri-history-line', permission: 'customer_tab_local_orders_view' },
+    { id: 'social', title: 'Социальные сети', icon: 'ri-share-line', permission: 'customer_tab_socials_view' },
+    { id: 'extra', title: 'Лог', icon: 'ri-code-line', permission: 'customer_tab_extra_view' },
+  ]
+  return allTabs.filter(t => hasPermission(t.permission))
+})
 
 const isVisible = computed({
   get: () => props.modelValue,
@@ -888,7 +1008,7 @@ const loadOlapStats = async () => {
   olapLoading.value = true
   olapError.value = null
   try {
-    const response = await fetch(`/api/v1/customers/${props.customer.id}/olap-stats`)
+    const response = await fetch(`/api/v1/customers/${props.customer.id}/olap-stats?refresh=true`)
     if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`)
     
     const data = await response.json()
@@ -996,6 +1116,47 @@ const removeCategory = (name) => {
   form.value.iikoCategories = form.value.iikoCategories.filter(c => c !== name)
 }
 
+const socialAccounts = ref([])
+const socialLoading = ref(false)
+
+const loadSocialAccounts = async () => {
+  if (!props.customer?.id) return
+  socialLoading.value = true
+  try {
+    const response = await fetch(`/api/v1/customers/${props.customer.id}/social-accounts`)
+    if (response.ok) {
+      socialAccounts.value = await response.json()
+    }
+  } catch (e) {
+    console.error('Failed to load social accounts', e)
+  } finally {
+    socialLoading.value = false
+  }
+}
+
+const toggleSocialFlag = async (account, flagName) => {
+  try {
+    const updatedValue = !account[flagName]
+    const payload = {
+      [flagName]: updatedValue
+    }
+    const socialId = account.provider === 'vk' ? account.vk_id : (account.provider === 'telegram' ? account.telegram_id : account.max_user_id)
+    const response = await fetch(`/api/v1/customers/${props.customer.id}/social-accounts/${account.provider}/${socialId}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    })
+    if (response.ok) {
+      account[flagName] = updatedValue
+      toast.success('Настройки успешно обновлены')
+    } else {
+      toast.error('Не удалось обновить настройки')
+    }
+  } catch (e) {
+    toast.error('Ошибка при сохранении')
+  }
+}
+
 const initData = async () => {
   if (!props.customer?.id) return
 
@@ -1006,8 +1167,9 @@ const initData = async () => {
   localOrders.value = []
   localPhones.value = []
   guestAddresses.value = []
+  socialAccounts.value = []
   localOrdersPage.value = 0
-  activeTab.value = 'profile'
+  activeTab.value = tabs.value.length ? tabs.value[0].id : null
 
   form.value = {
     name: props.customer.name || '',
@@ -1058,6 +1220,7 @@ const initData = async () => {
     loadBonusHistory(),
     loadAllCategories(),
     loadLocalPhones(),
+    loadSocialAccounts(),
   ])
 
   generateBarcode()

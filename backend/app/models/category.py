@@ -33,6 +33,12 @@ class Category(SQLModel, table=True):
 
     sort_order: int = Field(default=0)
     is_active: bool = Field(default=True)
+    lock_name: bool = Field(default=False)
+    lock_description: bool = Field(default=False)
+    lock_image: bool = Field(default=False)
+    lock_parent: bool = Field(default=False)
+    hide_category_only: bool = Field(default=False)
+    hide_category_and_products: bool = Field(default=False)
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)
 

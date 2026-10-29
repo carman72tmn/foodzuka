@@ -1,0 +1,879 @@
+﻿diff --git a/backend/app/services/vk_service.py b/backend/app/services/vk_service.py
+index 37aca25..12816a7 100644
+--- a/backend/app/services/vk_service.py
++++ b/backend/app/services/vk_service.py
+@@ -10,37 +10,63 @@ from app.models.vk_activity import VkActivity
+ from app.models.vk_settings import VkSettings
+ from app.models.customer import Customer
+ from app.models.vk_message import VkMessage
++from app.models.vk_bot_connection import VkBotConnection
++from app.models.bot_command import BotCommand, BotUserState
++from app.models.review import OrderReview
+ import httpx
+ import asyncio
+ from datetime import datetime
+ from app.core.datetime_utils import utc_now
+ 
+ 
+-def extract_order_id_from_text(text: str, parser_enabled: bool, parser_phrase: str) -> Optional[str]:
+-    """Извлекает ID заказа из текста сообщения по заданным правилам"""
+-    if not text:
++def extract_order_id_from_text(text: str, parser_enabled: bool, parser_phrase: str, parser_mask: Optional[str] = None) -> Optional[str]:
++    """Извлекает ID заказа из текста сообщения по заданным правилам и валидирует по маске"""
++    if not text or not parser_enabled or not parser_phrase:
+         return None
+ 
+-    order_number = None
++    def check_mask(order_id: str, mask: Optional[str]) -> bool:
++        if not mask or mask.strip() in ("", "*"):
++            return True
++        parts = []
++        for char in mask.strip():
++            if char == '*':
++                parts.append('.')
++            else:
++                parts.append(re.escape(char))
++        pattern = "^" + "".join(parts) + "$"
++        return bool(re.match(pattern, order_id))
+ 
+-    # 1. Поиск по специфичной фразе (приоритет)
+-    if parser_enabled:
+-        # Превращаем шаблон в регулярку: заменяем {order_id} на (\d+)
+-        regex_pattern = re.escape(parser_phrase).replace(r'\{order_id\}', r'(\d+)')
+-        match = re.search(regex_pattern, text, re.IGNORECASE)
+-        if match:
+-            order_number = match.group(1)
++    # Нормализуем текст и фразу, очищая от начальных/конечных пробелов
++    text_clean = text.strip()
++    phrase_clean = parser_phrase.strip()
++
++    # Превращаем шаблон в регулярку: заменяем {order_id} на (\S+) для поддержки комбинированных номеров
++    # Добавляем ^ и $ для строгого полного совпадения
++    regex_pattern = "^" + re.escape(phrase_clean).replace(r'\{order_id\}', r'(\S+)') + "$"
++    match = re.match(regex_pattern, text_clean, re.IGNORECASE)
++    if match:
++        candidate = match.group(1)
++        # Очистим кандидата от знаков препинания на конце, если они захватились
++        candidate = candidate.rstrip('.,!?;:)')
++        if check_mask(candidate, parser_mask):
++            return candidate
++
++    return None
+ 
+-    # 2. Фолбэк на общий поиск номера заказа, если специфичная фраза не найдена
+-    if not order_number:
+-        match = re.search(r'(?:заказ|заказа).*?(?:№|#)?\s*(\d+)', text, re.IGNORECASE)
+-        if match:
+-            order_number = match.group(1)
+ 
+-    return order_number
++def is_ignored_vk_id(vk_id: int, ignored_ids_str: Optional[str]) -> bool:
++    """Проверяет, входит ли VK ID в список игнорируемых ID"""
++    if not ignored_ids_str:
++        return False
++    try:
++        ignored_ids = [int(x.strip()) for x in ignored_ids_str.split(",") if x.strip().isdigit()]
++        return vk_id in ignored_ids
++    except Exception as e:
++        logger.error(f"Error parsing vk_parser_ignored_ids: {e}")
++        return False
+ 
+ 
+-async def link_vk_user_to_order(db: Session, vk_id: int, order_number: str, source: str = "parser_realtime") -> bool:
++async def link_vk_user_to_order(db: Session, vk_id: int, order_number: str, source: str = "parser_realtime", group_id: Optional[int] = None) -> bool:
+     """Привязывает пользователя VK к клиенту на основе номера заказа"""
+     try:
+         # Поиск заказа в БД (сначала по ID, потом по внешнему номеру)
+@@ -55,8 +81,16 @@ async def link_vk_user_to_order(db: Session, vk_id: int, order_number: str, sour
+         vk_user = db.exec(select(VkUser).where(VkUser.vk_id == vk_id)).first()
+         
+         # Получаем доп. данные из VK если есть токен
+-        vk_settings = db.exec(select(VkSettings)).first()
+-        bot_token = vk_settings.vk_bot_token if vk_settings else None
++        bot_token = None
++        if group_id:
++            bot = db.exec(select(VkBotConnection).where(VkBotConnection.vk_group_id == group_id, VkBotConnection.is_active == True)).first()
++            if bot:
++                bot_token = bot.vk_bot_token
++        
++        if not bot_token:
++            vk_settings = db.exec(select(VkSettings)).first()
++            bot_token = vk_settings.vk_bot_token if vk_settings else None
++            
+         vk_profile = {}
+         if bot_token:
+             vk_profile = await fetch_vk_user_info(vk_id, bot_token)
+@@ -65,6 +99,7 @@ async def link_vk_user_to_order(db: Session, vk_id: int, order_number: str, sour
+         if not vk_user:
+             vk_user = VkUser(
+                 vk_id=vk_id,
++                vk_group_id=group_id,
+                 phone=order.customer_phone,
+                 iiko_customer_id=str(order.customer_id) if order.customer_id else None,
+                 first_name=vk_profile.get("first_name") or order.customer_name,
+@@ -78,6 +113,7 @@ async def link_vk_user_to_order(db: Session, vk_id: int, order_number: str, sour
+             )
+             db.add(vk_user)
+         else:
++            vk_user.vk_group_id = group_id or vk_user.vk_group_id
+             vk_user.phone = order.customer_phone or vk_user.phone
+             vk_user.iiko_customer_id = str(order.customer_id) if order.customer_id else vk_user.iiko_customer_id
+             vk_user.first_name = vk_profile.get("first_name") or vk_user.first_name or order.customer_name
+@@ -126,29 +162,77 @@ async def fetch_vk_user_info(vk_id: int, bot_token: str) -> Dict[str, Any]:
+     return {}
+ 
+ 
+-async def process_vk_event(event_data: Dict[str, Any], db: Session, bot_token: str | None):
++async def process_vk_event(event_data: Dict[str, Any], db: Session, bot_token: str | None, group_id: Optional[int] = None):
+     event_type = event_data.get("type")
+     obj = event_data.get("object", {})
+ 
+     if event_type == "message_reply" or event_type == "message_new":
+-        await handle_message(event_type, obj, db, bot_token)
++        await handle_message(event_type, obj, db, bot_token, group_id)
++    elif event_type == "message_event":
++        await handle_message_event(obj, db, bot_token, group_id)
+     elif event_type in ["like_add", "wall_reply_new"]:
+-        await handle_activity(event_type, obj, db, bot_token)
++        await handle_activity(event_type, obj, db, bot_token, group_id)
++    elif event_type in ["message_allow", "message_deny"]:
++        await handle_subscription_event(event_type, obj, db, group_id)
+ 
+ 
+-async def handle_message(event_type: str, obj: Dict[str, Any], db: Session, bot_token: str | None):
++async def handle_subscription_event(event_type: str, obj: Dict[str, Any], db: Session, group_id: Optional[int] = None):
++    vk_id = obj.get("user_id")
++    if not vk_id:
++        return
++    vk_user = db.exec(select(VkUser).where(VkUser.vk_id == vk_id)).first()
++    if vk_user:
++        vk_user.is_subscribed = (event_type == "message_allow")
++        if group_id:
++            vk_user.vk_group_id = group_id
++        db.add(vk_user)
++        db.commit()
++        logger.info(f"VK User {vk_id} subscription status updated to: {vk_user.is_subscribed}")
++    elif event_type == "message_allow":
++        vk_user = VkUser(
++            vk_id=vk_id,
++            is_subscribed=True,
++            vk_group_id=group_id
++        )
++        db.add(vk_user)
++        db.commit()
++        logger.info(f"VK User {vk_id} created on subscription allow event")
++
++
++async def handle_message(event_type: str, obj: Dict[str, Any], db: Session, bot_token: str | None, group_id: Optional[int] = None):
+     # Depending on API version, message might be directly in obj or obj.message
+     message = obj if 'text' in obj else obj.get('message', {})
+     text = message.get("text", "")
+     vk_id = message.get("peer_id") or obj.get("user_id") or message.get("from_id")
+     
+-    if not vk_id or not text:
++    if not vk_id:
++        return
++
++    # Проверяем наличие payload (например, нажатие обычной inline кнопки с payload)
++    payload_str = message.get("payload")
++    if payload_str:
++        try:
++            import json
++            payload = json.loads(payload_str)
++            if isinstance(payload, dict) and payload.get("action") == "rate_order":
++                await handle_rate_order_payload(vk_id, payload, db, bot_token, group_id)
++                return
++        except Exception as e:
++            logger.error(f"Error parsing VK button payload in handle_message: {e}")
++
++    if not text:
+         return
+ 
+     # 1. Проверяем настройки парсера
+     vk_settings = db.exec(select(VkSettings)).first()
+     parser_enabled = vk_settings.vk_parser_enabled if vk_settings else False
+     parser_phrase = vk_settings.vk_parser_phrase if vk_settings else "здравствуйте! Ваш заказ {order_id} принят и мы приступили к его приготовлению"
++    parser_mask = vk_settings.vk_parser_mask if vk_settings else None
++    
++    ignored_ids_str = vk_settings.vk_parser_ignored_ids if vk_settings else None
++    if vk_id and is_ignored_vk_id(vk_id, ignored_ids_str):
++        logger.info(f"VK ID {vk_id} is in ignored list, skipping parser processing and history storage.")
++        return
+     
+     # 1.5. Сохраняем сообщение в историю
+     try:
+@@ -169,7 +253,8 @@ async def handle_message(event_type: str, obj: Dict[str, Any], db: Session, bot_
+                 from_id=message.get("from_id") or vk_id,
+                 text=text,
+                 direction=direction,
+-                payload=obj
++                payload=obj,
++                vk_group_id=group_id
+             )
+             db.add(new_msg)
+             db.commit()
+@@ -177,8 +262,14 @@ async def handle_message(event_type: str, obj: Dict[str, Any], db: Session, bot_
+         print(f"Error saving VK message to history: {e}")
+         db.rollback()
+ 
++    # 1.6. Обработка команд ботов и FSM (только для входящих сообщений)
++    if direction == "inbound":
++        fsm_processed = await handle_bot_commands_and_fsm(vk_id, text, db, bot_token, group_id)
++        if fsm_processed:
++            return
++
+     # 2. Пытаемся извлечь номер заказа (сначала из текущего сообщения, затем из истории)
+-    order_number = extract_order_id_from_text(text, parser_enabled, parser_phrase)
++    order_number = extract_order_id_from_text(text, parser_enabled, parser_phrase, parser_mask)
+ 
+     # Если в текущем сообщении нет, но есть токен - проверяем историю 10 последних сообщений
+     if not order_number and bot_token:
+@@ -197,7 +288,7 @@ async def handle_message(event_type: str, obj: Dict[str, Any], db: Session, bot_
+                     messages = data_h["response"].get("items", [])
+                     for msg in messages:
+                         hist_text = msg.get("text", "")
+-                        hist_order_id = extract_order_id_from_text(hist_text, parser_enabled, parser_phrase)
++                        hist_order_id = extract_order_id_from_text(hist_text, parser_enabled, parser_phrase, parser_mask)
+                         if hist_order_id:
+                             order_number = hist_order_id
+                             break # Нашли самый свежий
+@@ -212,7 +303,7 @@ async def handle_message(event_type: str, obj: Dict[str, Any], db: Session, bot_
+     vk_user_before = db.exec(select(VkUser).where(VkUser.vk_id == vk_id)).first()
+     was_linked = vk_user_before.is_linked if vk_user_before else False
+ 
+-    success = await link_vk_user_to_order(db, vk_id, order_number)
++    success = await link_vk_user_to_order(db, vk_id, order_number, group_id=group_id)
+             
+     # 4. Отправляем уведомление об успешной привязке ТОЛЬКО если это первая привязка
+     if success and not was_linked and event_type == "message_new" and bot_token:
+@@ -238,6 +329,8 @@ async def scan_historical_messages(db: Session, bot_token: str, group_id: int, o
+     vk_settings = db.exec(select(VkSettings)).first()
+     parser_enabled = vk_settings.vk_parser_enabled if vk_settings else False
+     parser_phrase = vk_settings.vk_parser_phrase if vk_settings else "здравствуйте! Ваш заказ {order_id} принят и мы приступили к его приготовлению"
++    parser_mask = vk_settings.vk_parser_mask if vk_settings else None
++    ignored_ids_str = vk_settings.vk_parser_ignored_ids if vk_settings else None
+ 
+     total_convs_processed = 0
+     total_matches_found = 0
+@@ -273,6 +366,8 @@ async def scan_historical_messages(db: Session, bot_token: str, group_id: int, o
+                     peer_id = item.get("conversation", {}).get("peer", {}).get("id")
+                     if not peer_id:
+                         continue
++                    if peer_id and is_ignored_vk_id(peer_id, ignored_ids_str):
++                        continue
+ 
+                     # 2. Для каждой беседы сканируем историю
+                     hist_offset = 0
+@@ -300,8 +395,12 @@ async def scan_historical_messages(db: Session, bot_token: str, group_id: int, o
+                             text = msg.get("text")
+                             if not text:
+                                 continue
++                            
++                            from_id = msg.get("from_id", 0)
++                            if from_id and is_ignored_vk_id(from_id, ignored_ids_str):
++                                continue
+                                 
+-                            order_id = extract_order_id_from_text(text, parser_enabled, parser_phrase)
++                            order_id = extract_order_id_from_text(text, parser_enabled, parser_phrase, parser_mask)
+                             if order_id:
+                                 # Пытаемся привязать
+                                 if await link_vk_user_to_order(db, peer_id, order_id, source="parser_history"):
+@@ -363,7 +462,7 @@ async def scan_historical_messages(db: Session, bot_token: str, group_id: int, o
+         return {"error": str(e), "conversations_processed": total_convs_processed}
+ 
+ 
+-async def handle_activity(event_type: str, obj: Dict[str, Any], db: Session, bot_token: str | None):
++async def handle_activity(event_type: str, obj: Dict[str, Any], db: Session, bot_token: str | None, group_id: Optional[int] = None):
+     # Example logic for activity points
+     vk_id = obj.get("liker_id") or obj.get("from_id")
+     if not vk_id:
+@@ -414,13 +513,88 @@ async def handle_activity(event_type: str, obj: Dict[str, Any], db: Session, bot
+         )
+ 
+ 
+-async def send_vk_message(vk_id: int, message: str, bot_token: str | None = None):
++async def upload_vk_photo(bot_token: str, image_path: str, peer_id: int) -> Optional[str]:
++    """
++    Загружает изображение (локальный путь или URL) на сервера VK и возвращает attachment.
++    """
++    import os
++    import httpx
++    import tempfile
++    
++    temp_file = None
++    try:
++        # Если это URL, скачиваем во временный файл
++        if image_path.startswith("http://") or image_path.startswith("https://"):
++            async with httpx.AsyncClient(timeout=30.0) as client:
++                resp = await client.get(image_path)
++                if resp.status_code == 200:
++                    temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".jpg")
++                    temp_file.write(resp.content)
++                    temp_file.close()
++                    image_path = temp_file.name
++                else:
++                    return None
++
++        if not os.path.exists(image_path):
++            return None
++
++        # 1. Получаем upload_url
++        url = "https://api.vk.com/method/photos.getMessagesUploadServer"
++        params = {"access_token": bot_token, "v": "5.131", "peer_id": peer_id}
++        async with httpx.AsyncClient() as client:
++            res = await client.get(url, params=params)
++            data = res.json()
++            if "response" not in data:
++                return None
++            upload_url = data["response"]["upload_url"]
++
++            # 2. Загружаем файл
++            with open(image_path, "rb") as f:
++                res_upload = await client.post(upload_url, files={"photo": f})
++                upload_data = res_upload.json()
++
++            # 3. Сохраняем фото
++            save_url = "https://api.vk.com/method/photos.saveMessagesPhoto"
++            save_params = {
++                "access_token": bot_token,
++                "v": "5.131",
++                "photo": upload_data["photo"],
++                "server": upload_data["server"],
++                "hash": upload_data["hash"]
++            }
++            res_save = await client.post(save_url, data=save_params)
++            save_data = res_save.json()
++            
++            if "response" not in save_data or len(save_data["response"]) == 0:
++                return None
++            
++            photo_info = save_data["response"][0]
++            return f"photo{photo_info['owner_id']}_{photo_info['id']}"
++            
++    except Exception as e:
++        print(f"Error uploading VK photo: {e}")
++        return None
++    finally:
++        if temp_file:
++            try:
++                os.unlink(temp_file.name)
++            except:
++                pass
++
++async def send_vk_message(
++    vk_id: int, 
++    message: str, 
++    bot_token: str | None = None,
++    image_path: str | None = None,
++    keyboard: str | dict | list | None = None
++):
+     if not bot_token:
+         print("VK_BOT_TOKEN is not configured")
+         return False
+         
+     url = "https://api.vk.com/method/messages.send"
+     import random
++    import json
+     
+     params = {
+         "user_id": vk_id,
+@@ -430,6 +604,19 @@ async def send_vk_message(vk_id: int, message: str, bot_token: str | None = None
+         "v": "5.131"
+     }
+     
++    # 1. Обработка картинки
++    if image_path:
++        attachment = await upload_vk_photo(bot_token, image_path, vk_id)
++        if attachment:
++            params["attachment"] = attachment
++            
++    # 2. Обработка клавиатуры
++    if keyboard:
++        if isinstance(keyboard, (dict, list)):
++            params["keyboard"] = json.dumps(keyboard, ensure_ascii=False)
++        elif isinstance(keyboard, str) and keyboard.strip():
++            params["keyboard"] = keyboard
++            
+     async with httpx.AsyncClient() as client:
+         try:
+             response = await client.post(url, data=params)
+@@ -437,7 +624,8 @@ async def send_vk_message(vk_id: int, message: str, bot_token: str | None = None
+             if "error" in data:
+                 print(f"VK API Error: {data['error']}")
+                 return False
+-            return True
++            # Возвращаем message_id (response - это ID отправленного сообщения)
++            return data.get("response") or True
+         except Exception as e:
+             print(f"Failed to send VK message: {e}")
+             return False
+@@ -455,27 +643,53 @@ async def send_guest_order_notification(db: Session, order: Order, event_type: s
+             return
+ 
+         settings = vk_settings.vk_notification_settings
+-        bot_token = vk_settings.vk_bot_token
+-        if not bot_token:
+-            return
+ 
+         # 2. Ищем привязанного пользователя ВК
+-        # Сначала по vk_user_id в клиенте, если есть
+-        vk_id = None
++        vk_user = None
+         if order.customer_id:
+             customer = db.exec(select(Customer).where(Customer.id == order.customer_id)).first()
+             if customer and customer.vk_user_id:
+-                vk_id = customer.vk_user_id
++                vk_user = db.exec(select(VkUser).where(VkUser.vk_id == customer.vk_user_id)).first()
+         
+         # Если не нашли в клиенте, ищем в VkUser по телефону
+-        if not vk_id and order.customer_phone:
++        if not vk_user and order.customer_phone:
+             vk_user = db.exec(select(VkUser).where(VkUser.phone == order.customer_phone)).first()
+-            if vk_user and vk_user.is_linked:
+-                vk_id = vk_user.vk_id
+ 
+-        if not vk_id:
++        if not vk_user or not vk_user.is_linked:
++            return
++
++        # Проверяем разрешения и блокировки
++        if vk_user.is_blocked:
++            logger.info(f"VK notification to {vk_user.vk_id} blocked by admin")
++            return
++        if not vk_user.notifications_enabled:
++            logger.info(f"VK notification to {vk_user.vk_id} disabled in settings")
++            return
++        if not vk_user.is_subscribed:
++            logger.info(f"VK notification to {vk_user.vk_id} skipped: guest is not subscribed to bot")
++            return
++
++        # 2.5. Определяем токен бота
++        bot_token = None
++        if vk_user.vk_group_id:
++            bot = db.exec(select(VkBotConnection).where(VkBotConnection.vk_group_id == vk_user.vk_group_id, VkBotConnection.is_active == True)).first()
++            if bot:
++                bot_token = bot.vk_bot_token
++                
++        if not bot_token:
++            main_bot = db.exec(select(VkBotConnection).where(VkBotConnection.is_main == True, VkBotConnection.is_active == True)).first()
++            if main_bot:
++                bot_token = main_bot.vk_bot_token
++                
++        if not bot_token:
++            bot_token = vk_settings.vk_bot_token
++
++        if not bot_token:
++            logger.warning(f"No active VK bot connection found to send notification to user {vk_user.vk_id}")
+             return
+ 
++        vk_id = vk_user.vk_id
++
+         # 3. Определяем категорию настроек (delivery или pickup)
+         order_type_key = "delivery" if order.order_type == "Доставка" else "pickup"
+         type_settings = settings.get(order_type_key, {})
+@@ -550,3 +764,405 @@ async def send_guest_order_notification(db: Session, order: Order, event_type: s
+ 
+     except Exception as e:
+         logger.error(f"Error sending guest VK notification: {e}")
++
++
++async def handle_bot_commands_and_fsm(vk_id: int, text: str, db: Session, bot_token: str | None, group_id: Optional[int] = None) -> bool:
++    """
++    Обрабатывает входящие сообщения ВКонтакте согласно FSM и настроенным командам ботов.
++    Возвращает True, если событие обработано ботом (дальнейший парсинг заказа не требуется).
++    """
++    try:
++        from app.services.iiko_service import iiko_service
++        now = utc_now()
++        
++        # 1. Проверяем наличие активного FSM-состояния пользователя
++        user_state = db.exec(
++            select(BotUserState)
++            .where(BotUserState.messenger == "vk")
++            .where(BotUserState.peer_id == str(vk_id))
++        ).first()
++
++        if user_state:
++            # Состояние ожидания комментария к отзыву
++            if user_state.state == "awaiting_feedback_comment":
++                order_id = user_state.context_data.get("order_id")
++                rating = user_state.context_data.get("rating")
++                
++                vk_user = db.exec(select(VkUser).where(VkUser.vk_id == vk_id)).first()
++                customer_id = None
++                if vk_user and vk_user.phone:
++                    customer = db.exec(select(Customer).where(Customer.phone == vk_user.phone)).first()
++                    if customer:
++                        customer_id = customer.id
++                
++                review = db.exec(select(OrderReview).where(OrderReview.order_id == order_id)).first()
++                if not review:
++                    review = OrderReview(
++                        order_id=order_id,
++                        customer_id=customer_id,
++                        rating=rating,
++                        comment=text
++                    )
++                else:
++                    review.comment = text
++                    review.customer_id = customer_id or review.customer_id
++                    
++                db.add(review)
++                db.delete(user_state)
++                db.commit()
++                
++                await send_vk_message(
++                    vk_id=vk_id,
++                    message="Спасибо за ваш отзыв! Он поможет нам сделать наш сервис еще лучше! ❤️",
++                    bot_token=bot_token
++                )
++                return True
++
++            cmd = db.get(BotCommand, user_state.command_id) if user_state.command_id else None
++            
++            # Состояние А: Ожидание ввода телефона
++            if user_state.state == "awaiting_phone":
++                phone_digits = "".join(c for c in text if c.isdigit())
++                
++                # Приведение к формату 7********** (11 цифр)
++                if len(phone_digits) == 11 and (phone_digits.startswith("8") or phone_digits.startswith("7")):
++                    phone_digits = "7" + phone_digits[1:]
++                elif len(phone_digits) == 10 and phone_digits.startswith("9"):
++                    phone_digits = "7" + phone_digits
++                
++                # Валидация
++                if len(phone_digits) != 11 or not phone_digits.startswith("7"):
++                    await send_vk_message(
++                        vk_id=vk_id,
++                        message="Пожалуйста, введите корректный номер телефона (11 цифр, начиная с 7 или 8), например: 79991234567.",
++                        bot_token=bot_token
++                    )
++                    return True
++                
++                # Поиск в базе гостей
++                db_phone = f"+{phone_digits}"
++                customer = db.exec(select(Customer).where(Customer.phone == db_phone)).first()
++                
++                if customer:
++                    # А1. Связываем аккаунт ВК с найденным гостем
++                    vk_user = db.exec(select(VkUser).where(VkUser.vk_id == vk_id)).first()
++                    vk_profile = await fetch_vk_user_info(vk_id, bot_token) if bot_token else {}
++                    
++                    if not vk_user:
++                        vk_user = VkUser(
++                            vk_id=vk_id,
++                            vk_group_id=group_id,
++                            phone=customer.phone,
++                            iiko_customer_id=str(customer.id),
++                            first_name=vk_profile.get("first_name") or customer.name,
++                            last_name=vk_profile.get("last_name"),
++                            photo_50=vk_profile.get("photo_50"),
++                            screen_name=vk_profile.get("domain"),
++                            is_linked=True,
++                            linked_at=now,
++                            linking_source="bot_phone_link"
++                        )
++                    else:
++                        vk_user.vk_group_id = group_id or vk_user.vk_group_id
++                        vk_user.phone = customer.phone
++                        vk_user.iiko_customer_id = str(customer.id)
++                        vk_user.first_name = vk_profile.get("first_name") or vk_user.first_name or customer.name
++                        vk_user.last_name = vk_profile.get("last_name") or vk_user.last_name
++                        vk_user.photo_50 = vk_profile.get("photo_50") or vk_user.photo_50
++                        vk_user.screen_name = vk_profile.get("domain") or vk_user.screen_name
++                        vk_user.is_linked = True
++                        vk_user.linked_at = now
++                        vk_user.linking_source = "bot_phone_link"
++                    
++                    db.add(vk_user)
++                    customer.vk_user_id = vk_id
++                    db.add(customer)
++                    db.commit()
++                    
++                    # Обновляем бонусный баланс гостя в iiko
++                    try:
++                        balance_info = await iiko_service.get_customer_balance(customer.phone)
++                        customer.bonus_points = balance_info.get("balance", 0)
++                        db.add(customer)
++                        db.commit()
++                    except Exception as ex:
++                        logger.error(f"Error syncing bonus balance during bot link: {ex}")
++                        
++                    # Отправляем успешный баланс
++                    balance_template = cmd.balance_text if cmd and cmd.balance_text else "Ваш бонусный баланс: {balance} бонусов."
++                    msg_text = balance_template.replace("{balance}", str(int(customer.bonus_points)))
++                    await send_vk_message(vk_id=vk_id, message=msg_text, bot_token=bot_token)
++                    
++                    # Удаляем состояние
++                    db.delete(user_state)
++                    db.commit()
++                    return True
++                else:
++                    # А2. Номер не найден, предлагаем регистрацию
++                    user_state.state = "awaiting_register_confirm"
++                    user_state.context_data = {"phone": phone_digits}
++                    db.add(user_state)
++                    db.commit()
++                    
++                    phone_not_found = cmd.phone_not_found_text if cmd and cmd.phone_not_found_text else "К сожалению, данный номер в базе не определен."
++                    reg_confirm = cmd.register_confirm_text if cmd and cmd.register_confirm_text else "Хотите зарегистрироваться в нашей бонусной системе? Ответьте Да или Нет."
++                    await send_vk_message(
++                        vk_id=vk_id,
++                        message=f"{phone_not_found}\n{reg_confirm}",
++                        bot_token=bot_token
++                    )
++                    return True
++            
++            # Состояние Б: Ожидание подтверждения регистрации (Да / Нет)
++            elif user_state.state == "awaiting_register_confirm":
++                reply = text.strip().lower()
++                
++                if reply == "да":
++                    # Регистрация гостя
++                    phone_digits = user_state.context_data.get("phone")
++                    db_phone = f"+{phone_digits}"
++                    
++                    vk_profile = await fetch_vk_user_info(vk_id, bot_token) if bot_token else {}
++                    first_name = vk_profile.get("first_name") or "Гость"
++                    last_name = vk_profile.get("last_name") or ""
++                    
++                    # 1. Создаем в iiko
++                    iiko_payload = {
++                        "phone": db_phone,
++                        "name": first_name,
++                        "surName": last_name,
++                        "sex": 0
++                    }
++                    
++                    res_id = None
++                    try:
++                        result = await iiko_service.create_or_update_customer(iiko_payload)
++                        res_id = result.get("id") or result.get("customer", {}).get("id")
++                    except Exception as ex:
++                        logger.error(f"Failed to create customer in iiko during bot register: {ex}")
++                    
++                    # 2. Создаем Customer локально
++                    new_customer = Customer(
++                        phone=db_phone,
++                        name=first_name,
++                        surname=last_name,
++                        iiko_customer_id=res_id,
++                        vk_user_id=vk_id,
++                        bonus_points=0,
++                        created_at=now,
++                        updated_at=now
++                    )
++                    db.add(new_customer)
++                    db.commit()
++                    db.refresh(new_customer)
++                    
++                    # 3. Обновляем/создаем VkUser
++                    vk_user = db.exec(select(VkUser).where(VkUser.vk_id == vk_id)).first()
++                    if not vk_user:
++                        vk_user = VkUser(
++                            vk_id=vk_id,
++                            vk_group_id=group_id,
++                            phone=db_phone,
++                            iiko_customer_id=res_id,
++                            first_name=first_name,
++                            last_name=last_name,
++                            photo_50=vk_profile.get("photo_50"),
++                            screen_name=vk_profile.get("domain"),
++                            is_linked=True,
++                            linked_at=now,
++                            linking_source="bot_register"
++                        )
++                    else:
++                        vk_user.vk_group_id = group_id or vk_user.vk_group_id
++                        vk_user.phone = db_phone
++                        vk_user.iiko_customer_id = res_id
++                        vk_user.first_name = first_name
++                        vk_user.last_name = last_name
++                        vk_user.photo_50 = vk_profile.get("photo_50") or vk_user.photo_50
++                        vk_user.screen_name = vk_profile.get("domain") or vk_user.screen_name
++                        vk_user.is_linked = True
++                        vk_user.linked_at = now
++                        vk_user.linking_source = "bot_register"
++                    db.add(vk_user)
++                    db.commit()
++                    
++                    # Отправляем сообщение об успешной регистрации
++                    success_template = cmd.register_success_text if cmd and cmd.register_success_text else "Вы успешно зарегистрированы в нашей бонусной системе! Ваш бонусный баланс: {balance} бонусов."
++                    msg_text = success_template.replace("{balance}", "0")
++                    await send_vk_message(vk_id=vk_id, message=msg_text, bot_token=bot_token)
++                    
++                    # Удаляем состояние
++                    db.delete(user_state)
++                    db.commit()
++                    return True
++                    
++                elif reply == "нет":
++                    await send_vk_message(
++                        vk_id=vk_id,
++                        message="Регистрация отменена. Вы можете запросить баланс позже, написав команду заново.",
++                        bot_token=bot_token
++                    )
++                    # Удаляем состояние
++                    db.delete(user_state)
++                    db.commit()
++                    return True
++                else:
++                    await send_vk_message(
++                        vk_id=vk_id,
++                        message="Пожалуйста, ответьте Да или Нет.",
++                        bot_token=bot_token
++                    )
++                    return True
++        
++        # 2. Если FSM-состояния нет, ищем триггерную команду
++        commands = db.exec(select(BotCommand).where(BotCommand.is_active == True)).all()
++        matching_cmd = None
++        
++        cleaned_text = text.strip().lower()
++        for cmd in commands:
++            if "vk" in cmd.channels and cmd.trigger_phrase.strip().lower() == cleaned_text:
++                matching_cmd = cmd
++                break
++                
++        if matching_cmd:
++            if matching_cmd.action_type == "custom_text":
++                # Кастомный ответ
++                if matching_cmd.response_text:
++                    await send_vk_message(vk_id=vk_id, message=matching_cmd.response_text, bot_token=bot_token)
++                return True
++                
++            elif matching_cmd.action_type == "get_balance":
++                # Логика бонусного баланса
++                vk_user = db.exec(select(VkUser).where(VkUser.vk_id == vk_id)).first()
++                
++                # Если пользователь привязан и есть телефон
++                if vk_user and vk_user.is_linked and vk_user.phone:
++                    points = 0
++                    try:
++                        balance_info = await iiko_service.get_customer_balance(vk_user.phone)
++                        points = balance_info.get("balance", 0)
++                        
++                        customer = db.exec(select(Customer).where(Customer.phone == vk_user.phone)).first()
++                        if customer:
++                            customer.bonus_points = points
++                            db.add(customer)
++                            db.commit()
++                    except Exception as ex:
++                        logger.error(f"Error syncing bonus balance for VK user {vk_id}: {ex}")
++                        customer = db.exec(select(Customer).where(Customer.phone == vk_user.phone)).first()
++                        if customer:
++                            points = customer.bonus_points
++                            
++                    balance_template = matching_cmd.balance_text if matching_cmd.balance_text else "Ваш бонусный баланс: {balance} бонусов."
++                    msg_text = balance_template.replace("{balance}", str(int(points)))
++                    await send_vk_message(vk_id=vk_id, message=msg_text, bot_token=bot_token)
++                    return True
++                else:
++                    # Если не привязан, создаем состояние FSM и запрашиваем телефон
++                    new_state = BotUserState(
++                        messenger="vk",
++                        peer_id=str(vk_id),
++                        state="awaiting_phone",
++                        command_id=matching_cmd.id,
++                        context_data={}
++                    )
++                    db.add(new_state)
++                    db.commit()
++                    
++                    req_phone = matching_cmd.request_phone_text if matching_cmd.request_phone_text else "Ваш аккаунт не привязан к номеру телефона. Пожалуйста, отправьте ваш номер телефона (в формате 7**********) для привязки к карте гостя."
++                    await send_vk_message(vk_id=vk_id, message=req_phone, bot_token=bot_token)
++                    return True
++                    
++    except Exception as ex:
++        logger.error(f"Error handling bot commands and FSM for VK user {vk_id}: {ex}")
++        
++    return False
++
++
++async def handle_rate_order_payload(vk_id: int, payload: dict, db: Session, bot_token: str | None, group_id: Optional[int] = None):
++    try:
++        order_id = payload.get("order_id")
++        rating = int(payload.get("rating", 0))
++        
++        vk_user = db.exec(select(VkUser).where(VkUser.vk_id == vk_id)).first()
++        customer_id = None
++        if vk_user and vk_user.phone:
++            customer = db.exec(select(Customer).where(Customer.phone == vk_user.phone)).first()
++            if customer:
++                customer_id = customer.id
++                
++        # Создаем или обновляем отзыв OrderReview
++        review = db.exec(select(OrderReview).where(OrderReview.order_id == order_id)).first()
++        if not review:
++            review = OrderReview(
++                order_id=order_id,
++                customer_id=customer_id,
++                rating=rating
++            )
++        else:
++            review.rating = rating
++            review.customer_id = customer_id or review.customer_id
++            
++        db.add(review)
++        
++        user_state = db.exec(
++            select(BotUserState)
++            .where(BotUserState.messenger == "vk")
++            .where(BotUserState.peer_id == str(vk_id))
++        ).first()
++        
++        if user_state:
++            user_state.state = "awaiting_feedback_comment"
++            user_state.context_data = {"order_id": order_id, "rating": rating}
++            db.add(user_state)
++        else:
++            new_state = BotUserState(
++                messenger="vk",
++                peer_id=str(vk_id),
++                state="awaiting_feedback_comment",
++                context_data={"order_id": order_id, "rating": rating}
++            )
++            db.add(new_state)
++            
++        db.commit()
++        
++        await send_vk_message(
++            vk_id=vk_id,
++            message=f"Вы поставили оценку {rating}⭐.\nПожалуйста, напишите в ответном сообщении ваш комментарий к заказу (что вам понравилось или что нам стоит улучшить). Ваше мнение очень важно для нас!",
++            bot_token=bot_token
++        )
++    except Exception as e:
++        logger.error(f"Error handling rate order payload: {e}")
++        db.rollback()
++
++
++async def handle_message_event(obj: Dict[str, Any], db: Session, bot_token: str | None, group_id: Optional[int] = None):
++    vk_id = obj.get("user_id")
++    payload = obj.get("payload")
++    event_id = obj.get("event_id")
++    peer_id = obj.get("peer_id")
++    
++    if not vk_id or not payload:
++        return
++        
++    try:
++        import json
++        if isinstance(payload, str):
++            payload = json.loads(payload)
++            
++        if isinstance(payload, dict) and payload.get("action") == "rate_order":
++            await handle_rate_order_payload(vk_id, payload, db, bot_token, group_id)
++            
++            if event_id and bot_token:
++                url = "https://api.vk.com/method/messages.sendMessageEventAnswer"
++                params = {
++                    "event_id": event_id,
++                    "user_id": vk_id,
++                    "peer_id": peer_id or vk_id,
++                    "access_token": bot_token,
++                    "v": "5.131"
++                }
++                async with httpx.AsyncClient() as client:
++                    await client.post(url, data=params)
++    except Exception as e:
++        logger.error(f"Error handling message_event: {e}")

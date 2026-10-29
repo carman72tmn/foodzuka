@@ -1,0 +1,25 @@
+{
+  "name": "Vezuroll Admin",
+  "short_name": "Vezuroll Admin",
+  "description": "Панель администратора Vezuroll",
+  "start_url": "/admin/",
+  "scope": "/admin/",
+  "display": "standalone",
+  "background_color": "#ffffff",
+  "theme_color": "#696cff",
+  "orientation": "portrait",
+  "icons": [
+    {
+      "src": "/admin/pwa-192.png",
+      "type": "image/png",
+      "sizes": "192x192",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "/admin/pwa-512.png",
+      "type": "image/png",
+      "sizes": "512x512",
+      "purpose": "any"
+    }
+  ]
+}

@@ -3,28 +3,32 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlmodel import Session, select
 from app.core.database import get_session
 from app.models.mailing_cascade import MailingCascade, MailingCascadeStep
-from app.schemas import (
+from app.schemas.mailing_cascade import (
     MailingCascadeCreate, 
     MailingCascadeUpdate, 
     MailingCascadeResponse
 )
 from datetime import datetime, timezone
+from app.api.deps import require_permission
+from app.models.user import User
 
 router = APIRouter(prefix="/mailings/cascades", tags=["Mailing Cascades"])
 
-@router.get("/", response_model=List[MailingCascadeResponse])
-def get_cascades(db: Session = Depends(get_session)):
+@router.get("", response_model=List[MailingCascadeResponse])
+def get_cascades(db: Session = Depends(get_session), current_user: User = Depends(require_permission("mailings_cascades_view"))):
     """Получить список всех каскадов"""
     cascades = db.exec(select(MailingCascade).order_by(MailingCascade.id.desc())).all()
     return cascades
 
-@router.post("/", response_model=MailingCascadeResponse)
-def create_cascade(cascade: MailingCascadeCreate, db: Session = Depends(get_session)):
+@router.post("", response_model=MailingCascadeResponse)
+def create_cascade(cascade: MailingCascadeCreate, db: Session = Depends(get_session), current_user: User = Depends(require_permission("mailings_cascades_edit"))):
     """Создать новый каскад с шагами"""
     db_cascade = MailingCascade(
         name=cascade.name,
         trigger_event=cascade.trigger_event,
-        is_active=cascade.is_active
+        is_active=cascade.is_active,
+        order_type=cascade.order_type,
+        is_system=cascade.is_system
     )
     db.add(db_cascade)
     db.commit()
@@ -32,10 +36,13 @@ def create_cascade(cascade: MailingCascadeCreate, db: Session = Depends(get_sess
 
     # Добавляем шаги
     for i, step_data in enumerate(cascade.steps):
+        dump_data = step_data.model_dump()
+        if dump_data.get("priority") is None or dump_data.get("priority") == 0:
+            dump_data["priority"] = i
+            
         db_step = MailingCascadeStep(
-            **step_data.model_dump(),
-            cascade_id=db_cascade.id,
-            priority=i # Используем индекс как приоритет по умолчанию если не задан
+            **dump_data,
+            cascade_id=db_cascade.id
         )
         db.add(db_step)
     
@@ -44,15 +51,16 @@ def create_cascade(cascade: MailingCascadeCreate, db: Session = Depends(get_sess
     return db_cascade
 
 @router.get("/{cascade_id}", response_model=MailingCascadeResponse)
-def get_cascade(cascade_id: int, db: Session = Depends(get_session)):
+def get_cascade(cascade_id: int, db: Session = Depends(get_session), current_user: User = Depends(require_permission("mailings_cascades_view"))):
     """Получить детали каскада"""
     cascade = db.get(MailingCascade, cascade_id)
     if not cascade:
         raise HTTPException(status_code=404, detail="Cascade not found")
     return cascade
 
+@router.put("/{cascade_id}", response_model=MailingCascadeResponse)
 @router.patch("/{cascade_id}", response_model=MailingCascadeResponse)
-def update_cascade(cascade_id: int, cascade_data: MailingCascadeUpdate, db: Session = Depends(get_session)):
+def update_cascade(cascade_id: int, cascade_data: MailingCascadeUpdate, db: Session = Depends(get_session), current_user: User = Depends(require_permission("mailings_cascades_edit"))):
     """Обновить настройки каскада и его шаги"""
     db_cascade = db.get(MailingCascade, cascade_id)
     if not db_cascade:
@@ -64,10 +72,12 @@ def update_cascade(cascade_id: int, cascade_data: MailingCascadeUpdate, db: Sess
     if "name" in update_data: db_cascade.name = update_data["name"]
     if "trigger_event" in update_data: db_cascade.trigger_event = update_data["trigger_event"]
     if "is_active" in update_data: db_cascade.is_active = update_data["is_active"]
+    if "order_type" in update_data: db_cascade.order_type = update_data["order_type"]
+    if "is_system" in update_data: db_cascade.is_system = update_data["is_system"]
     
     db_cascade.updated_at = datetime.now(timezone.utc)
     
-    # Если переданы шаги - полностью заменяем их (проще для реализации в админке)
+    # Если переданы шаги - полностью заменяем их
     if "steps" in update_data:
         # Удаляем старые шаги
         for step in db_cascade.steps:
@@ -75,10 +85,12 @@ def update_cascade(cascade_id: int, cascade_data: MailingCascadeUpdate, db: Sess
         
         # Добавляем новые
         for i, step_data in enumerate(update_data["steps"]):
+            if step_data.get("priority") is None:
+                step_data["priority"] = i
+                
             db_step = MailingCascadeStep(
                 **step_data,
-                cascade_id=db_cascade.id,
-                priority=i
+                cascade_id=db_cascade.id
             )
             db.add(db_step)
             
@@ -88,7 +100,7 @@ def update_cascade(cascade_id: int, cascade_data: MailingCascadeUpdate, db: Sess
     return db_cascade
 
 @router.delete("/{cascade_id}")
-def delete_cascade(cascade_id: int, db: Session = Depends(get_session)):
+def delete_cascade(cascade_id: int, db: Session = Depends(get_session), current_user: User = Depends(require_permission("mailings_cascades_edit"))):
     """Удалить каскад"""
     cascade = db.get(MailingCascade, cascade_id)
     if not cascade:

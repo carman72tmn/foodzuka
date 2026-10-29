@@ -4,6 +4,8 @@ API эндпоинты для управления системными проц
 from typing import List
 from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, HTTPException, status
+from app.api.deps import require_permission
+from app.models.user import User
 from sqlmodel import Session, select
 from app.core.database import get_session
 from app.models.sync_log import SyncStatus
@@ -18,12 +20,12 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/system", tags=["System"])
 
-@router.get("/tasks", response_model=List[SyncStatus])
+@router.get("/tasks", response_model=List[SyncStatus], dependencies=[Depends(require_permission("system_tasks_view"))])
 def get_tasks(session: Session = Depends(get_session)):
     """Список всех фоновых задач"""
     return session.exec(select(SyncStatus).order_by(SyncStatus.updated_at.desc())).all()
 
-@router.post("/tasks/stop-all")
+@router.post("/tasks/stop-all", dependencies=[Depends(require_permission("system_tasks_edit"))])
 def stop_all_tasks(session: Session = Depends(get_session)):
     """Остановить все активные задачи"""
     running_tasks = session.exec(select(SyncStatus).where(SyncStatus.status == "running")).all()
@@ -47,7 +49,7 @@ def stop_all_tasks(session: Session = Depends(get_session)):
     session.commit()
     return {"status": "success", "stopped_count": count}
 
-@router.post("/tasks/cleanup")
+@router.post("/tasks/cleanup", dependencies=[Depends(require_permission("system_tasks_edit"))])
 def cleanup_tasks(session: Session = Depends(get_session)):
     """Очистить завершенные и ошибочные задачи"""
     to_delete = session.exec(
@@ -59,7 +61,7 @@ def cleanup_tasks(session: Session = Depends(get_session)):
     session.commit()
     return {"status": "success", "deleted_count": count}
 
-@router.post("/tasks/run")
+@router.post("/tasks/run", dependencies=[Depends(require_permission("system_tasks_edit"))])
 def run_task(task_type: str, params: dict = {}, session: Session = Depends(get_session)):
     """Запуск новой задачи вручную"""
     # Создаем запись в SyncStatus
@@ -112,7 +114,7 @@ def run_task(task_type: str, params: dict = {}, session: Session = Depends(get_s
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.post("/tasks/{task_id}/pause")
+@router.post("/tasks/{task_id}/pause", dependencies=[Depends(require_permission("system_tasks_edit"))])
 def toggle_task_pause(task_id: int, session: Session = Depends(get_session)):
     """Переключение паузы задачи"""
     sync_status = session.get(SyncStatus, task_id)
@@ -125,7 +127,7 @@ def toggle_task_pause(task_id: int, session: Session = Depends(get_session)):
     session.refresh(sync_status)
     return sync_status
 
-@router.post("/tasks/{task_id}/cancel")
+@router.post("/tasks/{task_id}/cancel", dependencies=[Depends(require_permission("system_tasks_edit"))])
 def cancel_task(task_id: int, session: Session = Depends(get_session)):
     """Отмена задачи"""
     sync_status = session.get(SyncStatus, task_id)
@@ -146,7 +148,7 @@ def cancel_task(task_id: int, session: Session = Depends(get_session)):
     session.refresh(sync_status)
     return sync_status
 
-@router.post("/tasks/{task_id}/refresh")
+@router.post("/tasks/{task_id}/refresh", dependencies=[Depends(require_permission("system_tasks_edit"))])
 def refresh_task_status(task_id: int, session: Session = Depends(get_session)):
     """Принудительное обновление статуса задачи из Celery"""
     sync_status = session.get(SyncStatus, task_id)
@@ -174,7 +176,7 @@ def refresh_task_status(task_id: int, session: Session = Depends(get_session)):
     
     return sync_status
 
-@router.delete("/tasks/{task_id}")
+@router.delete("/tasks/{task_id}", dependencies=[Depends(require_permission("system_tasks_edit"))])
 def delete_task_record(task_id: int, session: Session = Depends(get_session)):
     """Удаление записи о задаче"""
     sync_status = session.get(SyncStatus, task_id)
@@ -185,7 +187,7 @@ def delete_task_record(task_id: int, session: Session = Depends(get_session)):
     session.commit()
     return {"status": "success"}
 
-@router.get("/files")
+@router.get("/files", dependencies=[Depends(require_permission("system_tasks_view"))])
 def list_import_files():
     """Список файлов импорта"""
     temp_dir = "temp_imports"
@@ -203,7 +205,7 @@ def list_import_files():
             })
     return files
 
-@router.delete("/files/{filename}")
+@router.delete("/files/{filename}", dependencies=[Depends(require_permission("system_tasks_edit"))])
 def delete_import_file(filename: str):
     """Удаление файла импорта"""
     temp_dir = "temp_imports"
@@ -223,12 +225,12 @@ def delete_import_file(filename: str):
 
 # --- Управление запланированными задачами (APScheduler) ---
 
-@router.get("/scheduled-tasks", response_model=List[ScheduledTask])
+@router.get("/scheduled-tasks", response_model=List[ScheduledTask], dependencies=[Depends(require_permission("system_tasks_view"))])
 def get_scheduled_tasks(session: Session = Depends(get_session)):
     """Список всех запланированных задач"""
     return session.exec(select(ScheduledTask).order_by(ScheduledTask.id)).all()
 
-@router.post("/scheduled-tasks", response_model=ScheduledTask)
+@router.post("/scheduled-tasks", response_model=ScheduledTask, dependencies=[Depends(require_permission("system_tasks_edit"))])
 def create_scheduled_task(task: ScheduledTask, session: Session = Depends(get_session)):
     """Создание новой запланированной задачи"""
     session.add(task)
@@ -240,7 +242,7 @@ def create_scheduled_task(task: ScheduledTask, session: Session = Depends(get_se
         
     return task
 
-@router.put("/scheduled-tasks/{task_id}", response_model=ScheduledTask)
+@router.put("/scheduled-tasks/{task_id}", response_model=ScheduledTask, dependencies=[Depends(require_permission("system_tasks_edit"))])
 def update_scheduled_task(task_id: int, updated_task: dict, session: Session = Depends(get_session)):
     """Обновление запланированной задачи"""
     task = session.get(ScheduledTask, task_id)
@@ -271,7 +273,7 @@ def update_scheduled_task(task_id: int, updated_task: dict, session: Session = D
         
     return task
 
-@router.post("/scheduled-tasks/{task_id}/toggle")
+@router.post("/scheduled-tasks/{task_id}/toggle", dependencies=[Depends(require_permission("system_tasks_edit"))])
 def toggle_scheduled_task(task_id: int, session: Session = Depends(get_session)):
     """Включение/выключение задачи"""
     task = session.get(ScheduledTask, task_id)
@@ -294,7 +296,7 @@ def toggle_scheduled_task(task_id: int, session: Session = Depends(get_session))
                 
     return {"status": "success", "is_active": task.is_active}
 
-@router.post("/scheduled-tasks/{task_id}/run")
+@router.post("/scheduled-tasks/{task_id}/run", dependencies=[Depends(require_permission("system_tasks_edit"))])
 def run_scheduled_task_now(task_id: int, session: Session = Depends(get_session)):
     """Мгновенный запуск задачи"""
     task = session.get(ScheduledTask, task_id)
@@ -313,7 +315,7 @@ def run_scheduled_task_now(task_id: int, session: Session = Depends(get_session)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-@router.delete("/scheduled-tasks/{task_id}")
+@router.delete("/scheduled-tasks/{task_id}", dependencies=[Depends(require_permission("system_tasks_edit"))])
 def delete_scheduled_task(task_id: int, session: Session = Depends(get_session)):
     """Удаление запланированной задачи"""
     task = session.get(ScheduledTask, task_id)
@@ -330,9 +332,44 @@ def delete_scheduled_task(task_id: int, session: Session = Depends(get_session))
     session.commit()
     return {"status": "success"}
 
-@router.get("/server-status")
+def _docker_api(method: str, path: str, body=None):
+    """Вспомогательный метод для выполнения запросов к Docker API через unix socket"""
+    socket_path = "/var/run/docker.sock"
+    if not os.path.exists(socket_path):
+        return 503, {"error": "Docker socket not available"}
+
+    import http.client
+    import socket
+
+    class UnixConn(http.client.HTTPConnection):
+        def connect(self):
+            self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            self.sock.settimeout(20)
+            self.sock.connect(socket_path)
+
+    try:
+        conn = UnixConn("localhost")
+        headers = {"Host": "localhost"}
+        payload = json.dumps(body) if body else None
+        if payload:
+            headers["Content-Type"] = "application/json"
+        conn.request(method, path, body=payload, headers=headers)
+        res = conn.getresponse()
+        raw = res.read().decode("utf-8")
+        conn.close()
+        try:
+            parsed = json.loads(raw)
+        except Exception:
+            parsed = raw
+        return res.status, parsed
+    except Exception as e:
+        logger.error(f"Docker API error: {e}")
+        return 500, {"error": str(e)}
+
+
+@router.get("/server-status", dependencies=[Depends(require_permission("system_server_view"))])
 def get_server_status():
-    """Возвращает метрики нагрузки сервера: CPU, RAM, Disk"""
+    """Возвращает метрики нагрузки сервера: CPU, RAM, Swap, Disk и размер базы данных"""
     try:
         import psutil
     except ImportError:
@@ -344,9 +381,24 @@ def get_server_status():
         
         # Оперативная память
         mem = psutil.virtual_memory()
+
+        # Файл подкачки (SWAP)
+        swap = psutil.swap_memory()
         
         # Диск (корневой каталог)
         disk = psutil.disk_usage('/')
+
+        # Размер БД PostgreSQL
+        db_size = "N/A"
+        try:
+            from app.core.database import engine
+            from sqlalchemy import text
+            with engine.connect() as conn:
+                row = conn.execute(text("SELECT pg_size_pretty(pg_database_size(current_database()));")).fetchone()
+                if row:
+                    db_size = row[0]
+        except Exception as e:
+            logger.warning(f"Could not get db_size: {e}")
         
         return {
             "status": "success",
@@ -359,13 +411,187 @@ def get_server_status():
                 "free": mem.available,
                 "percent": mem.percent
             },
+            "swap": {
+                "total": swap.total,
+                "used": swap.used,
+                "free": swap.free,
+                "percent": swap.percent
+            },
             "disk": {
                 "total": disk.total,
                 "used": disk.used,
                 "free": disk.free,
                 "percent": disk.percent
-            }
+            },
+            "db_size": db_size
         }
     except Exception as e:
         logger.error(f"Error getting server status: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/server-containers", dependencies=[Depends(require_permission("system_server_view"))])
+def get_server_containers():
+    """Возвращает список запущенных Docker контейнеров с их статусами"""
+    status_code, data = _docker_api("GET", "/containers/json?all=1")
+    if status_code != 200 or not isinstance(data, list):
+        return {"status": "warning", "message": "Docker socket недоступен", "containers": []}
+
+    containers = []
+    for item in data:
+        name = item.get("Names", [""])[0].lstrip("/") if item.get("Names") else "unknown"
+        # Фильтруем служебные контейнеры проекта
+        containers.append({
+            "id": item.get("Id", "")[:12],
+            "name": name,
+            "image": item.get("Image", ""),
+            "state": item.get("State", ""),
+            "status": item.get("Status", ""),
+            "created": item.get("Created", 0)
+        })
+    # Сортируем: сначала running, затем по имени
+    containers.sort(key=lambda c: (0 if c["state"] == "running" else 1, c["name"]))
+    return {"status": "success", "containers": containers}
+
+
+@router.post("/server/cleanup-disk", dependencies=[Depends(require_permission("system_server_view"))])
+def cleanup_disk(session: Session = Depends(get_session)):
+    """Освобождение лишнего места: удаление старых логов в БД (>30 дней), очистка build cache Docker и временных образов"""
+    details = []
+    try:
+        import psutil
+        disk_before = psutil.disk_usage('/')
+    except Exception:
+        disk_before = None
+
+    # 1. Очистка старых логов в БД (> 30 дней)
+    try:
+        from sqlalchemy import text
+        res_logs = session.execute(text("DELETE FROM system_logs WHERE created_at < NOW() - INTERVAL '30 days' AND level IN ('INFO', 'WARNING');"))
+        res_vk = session.execute(text("DELETE FROM vk_webhook_logs WHERE created_at < NOW() - INTERVAL '30 days';"))
+        session.commit()
+        deleted_logs = (res_logs.rowcount or 0) + (res_vk.rowcount or 0)
+        details.append(f"Удалено {deleted_logs} устаревших логов из БД")
+    except Exception as e:
+        logger.error(f"Cleanup DB logs error: {e}")
+        details.append(f"Логи БД: {e}")
+
+    # 2. Очистка build cache Docker
+    try:
+        s, d = _docker_api("POST", "/build/prune?keep-storage=524288000")
+        if s == 200 and isinstance(d, dict):
+            reclaimed = d.get("SpaceReclaimed", 0)
+            details.append(f"Очищен кэш сборки Docker: {round(reclaimed / (1024 * 1024), 1)} МБ")
+        else:
+            s2, d2 = _docker_api("POST", "/build/prune")
+            if s2 == 200 and isinstance(d2, dict):
+                reclaimed = d2.get("SpaceReclaimed", 0)
+                details.append(f"Очищен кэш сборки Docker: {round(reclaimed / (1024 * 1024), 1)} МБ")
+    except Exception as e:
+        logger.error(f"Cleanup Docker build error: {e}")
+
+    # 3. Очистка dangling образов
+    try:
+        s_img, d_img = _docker_api("POST", "/images/prune?filters=%7B%22dangling%22%3A%5B%22true%22%5D%7D")
+        if s_img == 200 and isinstance(d_img, dict):
+            reclaimed_img = d_img.get("SpaceReclaimed", 0)
+            if reclaimed_img > 0:
+                details.append(f"Удалены временные образы Docker: {round(reclaimed_img / (1024 * 1024), 1)} МБ")
+    except Exception as e:
+        logger.error(f"Cleanup Docker images error: {e}")
+
+    try:
+        disk_after = psutil.disk_usage('/')
+        freed_mb = round((disk_after.free - disk_before.free) / (1024 * 1024), 1) if disk_before else 0
+    except Exception:
+        freed_mb = 0
+
+    return {
+        "status": "success",
+        "freed_mb": freed_mb,
+        "details": details,
+        "disk": {
+            "total": disk_after.total if disk_after else 0,
+            "free": disk_after.free if disk_after else 0,
+            "percent": disk_after.percent if disk_after else 0
+        }
+    }
+
+
+@router.post("/server/vacuum-db", dependencies=[Depends(require_permission("system_server_view"))])
+def vacuum_database():
+    """Глубокая оптимизация базы данных: сжатие раздутых таблиц и дефрагментация индексов (VACUUM FULL, REINDEX)"""
+    from app.core.database import engine
+    from sqlalchemy import text
+    try:
+        with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
+            conn.execute(text("VACUUM FULL multichat_messages;"))
+            conn.execute(text("VACUUM FULL system_logs;"))
+            conn.execute(text("REINDEX TABLE multichat_messages;"))
+            row = conn.execute(text("SELECT pg_size_pretty(pg_database_size(current_database()));")).fetchone()
+            new_size = row[0] if row else "N/A"
+
+        return {
+            "status": "success",
+            "message": f"Сжатие и оптимизация базы данных успешно выполнены. Текущий размер БД: {new_size}",
+            "db_size": new_size
+        }
+    except Exception as e:
+        logger.error(f"Error during VACUUM: {e}")
+        raise HTTPException(status_code=500, detail=f"Ошибка сжатия БД: {str(e)}")
+
+
+@router.post("/server/restart-services", dependencies=[Depends(require_permission("system_server_view"))])
+def restart_app_services():
+    """Перезапуск служб приложения (worker, bot) для освобождения памяти и сброса зависших задач"""
+    results = {}
+    for container in ["foodtech-worker", "foodtech-bot"]:
+        status, res = _docker_api("POST", f"/containers/{container}/restart?t=5")
+        results[container] = "Успешно перезапущен" if status == 204 else f"Код: {status}"
+    
+    return {
+        "status": "success",
+        "message": "Фоновые службы приложения успешно перезапущены",
+        "details": results
+    }
+
+
+@router.post("/server/restart-web", dependencies=[Depends(require_permission("system_server_view"))])
+def restart_web_services():
+    """Перезапуск веб-серверов (nginx, admin, frontend)"""
+    results = {}
+    for container in ["foodtech-nginx", "foodtech-admin", "foodtech-frontend"]:
+        status, res = _docker_api("POST", f"/containers/{container}/restart?t=5")
+        results[container] = "Успешно перезапущен" if status == 204 else f"Код: {status}"
+
+    return {
+        "status": "success",
+        "message": "Веб-серверы успешно перезапущены",
+        "details": results
+    }
+
+
+@router.post("/server/reboot", dependencies=[Depends(require_permission("system_server_view"))])
+def reboot_server():
+    """Инициирует безопасную перезагрузку операционной системы VPS сервера"""
+    trigger_paths = ["/host_foodzuka/trigger_reboot", "/root/foodzuka/trigger_reboot"]
+    triggered = False
+    for p in trigger_paths:
+        dir_name = os.path.dirname(p)
+        if os.path.exists(dir_name):
+            try:
+                with open(p, "w") as f:
+                    f.write(f"reboot requested at {datetime.now().isoformat()}")
+                triggered = True
+                break
+            except Exception as e:
+                logger.error(f"Failed to write reboot trigger to {p}: {e}")
+
+    if not triggered:
+        raise HTTPException(status_code=500, detail="Триггер перезагрузки хоста недоступен из контейнера")
+
+    return {
+        "status": "success",
+        "message": "Команда перезагрузки принята операционной системой. Сервер перезагружается (доступ восстановится через 1-2 минуты)."
+    }
+

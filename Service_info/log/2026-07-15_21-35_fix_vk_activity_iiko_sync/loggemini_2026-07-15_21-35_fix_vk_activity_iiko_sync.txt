@@ -1,0 +1,34 @@
+Лог сессии: 2026-07-15_21-35_fix_vk_activity_iiko_sync
+Задача: Исправление ошибки синхронизации активности ВК с iikoCard (сообщение "Синхронизация с iiko отключена в настройках").
+
+Анализ проблемы:
+При попытке ручной синхронизации баллов активности с iikoCard в компоненте `vk-bots.vue` отправляется POST-запрос на `/api/v1/vk-activity-settings/connection/{selectedConnectionId}/sync-iiko`.
+Метод API вызывает `vk_activity_service.run_manual_iiko_sync(db, connection_id)`.
+Внутри этого метода в `backend/app/services/vk_activity_service.py` на строке 689 выполняется:
+```python
+settings = db.get(VkActivitySettings, connection_id)
+```
+Однако `connection_id` — это ID подключения бота (поле `vk_bot_connection_id`), а не первичный ключ (поле `id`) таблицы `vk_activity_settings`.
+По этой причине `db.get` возвращает `None` (или настройки другой группы с `id == connection_id`). В результате срабатывает условие:
+```python
+if not settings or not settings.sync_with_iiko:
+    return {"status": "error", "message": "Синхронизация с iiko отключена в настройках"}
+```
+И выводится ошибка, описанная пользователем.
+
+Решение:
+Заменить:
+```python
+settings = db.get(VkActivitySettings, connection_id)
+```
+на:
+```python
+settings = db.exec(select(VkActivitySettings).where(VkActivitySettings.vk_bot_connection_id == connection_id)).first()
+```
+
+План проверки:
+1. Применить правку локально в `backend/app/services/vk_activity_service.py`.
+2. Выгрузить изменения на VPS сервер (`vezuroll.ru`).
+3. Выполнить сверку содержимого файла на VPS сервере с локальным файлом.
+4. Перезапустить бэкенд и Celery worker на VPS (`docker compose restart backend worker`).
+5. Проверить работоспособность в админ-панели (при необходимости попросить пользователя протестировать или запустить проверку команды).

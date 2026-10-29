@@ -17,9 +17,41 @@ router = APIRouter(prefix="/users", tags=["users"])
 
 @router.get("/me", response_model=UserRead)
 def read_user_me(
+    db: Session = Depends(deps.get_db),
     current_user: User = Depends(deps.get_current_user),
 ) -> Any:
     """Получение профиля текущего пользователя"""
+    user_read = UserRead.model_validate(current_user)
+    user_read.is_courier = deps.check_is_courier(current_user, db)
+    return user_read
+
+
+@router.patch("/me", response_model=UserRead)
+def update_user_me(
+    *,
+    db: Session = Depends(deps.get_db),
+    user_in: UserUpdate,
+    current_user: User = Depends(deps.get_current_user),
+) -> Any:
+    """Обновление профиля текущего пользователя"""
+    update_data = user_in.model_dump(exclude_unset=True)
+    
+    # Защита от изменения критических полей обычными пользователями
+    if not current_user.is_superuser:
+        update_data.pop("role_id", None)
+        update_data.pop("is_active", None)
+        update_data.pop("iiko_id", None)
+        
+    if "password" in update_data and update_data["password"]:
+        password = update_data.pop("password")
+        current_user.hashed_password = get_password_hash(password)
+        
+    for field, value in update_data.items():
+        setattr(current_user, field, value)
+        
+    db.add(current_user)
+    db.commit()
+    db.refresh(current_user)
     return current_user
 
 
@@ -28,7 +60,7 @@ def read_users(
     db: Session = Depends(deps.get_db),
     skip: int = 0,
     limit: int = 100,
-    current_user: User = Depends(deps.require_permission("users_manage")),
+    current_user: User = Depends(deps.require_permission("users_view")),
 ) -> Any:
     """Получение списка всех пользователей (только для админа)"""
     users = db.exec(
@@ -43,7 +75,7 @@ def read_users(
 @router.get("/employees")
 def get_linkable_employees(
     db: Session = Depends(deps.get_db),
-    current_user: User = Depends(deps.require_permission("users_manage")),
+    current_user: User = Depends(deps.require_permission("users_view")),
 ) -> Any:
     """Список всех сотрудников iiko для привязки к аккаунту"""
     employees = db.exec(select(Employee).where(Employee.status == "Active").order_by(Employee.name)).all()
@@ -56,7 +88,7 @@ def create_user(
     *,
     db: Session = Depends(deps.get_db),
     user_in: UserCreate,
-    current_user: User = Depends(deps.require_permission("users_manage")),
+    current_user: User = Depends(deps.require_permission("users_edit")),
 ) -> Any:
     """Создание нового пользователя"""
     user = db.exec(select(User).where(User.username == user_in.username)).first()
@@ -94,7 +126,7 @@ def update_user(
     db: Session = Depends(deps.get_db),
     user_id: int,
     user_in: UserUpdate,
-    current_user: User = Depends(deps.require_permission("users_manage")),
+    current_user: User = Depends(deps.require_permission("users_edit")),
 ) -> Any:
     """Обновление пользователя"""
     user = db.get(User, user_id)
@@ -142,7 +174,7 @@ def delete_user(
 @router.get("/roles", response_model=List[RoleRead])
 def read_roles(
     db: Session = Depends(deps.get_db),
-    current_user: User = Depends(deps.require_permission("roles_manage")),
+    current_user: User = Depends(deps.require_permission("roles_view")),
 ) -> Any:
     """Список всех ролей с правами"""
     return db.exec(select(Role).options(selectinload(Role.permissions))).all()
@@ -153,7 +185,7 @@ def create_role(
     *,
     db: Session = Depends(deps.get_db),
     role_in: RoleCreate,
-    current_user: User = Depends(deps.require_permission("roles_manage")),
+    current_user: User = Depends(deps.require_permission("roles_edit")),
 ) -> Any:
     """Создание новой роли"""
     db_obj = Role(**role_in.model_dump())
@@ -169,7 +201,7 @@ def update_role(
     db: Session = Depends(deps.get_db),
     role_id: int,
     role_in: RoleUpdate,
-    current_user: User = Depends(deps.require_permission("roles_manage")),
+    current_user: User = Depends(deps.require_permission("roles_edit")),
 ) -> Any:
     """Обновление данных роли"""
     db_obj = db.get(Role, role_id)
@@ -191,7 +223,7 @@ def delete_role(
     *,
     db: Session = Depends(deps.get_db),
     role_id: int,
-    current_user: User = Depends(deps.require_permission("roles_manage")),
+    current_user: User = Depends(deps.require_permission("roles_edit")),
 ) -> Any:
     """Удаление роли"""
     db_obj = db.get(Role, role_id)
@@ -211,7 +243,7 @@ def update_role_permissions(
     db: Session = Depends(deps.get_db),
     role_id: int,
     perm_in: RolePermissionUpdate,
-    current_user: User = Depends(deps.require_permission("roles_manage")),
+    current_user: User = Depends(deps.require_permission("roles_edit")),
 ) -> Any:
     """Обновление прав для роли"""
     db_obj = db.get(Role, role_id)
@@ -232,7 +264,7 @@ def update_role_permissions(
 @router.get("/permissions", response_model=List[PermissionRead])
 def read_permissions(
     db: Session = Depends(deps.get_db),
-    current_user: User = Depends(deps.require_permission("roles_manage")),
+    current_user: User = Depends(deps.require_permission("roles_view")),
 ) -> Any:
     """Список всех доступных прав"""
     return db.exec(select(Permission)).all()
@@ -241,7 +273,7 @@ def read_permissions(
 @router.post("/sync-iiko-roles")
 async def sync_iiko_roles(
     db: Session = Depends(deps.get_db),
-    current_user: User = Depends(deps.require_permission("roles_manage")),
+    current_user: User = Depends(deps.require_permission("roles_edit")),
 ) -> Any:
     """Принудительная синхронизация ролей из iiko"""
     from app.services.iiko_sync_service import iiko_sync_service

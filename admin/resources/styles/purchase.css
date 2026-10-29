@@ -1,0 +1,270 @@
+/* Стили для модуля "Закуп" */
+
+.purchase-layout {
+  gap: 24px;
+}
+
+.purchase-card {
+  border-radius: 16px !important;
+  box-shadow: 0 4px 18px -4px rgba(0, 0, 0, 0.1) !important;
+  transition: all 0.25s ease-in-out;
+  overflow: hidden;
+  border: 1px solid rgba(var(--v-border-color), 0.12) !important;
+}
+
+.purchase-card:hover {
+  transform: translateY(-4px);
+  box-shadow: 0 8px 24px -4px rgba(0, 0, 0, 0.15) !important;
+}
+
+/* Градиентные шапки для разделов */
+.purchase-card-header {
+  padding: 16px 20px;
+  color: #fff;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.purchase-card-header.supply {
+  background: linear-gradient(135deg, #1e3c72 0%, #2a5298 100%);
+}
+
+.purchase-card-header.products {
+  background: linear-gradient(135deg, #11998e 0%, #38ef7d 100%);
+}
+
+.purchase-card-header.household {
+  background: linear-gradient(135deg, #f12711 0%, #f5af19 100%);
+}
+
+.purchase-card-title {
+  font-size: 1.15rem;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+}
+
+.purchase-table {
+  background: transparent !important;
+}
+
+.purchase-table tr {
+  transition: background-color 0.2s;
+}
+
+.purchase-table tr:hover {
+  background-color: rgba(var(--v-theme-primary), 0.04) !important;
+}
+
+/* Стилизация строк в зависимости от статуса */
+.record-row-completed {
+  opacity: 0.65;
+  background-color: rgba(var(--v-theme-success), 0.03);
+}
+
+.record-row-completed .item-name {
+  text-decoration: line-through;
+}
+
+.record-row-cancelled {
+  opacity: 0.5;
+  background-color: rgba(var(--v-theme-error), 0.03);
+}
+
+.record-row-cancelled .item-name {
+  text-decoration: line-through;
+}
+
+/* Анимации иконки при наведении */
+.purchase-action-btn:hover {
+  transform: scale(1.1);
+}
+
+/* Формы */
+.purchase-dialog {
+  border-radius: 20px !important;
+}
+
+.purchase-dialog-title {
+  font-weight: 700;
+  font-size: 1.35rem;
+}
+
+/* Детальный просмотр списков */
+.purchase-subcat-group {
+  background-color: rgb(var(--v-theme-surface));
+  border-radius: 12px;
+  overflow: hidden;
+  box-shadow: 0 2px 12px -2px rgba(0, 0, 0, 0.08);
+  border: 1px solid rgba(var(--v-border-color), 0.08);
+}
+
+.purchase-subcat-header {
+  background-color: rgba(var(--v-theme-primary), 0.03) !important;
+  border-bottom: 1px solid rgba(var(--v-border-color), 0.08);
+}
+
+.purchase-subcat-table {
+  background-color: transparent !important;
+}
+
+.purchase-subcat-table th {
+  font-weight: 600 !important;
+  color: rgba(var(--v-theme-on-surface), 0.7) !important;
+  background-color: rgba(var(--v-theme-surface), 0.5) !important;
+}
+
+.purchase-subcat-table td {
+  padding-top: 8px !important;
+  padding-bottom: 8px !important;
+}
+
+.purchase-quantity-input :deep(.v-field__input) {
+  text-align: center;
+  padding-inline-start: 8px !important;
+  padding-inline-end: 8px !important;
+  font-weight: 700;
+}
+
+.purchase-comment-input :deep(.v-field__input) {
+  font-size: 0.9rem;
+}
+
+.purchase-subcat-table tr.urgent-row {
+  background-color: rgba(var(--v-theme-error), 0.06) !important;
+}
+
+.purchase-subcat-table tr.urgent-row:hover {
+  background-color: rgba(var(--v-theme-error), 0.1) !important;
+}
+
+/* Адаптивные стили для мобильных телефонов и планшетов */
+@media (max-width: 959px) {
+  /* Перестроение таблиц с классом responsive-table в карточки */
+  .responsive-table thead {
+    display: none !important;
+  }
+  
+  .responsive-table, 
+  .responsive-table tbody, 
+  .responsive-table tr, 
+  .responsive-table td {
+    display: block !important;
+    width: 100% !important;
+  }
+  
+  .responsive-table tr {
+    margin-bottom: 16px !important;
+    border: 1px solid rgba(var(--v-border-color), 0.1) !important;
+    border-radius: 12px !important;
+    background-color: rgb(var(--v-theme-surface)) !important;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.03) !important;
+    overflow: hidden !important;
+    padding: 10px 14px !important;
+  }
+  
+  .responsive-table td {
+    border-bottom: none !important;
+    padding: 6px 0 !important;
+    display: flex !important;
+    align-items: center !important;
+    justify-content: space-between !important;
+    min-height: 40px;
+    text-align: right !important;
+  }
+  
+  .responsive-table td::before {
+    content: attr(data-label);
+    font-weight: 600;
+    color: rgba(var(--v-theme-on-surface), 0.55);
+    margin-right: 12px;
+    font-size: 0.85rem;
+    text-align: left !important;
+    flex-shrink: 0;
+  }
+
+  /* Для ячеек с длинным контентом, чтобы переносилось красиво */
+  .responsive-table td > * {
+    max-width: 70%;
+    text-align: right;
+  }
+
+  /* Фиксированный нижний бар кнопок для мобильных в диалогах */
+  .mobile-bottom-bar {
+    position: fixed !important;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    background-color: rgb(var(--v-theme-surface)) !important;
+    box-shadow: 0 -4px 20px rgba(0, 0, 0, 0.1) !important;
+    border-top: 1px solid rgba(var(--v-border-color), 0.12);
+    padding: 12px 16px !important;
+    display: flex !important;
+    gap: 8px !important;
+    z-index: 1000;
+  }
+
+  .mobile-bottom-bar .v-btn {
+    flex: 1 1 0% !important;
+    font-size: 0.85rem !important;
+    padding: 0 8px !important;
+  }
+
+  .dialog-content-with-bottom-bar {
+    padding-bottom: 75px !important;
+  }
+  
+  /* Подсветка срочных карточек на мобильном */
+  .responsive-table tr.urgent-row {
+    border-left: 5px solid rgb(var(--v-theme-error)) !important;
+    background-color: rgba(var(--v-theme-error), 0.04) !important;
+  }
+  
+  /* Корректировка отступов в тулбаре для мобильных */
+  .v-toolbar-title {
+    font-size: 1.05rem !important;
+  }
+}
+
+/* Дополнительные стили для режима просмотра закупа */
+.bought-item-row {
+  opacity: 0.55;
+  background-color: rgba(var(--v-theme-surface), 0.5) !important;
+}
+
+.bought-item-row .v-list-item-title {
+  color: rgba(var(--v-theme-on-surface), 0.4) !important;
+}
+
+.urgent-row {
+  border-left: 4px solid rgb(var(--v-theme-error)) !important;
+  background-color: rgba(var(--v-theme-error), 0.04) !important;
+}
+
+/* Стили для таймлайна истории изменений */
+.changes-timeline {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.change-log-item {
+  border-left: 2px solid rgba(var(--v-theme-primary), 0.3);
+  padding-left: 12px;
+  position: relative;
+}
+
+.change-log-item::before {
+  content: "";
+  position: absolute;
+  left: -5px;
+  top: 4px;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background-color: rgb(var(--v-theme-primary));
+}
+
+
+
+

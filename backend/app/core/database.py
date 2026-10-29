@@ -10,12 +10,12 @@ from .config import settings
 # echo=True выводит SQL запросы в консоль (только для отладки)
 engine = create_engine(
     settings.DATABASE_URL,
-    echo=settings.DEBUG,
+    echo=False,          # Отключаем вывод SQL в stdout во избежание блокировок I/O и переполнения логов
     pool_pre_ping=True,  # Проверка соединения перед использованием
-    pool_size=10,        # Снижаем до 10 (было 20), чтобы не превысить лимит БД (100)
-    max_overflow=20,     # Снижаем до 20 (было 40)
-    pool_timeout=60,     # Оставляем 60с ожидания
-    pool_recycle=3600    # Пересоздавать соединения каждый час
+    pool_size=15,        # Базовый пул 15 соединений
+    max_overflow=25,     # Запас соединений до 25 (макс 40 из 100 доступных в Postgres)
+    pool_timeout=30,     # 30с таймаут ожидания соединения
+    pool_recycle=1800    # Пересоздавать соединения каждые 30 минут
 )
 
 # Фабрика сессий
@@ -30,12 +30,20 @@ SessionLocal = sessionmaker(
 def get_session():
     """
     Dependency для получения сессии базы данных в FastAPI endpoints
-    Автоматически закрывает сессию после завершения запроса
+    Автоматически откатывает незавершенные транзакции и закрывает сессию после завершения запроса,
+    предотвращая накопление открытых транзакций (idle in transaction) и утечки памяти
     """
     session = SessionLocal()
     try:
         yield session
+    except Exception:
+        session.rollback()
+        raise
     finally:
+        try:
+            session.rollback()
+        except Exception:
+            pass
         session.close()
 
 from contextlib import contextmanager

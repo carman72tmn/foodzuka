@@ -100,6 +100,7 @@
 
 <script setup>
 import { ref, computed, onMounted } from 'vue'
+import { getAuthHeaders } from '@/utils/auth'
 
 const selectedPeriod = ref('today')
 const customFrom = ref('')
@@ -133,7 +134,9 @@ async function fetchReport(forceRefresh = false) {
       params.set('date_to', customTo.value)
     }
 
-    const resp = await fetch(`/api/v1/reports/olap/sales?${params}`)
+    const resp = await fetch(`/api/v1/reports/olap/sales?${params}`, {
+      headers: getAuthHeaders()
+    })
     const json = await resp.json()
     reportData.value = json.data || []
     totals.value = json.total || { count: 0, sum: 0, discount: 0 }

@@ -45,7 +45,9 @@ class Shift(SQLModel, table=True):
     deliveries_count: int = Field(default=0, description="Количество доставок")
     deliveries_revenue: float = Field(default=0.0, description="Выручка за доставки")
     cancelled_orders_count: int = Field(default=0, description="Количество отмененных заказов за смену")
-    revenue_at_close: Optional[float] = Field(default=None, description="Выручка на момент закрытия смены")
+    revenue_at_close: Optional[float] = Field(default=None, description="Выручка на момент закрытия смены")
+    kitchen_revenue: Optional[float] = Field(default=None, description="Выручка цеха Кухня")
+    hot_revenue: Optional[float] = Field(default=None, description="Выручка цеха Горячий")
 
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
@@ -109,3 +111,11 @@ class CourierOrder(SQLModel, table=True):
     # Отношения
     employee: Optional[Employee] = Relationship(back_populates="courier_orders")
     shift: Optional[Shift] = Relationship(back_populates="courier_orders")
+
+
+class HiddenCourier(SQLModel, table=True):
+    __tablename__ = 'hidden_couriers'
+
+    courier_iiko_id: str = Field(primary_key=True, description='ID курьера в iiko (UUID)')
+    courier_name: Optional[str] = Field(default=None, description='Имя курьера')
+    hidden_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc), description='Время скрытия')

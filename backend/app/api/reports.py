@@ -13,6 +13,7 @@ from app.models.iiko_settings import IikoSettings
 from app.models.olap_revenue import OlapRevenueRecord
 from app.services.iiko_service import iiko_service
 from app.services.revenue_sync import revenue_sync_service
+from app.api.deps import require_permission
 
 
 router = APIRouter(prefix="/reports", tags=["Reports"])
@@ -28,7 +29,7 @@ def _get_period_dates(period: str, date_from_str: Optional[str], date_to_str: Op
         return today_start, today_end
     elif period == "yesterday":
         yesterday = today_start - timedelta(days=1)
-        return yesterday, yesterday.replace(hour=23, minute=59, second=59)
+        return yesterday, yesterday.replace(hour=23, minute=59, second=59, microsecond=0)
     elif period == "week":
         return today_start - timedelta(days=7), today_end
     elif period == "month":
@@ -39,16 +40,23 @@ def _get_period_dates(period: str, date_from_str: Optional[str], date_to_str: Op
         if not date_from_str or not date_to_str:
             raise HTTPException(status_code=400, detail="date_from and date_to are required for custom period")
         try:
-            df = datetime.fromisoformat(date_from_str).replace(tzinfo=utc_now().tzinfo)
-            dt = datetime.fromisoformat(date_to_str).replace(tzinfo=utc_now().tzinfo)
+            if len(date_from_str) == 10:
+                df = datetime.fromisoformat(date_from_str + "T00:00:00").replace(tzinfo=utc_now().tzinfo)
+            else:
+                df = datetime.fromisoformat(date_from_str).replace(tzinfo=utc_now().tzinfo)
+                
+            if len(date_to_str) == 10:
+                dt = datetime.fromisoformat(date_to_str + "T23:59:59").replace(tzinfo=utc_now().tzinfo)
+            else:
+                dt = datetime.fromisoformat(date_to_str).replace(tzinfo=utc_now().tzinfo)
             return df, dt
         except ValueError:
-            raise HTTPException(status_code=400, detail="Invalid date format. Use ISO 8601: YYYY-MM-DDTHH:MM:SS")
+            raise HTTPException(status_code=400, detail="Invalid date format. Use ISO 8601: YYYY-MM-DD or YYYY-MM-DDTHH:MM:SS")
     else:
         raise HTTPException(status_code=400, detail=f"Unknown period: {period}. Use: today, yesterday, week, month, year, custom")
 
 
-@router.get("/olap/revenue")
+@router.get("/olap/revenue", dependencies=[Depends(require_permission("reports_view"))])
 async def get_revenue_report(
     period: str = Query(default="today", description="Период: today, yesterday, week, month, year, custom"),
     date_from: Optional[str] = Query(default=None, description="Начало для custom периода (ISO 8601)"),
@@ -158,7 +166,7 @@ async def get_revenue_report(
     }
 
 
-@router.post("/olap/sync")
+@router.post("/olap/sync", dependencies=[Depends(require_permission("reports_view"))])
 async def sync_revenue(
     period: str = Query(default="today", description="Период для синхронизации: today, yesterday")
 ):
@@ -172,7 +180,7 @@ async def sync_revenue(
         raise HTTPException(status_code=500, detail=f"Ошибка при синхронизации: {str(e)}")
 
 
-@router.get("/olap/sales")
+@router.get("/olap/sales", dependencies=[Depends(require_permission("reports_view"))])
 async def get_sales_report(
     period: str = Query(default="today"),
     date_from: Optional[str] = None,
@@ -182,15 +190,55 @@ async def get_sales_report(
 ):
     df, dt = _get_period_dates(period, date_from, date_to)
     settings = await asyncio.to_thread(lambda: db.exec(select(IikoSettings)).first())
+    if not settings:
+        raise HTTPException(status_code=400, detail="iiko settings not configured")
+
     rows = await iiko_service.get_custom_olap_report(
         "SALES",
-        ["Department", "OpenDate.Typed"],
-        ["fullSum", "DiscountSum", "UniqOrderId", "GuestNum"],
+        ["DishCategory", "DishName", "Department"],
+        ["DishAmountInt", "DishSumInt", "DishDiscountSumInt", "UniqOrderId"],
         df, dt, settings.organization_id
     )
-    return {"success": True, "data": rows}
 
-@router.get("/olap/products")
+    formatted_rows = []
+    total_count = 0
+    total_sum = 0.0
+    total_discount = 0.0
+
+    for r in rows:
+        amount = float(r.get("DishAmountInt") or r.get("DishAmount") or 0)
+        dish_sum = float(r.get("DishSumInt") or r.get("DishSum") or r.get("fullSum") or 0)
+        dish_discount = float(r.get("DishDiscountSumInt") or r.get("DishDiscountSum") or r.get("DiscountSum") or 0)
+
+        total_count += amount
+        total_sum += dish_sum
+        total_discount += dish_discount
+
+        formatted_rows.append({
+            "DishCategory": r.get("DishCategory") or "Без категории",
+            "DishName": r.get("DishName") or "Не указано",
+            "DishAmount": amount,
+            "DishSum": dish_sum,
+            "DishDiscountSum": dish_discount,
+            "Branch": r.get("Department") or "Основной",
+            "UniqOrderId": r.get("UniqOrderId") or 0,
+        })
+
+    # Сортировка по сумме продаж по убыванию
+    formatted_rows.sort(key=lambda x: x["DishSum"], reverse=True)
+
+    return {
+        "success": True,
+        "data": formatted_rows,
+        "total": {
+            "count": int(total_count),
+            "sum": round(total_sum, 2),
+            "discount": round(total_discount, 2),
+        }
+    }
+
+
+@router.get("/olap/products", dependencies=[Depends(require_permission("reports_view"))])
 async def get_products_report(
     period: str = Query(default="today"),
     date_from: Optional[str] = None,
@@ -200,15 +248,37 @@ async def get_products_report(
 ):
     df, dt = _get_period_dates(period, date_from, date_to)
     settings = await asyncio.to_thread(lambda: db.exec(select(IikoSettings)).first())
+    if not settings:
+        raise HTTPException(status_code=400, detail="iiko settings not configured")
+
     rows = await iiko_service.get_custom_olap_report(
         "SALES",
-        ["DishName", "DishCategory"],
-        ["DishAmountInt", "DishDiscountSumInt", "UniqOrderId"],
+        ["DishCategory", "DishName"],
+        ["DishAmountInt", "DishSumInt", "DishDiscountSumInt", "UniqOrderId"],
         df, dt, settings.organization_id
     )
-    return {"success": True, "data": rows}
 
-@router.get("/olap/days")
+    formatted_rows = []
+    for r in rows:
+        amount = float(r.get("DishAmountInt") or r.get("DishAmount") or 0)
+        dish_sum = float(r.get("DishSumInt") or r.get("DishSum") or 0)
+        dish_discount = float(r.get("DishDiscountSumInt") or r.get("DishDiscountSum") or 0)
+        formatted_rows.append({
+            "DishCategory": r.get("DishCategory") or "Без категории",
+            "DishName": r.get("DishName") or "Не указано",
+            "DishAmount": amount,
+            "DishSum": dish_sum,
+            "DishDiscountSum": dish_discount,
+            "UniqOrderId": r.get("UniqOrderId") or 0,
+        })
+
+    # Сортировка по сумме продаж по убыванию
+    formatted_rows.sort(key=lambda x: x["DishSum"], reverse=True)
+
+    return {"success": True, "data": formatted_rows}
+
+
+@router.get("/olap/days", dependencies=[Depends(require_permission("reports_view"))])
 async def get_days_report(
     period: str = Query(default="today"),
     date_from: Optional[str] = None,
@@ -218,15 +288,37 @@ async def get_days_report(
 ):
     df, dt = _get_period_dates(period, date_from, date_to)
     settings = await asyncio.to_thread(lambda: db.exec(select(IikoSettings)).first())
+    if not settings:
+        raise HTTPException(status_code=400, detail="iiko settings not configured")
+
     rows = await iiko_service.get_custom_olap_report(
         "SALES",
         ["OpenDate.Typed"],
-        ["fullSum", "UniqOrderId"],
+        ["DishSumInt", "DiscountSum", "UniqOrderId", "GuestNum"],
         df, dt, settings.organization_id
     )
-    return {"success": True, "data": rows}
 
-@router.get("/olap/clients")
+    formatted_rows = []
+    for r in rows:
+        order_count = int(r.get("UniqOrderId") or 0)
+        dish_sum = float(r.get("DishSumInt") or r.get("fullSum") or 0)
+        avg_cheque = round(dish_sum / order_count, 2) if order_count > 0 else 0.0
+        formatted_rows.append({
+            "Date": r.get("OpenDate.Typed") or "",
+            "OrderCount": order_count,
+            "DishSum": dish_sum,
+            "AverageCheque": avg_cheque,
+            "DiscountSum": float(r.get("DiscountSum") or 0),
+            "GuestNum": int(r.get("GuestNum") or 0),
+        })
+
+    # Сортировка по дате по убыванию (свежие даты первыми)
+    formatted_rows.sort(key=lambda x: str(x["Date"]), reverse=True)
+
+    return {"success": True, "data": formatted_rows}
+
+
+@router.get("/olap/clients", dependencies=[Depends(require_permission("reports_view"))])
 async def get_clients_report(
     period: str = Query(default="today"),
     date_from: Optional[str] = None,
@@ -236,15 +328,45 @@ async def get_clients_report(
 ):
     df, dt = _get_period_dates(period, date_from, date_to)
     settings = await asyncio.to_thread(lambda: db.exec(select(IikoSettings)).first())
+    if not settings:
+        raise HTTPException(status_code=400, detail="iiko settings not configured")
+
     rows = await iiko_service.get_custom_olap_report(
         "SALES",
         ["Delivery.CustomerName", "Delivery.CustomerPhone"],
-        ["fullSum", "UniqOrderId"],
+        ["DishSumInt", "DiscountSum", "UniqOrderId"],
         df, dt, settings.organization_id
     )
-    return {"success": True, "data": rows}
 
-@router.get("/olap/orders")
+    formatted_rows = []
+    for r in rows:
+        name = r.get("Delivery.CustomerName")
+        phone = r.get("Delivery.CustomerPhone")
+        if not name and not phone:
+            name = "Гость без имени"
+            phone = "Не указан"
+        elif not name:
+            name = phone
+        elif not phone:
+            phone = "Не указан"
+
+        order_count = int(r.get("UniqOrderId") or 0)
+        dish_sum = float(r.get("DishSumInt") or r.get("fullSum") or 0)
+        formatted_rows.append({
+            "GuestName": name,
+            "GuestPhone": phone,
+            "OrderCount": order_count,
+            "DishSum": dish_sum,
+            "DiscountSum": float(r.get("DiscountSum") or 0),
+        })
+
+    # Сортировка по сумме выкупа по убыванию
+    formatted_rows.sort(key=lambda x: x["DishSum"], reverse=True)
+
+    return {"success": True, "data": formatted_rows}
+
+
+@router.get("/olap/orders", dependencies=[Depends(require_permission("reports_view"))])
 async def get_orders_olap_report(
     period: str = Query(default="today"),
     date_from: Optional[str] = None,
@@ -254,15 +376,56 @@ async def get_orders_olap_report(
 ):
     df, dt = _get_period_dates(period, date_from, date_to)
     settings = await asyncio.to_thread(lambda: db.exec(select(IikoSettings)).first())
-    rows = await iiko_service.get_custom_olap_report(
-        "SALES",
-        ["OrderNum", "OpenTime", "Delivery.CustomerName", "Delivery.Courier"],
-        ["fullSum", "UniqOrderId"],
-        df, dt, settings.organization_id
-    )
-    return {"success": True, "data": rows}
+    if not settings:
+        raise HTTPException(status_code=400, detail="iiko settings not configured")
 
-@router.get("/olap/payments")
+    try:
+        rows = await iiko_service.get_custom_olap_report(
+            "SALES",
+            ["OrderNum", "OpenTime", "OrderServiceType", "Delivery.Zone", "Department", "Delivery.CustomerName", "Delivery.Courier"],
+            ["DishSumInt", "DiscountSum", "UniqOrderId"],
+            df, dt, settings.organization_id,
+            log_error=False
+        )
+    except Exception:
+        # Резервный вызов без Delivery.Zone, если поле недоступно в схеме
+        rows = await iiko_service.get_custom_olap_report(
+            "SALES",
+            ["OrderNum", "OpenTime", "Department", "Delivery.CustomerName", "Delivery.Courier"],
+            ["DishSumInt", "DiscountSum", "UniqOrderId"],
+            df, dt, settings.organization_id
+        )
+
+    service_labels = {
+        "DELIVERY_BY_COURIER": "Доставка курьером",
+        "DELIVERY_PICKUP": "Самовывоз",
+        "DELIVERY_BY_CLIENT": "Самовывоз",
+        "COMMON": "В зале / Обычный",
+        "DINE_IN": "В зале",
+    }
+
+    formatted_rows = []
+    for r in rows:
+        st = r.get("OrderServiceType") or ""
+        st_label = service_labels.get(st, st) if st else "Доставка"
+        formatted_rows.append({
+            "OrderNum": r.get("OrderNum") or "",
+            "OrderTime": r.get("OpenTime") or "",
+            "OrderSum": float(r.get("DishSumInt") or r.get("fullSum") or 0),
+            "OrderServiceType": st_label,
+            "DeliveryZone": r.get("Delivery.Zone") or r.get("Delivery.Region") or "—",
+            "Branch": r.get("Department") or "Основной",
+            "CustomerName": r.get("Delivery.CustomerName") or "",
+            "Courier": r.get("Delivery.Courier") or "",
+        })
+
+    # Сортировка по времени заказа по убыванию
+    formatted_rows.sort(key=lambda x: str(x["OrderTime"]), reverse=True)
+
+    return {"success": True, "data": formatted_rows}
+
+
+@router.get("/olap/payments", dependencies=[Depends(require_permission("reports_view"))])
 async def get_payments_report(
     period: str = Query(default="today"),
     date_from: Optional[str] = None,
@@ -272,13 +435,29 @@ async def get_payments_report(
 ):
     df, dt = _get_period_dates(period, date_from, date_to)
     settings = await asyncio.to_thread(lambda: db.exec(select(IikoSettings)).first())
+    if not settings:
+        raise HTTPException(status_code=400, detail="iiko settings not configured")
+
     rows = await iiko_service.get_custom_olap_report(
         "SALES",
         ["PayTypes"],
-        ["fullSum", "UniqOrderId"],
+        ["DishSumInt", "UniqOrderId"],
         df, dt, settings.organization_id
     )
-    return {"success": True, "data": rows}
+
+    formatted_rows = []
+    for r in rows:
+        pt_name = r.get("PayTypes") or "Не указан"
+        formatted_rows.append({
+            "PaymentType": pt_name,
+            "OrderCount": int(r.get("UniqOrderId") or 0),
+            "DishSum": float(r.get("DishSumInt") or r.get("fullSum") or 0),
+        })
+
+    # Сортировка по сумме по убыванию
+    formatted_rows.sort(key=lambda x: x["DishSum"], reverse=True)
+
+    return {"success": True, "data": formatted_rows}
 
 def _record_to_dict(r: OlapRevenueRecord) -> dict:
     return {

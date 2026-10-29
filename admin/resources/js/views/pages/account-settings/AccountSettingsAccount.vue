@@ -1,28 +1,145 @@
 <script setup>
+import { ref, onMounted } from 'vue'
+import axios from 'axios'
 import avatar1 from '@images/avatars/avatar-1.png'
+import { useRoute, useRouter } from 'vue-router'
+
+const route = useRoute()
+const router = useRouter()
 
 const accountData = {
   avatarImg: avatar1,
-  firstName: 'john',
-  lastName: 'Doe',
-  email: 'johnDoe@example.com',
-  org: 'ThemeSelection',
-  phone: '+1 (917) 543-9876',
-  address: '123 Main St, New York, NY 10001',
-  state: 'New York',
-  zip: '10001',
-  country: 'USA',
-  language: 'English',
-  timezone: '(GMT-11:00) International Date Line West',
-  currency: 'USD',
+  firstName: '',
+  lastName: '',
+  email: '',
+  username: '',
+  phone: '',
+  address: '',
+  state: '',
+  zip: '',
+  country: 'Россия',
+  language: 'Русский',
+  timezone: '(GMT+03:00) Москва',
+  currency: 'RUB',
 }
 
 const refInputEl = ref()
-const accountDataLocal = ref(structuredClone(accountData))
+const accountDataLocal = ref(JSON.parse(JSON.stringify(accountData)))
 const isAccountDeactivated = ref(false)
+const loading = ref(false)
+const saving = ref(false)
+const snackbar = ref(false)
+const snackbarText = ref('')
+const snackbarColor = ref('success')
+
+const showMessage = (text, color = 'success') => {
+  snackbarText.value = text
+  snackbarColor.value = color
+  snackbar.value = true
+}
+
+const headers = {
+  Authorization: `Bearer ${localStorage.getItem('access_token')}`,
+  'Content-Type': 'application/json'
+}
+
+let initialData = JSON.parse(JSON.stringify(accountData))
+
+const vkUserId = ref(null)
+const isUnlinkingVk = ref(false)
+
+const loadUserData = async () => {
+  loading.value = true
+  try {
+    const response = await axios.get('/api/v1/users/me', { headers })
+    const user = response.data
+    
+    vkUserId.value = user.vk_user_id
+    
+    const fullName = user.full_name || ''
+    const parts = fullName.split(' ')
+    
+    accountData.firstName = parts[0] || ''
+    accountData.lastName = parts.slice(1).join(' ') || ''
+    accountData.email = user.email || ''
+    accountData.username = user.username || ''
+    
+    const profile = user.profile_data || {}
+    accountData.phone = profile.phone || ''
+    accountData.address = profile.address || ''
+    accountData.state = profile.state || ''
+    accountData.zip = profile.zip || ''
+    accountData.country = profile.country || 'Россия'
+    accountData.language = profile.language || 'Русский'
+    accountData.timezone = profile.timezone || '(GMT+03:00) Москва'
+    accountData.currency = profile.currency || 'RUB'
+    
+    accountDataLocal.value = JSON.parse(JSON.stringify(accountData))
+    initialData = JSON.parse(JSON.stringify(accountData))
+  } catch (e) {
+    console.error('Ошибка загрузки данных профиля', e)
+    showMessage('Не удалось загрузить данные профиля', 'error')
+  } finally {
+    loading.value = false
+  }
+}
+
+const handleLinkVk = () => {
+  const token = localStorage.getItem('access_token')
+  if (!token) return
+  window.location.href = `/api/v1/auth/vk/oauth-redirect?action=link&source=admin&token=${token}`
+}
+
+const handleUnlinkVk = async () => {
+  isUnlinkingVk.value = true
+  try {
+    const response = await axios.post('/api/v1/auth/unlink-vk', {}, { headers })
+    if (response.data?.status === 'success') {
+      showMessage('Аккаунт ВКонтакте успешно отвязан')
+      vkUserId.value = null
+    } else {
+      throw new Error('Не удалось отвязать аккаунт')
+    }
+  } catch (e) {
+    console.error('Ошибка отвязки ВК', e)
+    showMessage(e.response?.data?.detail || 'Ошибка при отвязке аккаунта', 'error')
+  } finally {
+    isUnlinkingVk.value = false
+  }
+}
+
+const saveChanges = async () => {
+  saving.value = true
+  try {
+    const payload = {
+      username: accountDataLocal.value.username,
+      full_name: `${accountDataLocal.value.firstName} ${accountDataLocal.value.lastName}`.trim(),
+      email: accountDataLocal.value.email,
+      profile_data: {
+        phone: accountDataLocal.value.phone,
+        address: accountDataLocal.value.address,
+        state: accountDataLocal.value.state,
+        zip: accountDataLocal.value.zip,
+        country: accountDataLocal.value.country,
+        language: accountDataLocal.value.language,
+        timezone: accountDataLocal.value.timezone,
+        currency: accountDataLocal.value.currency
+      }
+    }
+    
+    await axios.patch('/api/v1/users/me', payload, { headers })
+    showMessage('Изменения успешно сохранены')
+    initialData = JSON.parse(JSON.stringify(accountDataLocal.value))
+  } catch (e) {
+    console.error('Ошибка сохранения данных профиля', e)
+    showMessage(e.response?.data?.detail || 'Не удалось сохранить изменения', 'error')
+  } finally {
+    saving.value = false
+  }
+}
 
 const resetForm = () => {
-  accountDataLocal.value = structuredClone(accountData)
+  accountDataLocal.value = JSON.parse(JSON.stringify(initialData))
 }
 
 const changeAvatar = file => {
@@ -37,130 +154,123 @@ const changeAvatar = file => {
   }
 }
 
-// reset avatar image
 const resetAvatar = () => {
-  accountDataLocal.value.avatarImg = accountData.avatarImg
+  accountDataLocal.value.avatarImg = initialData.avatarImg
 }
 
+onMounted(() => {
+  loadUserData()
+  
+  const vkLink = route.query.vk_link
+  if (vkLink) {
+    if (vkLink === 'success') {
+      showMessage('Аккаунт ВКонтакте успешно привязан!')
+    } else if (vkLink === 'already_linked_to_another') {
+      showMessage('Этот аккаунт ВКонтакте уже привязан к другому пользователю!', 'error')
+    } else if (vkLink === 'user_not_found') {
+      showMessage('Пользователь не найден в системе!', 'error')
+    }
+    router.replace({ query: {} })
+  }
+})
+
 const timezones = [
-  '(GMT-11:00) International Date Line West',
-  '(GMT-11:00) Midway Island',
-  '(GMT-10:00) Hawaii',
-  '(GMT-09:00) Alaska',
-  '(GMT-08:00) Pacific Time (US & Canada)',
-  '(GMT-08:00) Tijuana',
-  '(GMT-07:00) Arizona',
-  '(GMT-07:00) Chihuahua',
-  '(GMT-07:00) La Paz',
-  '(GMT-07:00) Mazatlan',
-  '(GMT-07:00) Mountain Time (US & Canada)',
-  '(GMT-06:00) Central America',
-  '(GMT-06:00) Central Time (US & Canada)',
-  '(GMT-06:00) Guadalajara',
-  '(GMT-06:00) Mexico City',
-  '(GMT-06:00) Monterrey',
-  '(GMT-06:00) Saskatchewan',
-  '(GMT-05:00) Bogota',
-  '(GMT-05:00) Eastern Time (US & Canada)',
-  '(GMT-05:00) Indiana (East)',
-  '(GMT-05:00) Lima',
-  '(GMT-05:00) Quito',
-  '(GMT-04:00) Atlantic Time (Canada)',
-  '(GMT-04:00) Caracas',
-  '(GMT-04:00) La Paz',
-  '(GMT-04:00) Santiago',
-  '(GMT-03:30) Newfoundland',
-  '(GMT-03:00) Brasilia',
-  '(GMT-03:00) Buenos Aires',
-  '(GMT-03:00) Georgetown',
-  '(GMT-03:00) Greenland',
-  '(GMT-02:00) Mid-Atlantic',
-  '(GMT-01:00) Azores',
-  '(GMT-01:00) Cape Verde Is.',
-  '(GMT+00:00) Casablanca',
-  '(GMT+00:00) Dublin',
-  '(GMT+00:00) Edinburgh',
-  '(GMT+00:00) Lisbon',
-  '(GMT+00:00) London',
+  '(GMT+02:00) Калининград',
+  '(GMT+03:00) Москва',
+  '(GMT+04:00) Самара',
+  '(GMT+05:00) Екатеринбург',
+  '(GMT+06:00) Омск',
+  '(GMT+07:00) Красноярск',
+  '(GMT+08:00) Иркутск',
+  '(GMT+09:00) Якутск',
+  '(GMT+10:00) Владивосток',
+  '(GMT+11:00) Северо-Курильск',
+  '(GMT+12:00) Анадырь'
 ]
 
 const currencies = [
+  'RUB',
   'USD',
-  'EUR',
-  'GBP',
-  'AUD',
-  'BRL',
-  'CAD',
-  'CNY',
-  'CZK',
-  'DKK',
-  'HKD',
-  'HUF',
-  'INR',
+  'EUR'
+]
+
+const countries = [
+  'Россия',
+  'Казахстан',
+  'Беларусь'
+]
+
+const languages = [
+  'Русский',
+  'English'
 ]
 </script>
 
 <template>
   <VRow>
     <VCol cols="12">
-      <VCard title="Account Details">
-        <VCardText class="d-flex">
-          <!-- 👉 Avatar -->
-          <VAvatar
-            rounded="lg"
-            size="100"
-            class="me-6"
-            :image="accountDataLocal.avatarImg"
-          />
-
-          <!-- 👉 Upload Photo -->
-          <form class="d-flex flex-column justify-center gap-5">
-            <div class="d-flex flex-wrap gap-2">
-              <VBtn
-                color="primary"
-                @click="refInputEl?.click()"
-              >
-                <VIcon
-                  icon="bx-cloud-upload"
-                  class="d-sm-none"
-                />
-                <span class="d-none d-sm-block">Upload new photo</span>
-              </VBtn>
-
-              <input
-                ref="refInputEl"
-                type="file"
-                name="file"
-                accept=".jpeg,.png,.jpg,GIF"
-                hidden
-                @input="changeAvatar"
-              >
-
-              <VBtn
-                type="reset"
-                color="error"
-                variant="tonal"
-                @click="resetAvatar"
-              >
-                <span class="d-none d-sm-block">Reset</span>
-                <VIcon
-                  icon="bx-refresh"
-                  class="d-sm-none"
-                />
-              </VBtn>
-            </div>
-
-            <p class="text-body-1 mb-0">
-              Allowed JPG, GIF or PNG. Max size of 800K
-            </p>
-          </form>
+      <VCard title="Данные профиля">
+        <VCardText v-if="loading" class="text-center py-6">
+          <VProgressCircular indeterminate color="primary" />
         </VCardText>
+        
+        <VCardText v-else>
+          <div class="d-flex mb-6">
+            <!-- 👉 Avatar -->
+            <VAvatar
+              rounded="lg"
+              size="100"
+              class="me-6"
+              :image="accountDataLocal.avatarImg"
+            />
 
-        <VDivider />
+            <!-- 👉 Upload Photo -->
+            <form class="d-flex flex-column justify-center gap-5">
+              <div class="d-flex flex-wrap gap-2">
+                <VBtn
+                  color="primary"
+                  @click="refInputEl?.click()"
+                >
+                  <VIcon
+                    icon="bx-cloud-upload"
+                    class="d-sm-none"
+                  />
+                  <span class="d-none d-sm-block">Загрузить фото</span>
+                </VBtn>
 
-        <VCardText>
+                <input
+                  ref="refInputEl"
+                  type="file"
+                  name="file"
+                  accept=".jpeg,.png,.jpg,GIF"
+                  hidden
+                  @input="changeAvatar"
+                >
+
+                <VBtn
+                  type="reset"
+                  color="error"
+                  variant="tonal"
+                  @click="resetAvatar"
+                >
+                  <span class="d-none d-sm-block">Сбросить</span>
+                  <VIcon
+                    icon="bx-refresh"
+                    class="d-sm-none"
+                  />
+                </VBtn>
+              </div>
+
+              <p class="text-body-1 mb-0">
+                Разрешены JPG, GIF или PNG. Максимальный размер 800К
+              </p>
+            </form>
+          </div>
+
+          <VDivider />
+
           <!-- 👉 Form -->
-          <VForm class="mt-6">
+          <VForm class="mt-6" @submit.prevent="saveChanges">
             <VRow>
               <!-- 👉 First Name -->
               <VCol
@@ -169,8 +279,8 @@ const currencies = [
               >
                 <VTextField
                   v-model="accountDataLocal.firstName"
-                  placeholder="John"
-                  label="First Name"
+                  placeholder="Иван"
+                  label="Имя"
                 />
               </VCol>
 
@@ -181,8 +291,8 @@ const currencies = [
               >
                 <VTextField
                   v-model="accountDataLocal.lastName"
-                  placeholder="Doe"
-                  label="Last Name"
+                  placeholder="Иванов"
+                  label="Фамилия"
                 />
               </VCol>
 
@@ -193,21 +303,21 @@ const currencies = [
               >
                 <VTextField
                   v-model="accountDataLocal.email"
-                  label="E-mail"
-                  placeholder="johndoe@gmail.com"
+                  label="Электронная почта"
+                  placeholder="ivanov@example.com"
                   type="email"
                 />
               </VCol>
 
-              <!-- 👉 Organization -->
+              <!-- 👉 Username (Username вместо Organization) -->
               <VCol
                 cols="12"
                 md="6"
               >
                 <VTextField
-                  v-model="accountDataLocal.org"
-                  label="Organization"
-                  placeholder="ThemeSelection"
+                  v-model="accountDataLocal.username"
+                  label="Логин (Имя пользователя)"
+                  placeholder="ivan_admin"
                 />
               </VCol>
 
@@ -218,8 +328,8 @@ const currencies = [
               >
                 <VTextField
                   v-model="accountDataLocal.phone"
-                  label="Phone Number"
-                  placeholder="+1 (917) 543-9876"
+                  label="Номер телефона"
+                  placeholder="+7 (999) 123-4567"
                 />
               </VCol>
 
@@ -230,8 +340,8 @@ const currencies = [
               >
                 <VTextField
                   v-model="accountDataLocal.address"
-                  label="Address"
-                  placeholder="123 Main St, New York, NY 10001"
+                  label="Адрес"
+                  placeholder="ул. Ленина, д. 10"
                 />
               </VCol>
 
@@ -242,8 +352,8 @@ const currencies = [
               >
                 <VTextField
                   v-model="accountDataLocal.state"
-                  label="State"
-                  placeholder="New York"
+                  label="Регион / Область"
+                  placeholder="Московская обл."
                 />
               </VCol>
 
@@ -254,8 +364,8 @@ const currencies = [
               >
                 <VTextField
                   v-model="accountDataLocal.zip"
-                  label="Zip Code"
-                  placeholder="10001"
+                  label="Почтовый индекс"
+                  placeholder="101000"
                 />
               </VCol>
 
@@ -266,9 +376,9 @@ const currencies = [
               >
                 <VSelect
                   v-model="accountDataLocal.country"
-                  label="Country"
-                  :items="['USA', 'Canada', 'UK', 'India', 'Australia']"
-                  placeholder="Select Country"
+                  label="Страна"
+                  :items="countries"
+                  placeholder="Выберите страну"
                 />
               </VCol>
 
@@ -279,9 +389,9 @@ const currencies = [
               >
                 <VSelect
                   v-model="accountDataLocal.language"
-                  label="Language"
-                  placeholder="Select Language"
-                  :items="['English', 'Spanish', 'Arabic', 'Hindi', 'Urdu']"
+                  label="Язык интерфейса"
+                  placeholder="Выберите язык"
+                  :items="languages"
                 />
               </VCol>
 
@@ -292,8 +402,8 @@ const currencies = [
               >
                 <VSelect
                   v-model="accountDataLocal.timezone"
-                  label="Timezone"
-                  placeholder="Select Timezone"
+                  label="Часовой пояс"
+                  placeholder="Выберите часовой пояс"
                   :items="timezones"
                   :menu-props="{ maxHeight: 200 }"
                 />
@@ -306,8 +416,8 @@ const currencies = [
               >
                 <VSelect
                   v-model="accountDataLocal.currency"
-                  label="Currency"
-                  placeholder="Select Currency"
+                  label="Валюта по умолчанию"
+                  placeholder="Выберите валюту"
                   :items="currencies"
                   :menu-props="{ maxHeight: 200 }"
                 />
@@ -318,7 +428,7 @@ const currencies = [
                 cols="12"
                 class="d-flex flex-wrap gap-4"
               >
-                <VBtn>Save changes</VBtn>
+                <VBtn type="submit" :loading="saving">Сохранить изменения</VBtn>
 
                 <VBtn
                   color="secondary"
@@ -326,7 +436,7 @@ const currencies = [
                   type="reset"
                   @click.prevent="resetForm"
                 >
-                  Reset
+                  Сбросить
                 </VBtn>
               </VCol>
             </VRow>
@@ -336,25 +446,77 @@ const currencies = [
     </VCol>
 
     <VCol cols="12">
-      <!-- 👉 Deactivate Account -->
-      <VCard title="Deactivate Account">
+      <!-- 👉 VK Integration -->
+      <VCard title="Интеграция ВКонтакте 💬">
         <VCardText>
-          <div>
-            <VCheckbox
-              v-model="isAccountDeactivated"
-              label="I confirm my account deactivation"
-            />
+          <div v-if="vkUserId" class="d-flex align-center justify-space-between flex-wrap gap-4">
+            <div>
+              <p class="text-body-1 mb-1">
+                Ваш аккаунт успешно связан с ВКонтакте!
+              </p>
+              <p class="text-caption text-disabled mb-0">
+                ID пользователя ВК: <strong>{{ vkUserId }}</strong>
+              </p>
+            </div>
+            <VBtn 
+              color="error" 
+              variant="outlined" 
+              :loading="isUnlinkingVk" 
+              @click="handleUnlinkVk"
+            >
+              Отвязать аккаунт
+            </VBtn>
+          </div>
+          <div v-else class="d-flex align-center justify-space-between flex-wrap gap-4">
+            <div>
+              <p class="text-body-1 mb-1">
+                Привяжите свой аккаунт ВКонтакте для входа в панель без пароля.
+              </p>
+              <p class="text-caption text-warning mb-0">
+                Аккаунт ВКонтакте в данный момент не привязан.
+              </p>
+            </div>
+            <VBtn 
+              color="primary" 
+              variant="elevated" 
+              prepend-icon="bxl-vk"
+              @click="handleLinkVk"
+            >
+              Привязать ВКонтакте
+            </VBtn>
+          </div>
+        </VCardText>
+      </VCard>
+    </VCol>
+
+    <VCol cols="12">
+      <!-- 👉 Deactivate Account -->
+      <VCard title="Управление аккаунтом">
+        <VCardText>
+          <div class="mb-4 text-warning">
+            <VIcon icon="bx-error" class="me-2" />
+            Вы не можете самостоятельно деактивировать или удалить свой аккаунт администратора. 
+            Пожалуйста, обратитесь к владельцу системы или системному интегратору для изменения статуса доступа.
           </div>
 
           <VBtn
-            :disabled="!isAccountDeactivated"
+            disabled
             color="error"
-            class="mt-3"
           >
-            Deactivate Account
+            Деактивировать аккаунт
           </VBtn>
         </VCardText>
       </VCard>
     </VCol>
   </VRow>
+
+  <!-- Уведомления -->
+  <VSnackbar
+    v-model="snackbar"
+    :color="snackbarColor"
+    :timeout="4000"
+    location="top"
+  >
+    {{ snackbarText }}
+  </VSnackbar>
 </template>

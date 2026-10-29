@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from enum import Enum
 from sqlmodel import Field, SQLModel, Relationship
-from sqlalchemy import Numeric, Column, JSON
+from sqlalchemy import Numeric, Column, JSON, DateTime
 
 
 class OrderStatus(str, Enum):
@@ -16,6 +16,7 @@ class OrderStatus(str, Enum):
     confirmed = "confirmed"  # Подтвержден
     preparing = "preparing"  # В подготовке
     cooking = "cooking"  # Готовится
+    assembling = "assembling"  # На сборке
     ready = "ready"  # Готов
     ready_for_pickup = "ready_for_pickup"  # Готов к выдаче
     delivering = "delivering"  # Доставляется
@@ -70,6 +71,9 @@ class Order(SQLModel, table=True):
     floor: Optional[str] = Field(default=None, description="Этаж")
     doorphone: Optional[str] = Field(default=None, description="Домофон")
     delivery_zone: Optional[str] = Field(default=None, description="Зона доставки (из iiko)")
+    address_comment: Optional[str] = Field(default=None, description="Примечание к адресу из IIKO")
+    additional_info: Optional[str] = Field(default=None, description="Доп инфо")
+    other_info: Optional[str] = Field(default=None, description="Прочее")
     
     # Гео-данные (Яндекс)
     latitude: Optional[float] = Field(default=None, description="Широта (координаты Яндекса)")
@@ -79,7 +83,7 @@ class Order(SQLModel, table=True):
     is_paid: bool = Field(default=False, description="Заказ оплачен")
     is_first_order: bool = Field(default=False, description="Первый заказ клиента (статус Новый гость на момент заказа)")
 
-    discounts_details: Optional[Dict[str, Any]] = Field(
+    discounts_details: Optional[Any] = Field(
         default=None, sa_column=Column(JSON), 
         description="Детали скидок (названия и суммы)"
     )
@@ -96,7 +100,7 @@ class Order(SQLModel, table=True):
     
     base_amount: Decimal = Field(sa_type=Numeric(10, 2), default=Decimal("0.00"), description="Сумма без скидок")
     left_to_pay: Decimal = Field(sa_type=Numeric(10, 2), default=Decimal("0.00"), description="Осталось доплатить")
-    payments_details: Optional[Dict[str, Any]] = Field(
+    payments_details: Optional[Any] = Field(
         default=None, sa_column=Column(JSON), 
         description="Детали оплат (наличные, безнал, частичные оплаты)"
     )
@@ -107,9 +111,44 @@ class Order(SQLModel, table=True):
     address_parts: Optional[Dict[str, Any]] = Field(default=None, sa_column=Column(JSON), description="Детальные компоненты адреса (JSON)")
     
     # Индикаторы изменений для курьера (Real-time alerts)
-    change_indicators: Optional[Dict[str, bool]] = Field(
+    change_indicators: Optional[Dict[str, Any]] = Field(
         default=None, sa_column=Column(JSON), 
         description="Флаги изменений: items, amount, address, time, payment"
+    )
+    
+    cooking_time_minutes: int = Field(default=0, nullable=False, description="Время готовности от кухни в минутах")
+    cooking_time_updated_at: Optional[datetime] = Field(
+        default=None, 
+        sa_column=Column(DateTime(timezone=True)), 
+        description="Время установки/изменения времени готовки кухни"
+    )
+    
+    # Статусы уведомлений курьера и обратной связи
+    courier_notification_status: Optional[str] = Field(
+        default=None, max_length=50, 
+        description="Статус уведомления курьеру: failed, unread, read, accepted"
+    )
+    courier_accepted_at: Optional[datetime] = Field(
+        default=None, 
+        sa_column=Column(DateTime(timezone=True)), 
+        description="Время принятия заказа курьером"
+    )
+    courier_accepted_source: Optional[str] = Field(
+        default=None, max_length=50, 
+        description="Источник принятия: button, vk_reaction, vk_reply, tg_reaction, tg_reply, max_reply"
+    )
+    courier_read_at: Optional[datetime] = Field(
+        default=None, 
+        sa_column=Column(DateTime(timezone=True)), 
+        description="Время прочтения уведомления курьером"
+    )
+    courier_notification_channel: Optional[str] = Field(
+        default=None, max_length=50, 
+        description="Канал отправки: vk, tg, max, sms"
+    )
+    courier_last_message_text: Optional[str] = Field(
+        default=None, 
+        description="Текст ответа или эмоджи реакции курьера"
     )
     
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
@@ -161,6 +200,12 @@ class OrderItem(SQLModel, table=True):
     comment: Optional[str] = Field(default=None)
     modifiers: Optional[List[Dict[str, Any]]] = Field(default=None, sa_column=Column(JSON))
 
+    # Поля для контроля приготовления на кухне
+    kitchen_status: str = Field(default="pending") # pending, cooking, ready
+    kitchen_started_at: Optional[datetime] = Field(default=None)
+    kitchen_ready_at: Optional[datetime] = Field(default=None)
+    kitchen_zone_id: Optional[int] = Field(default=None, foreign_key="kitchen_zones.id", nullable=True)
+
     class Config:
         """Настройки модели"""
         json_schema_extra = {
@@ -173,3 +218,4 @@ class OrderItem(SQLModel, table=True):
                 "total": 900.00
             }
         }
+

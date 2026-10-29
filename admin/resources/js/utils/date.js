@@ -146,3 +146,38 @@ export const isLongTimeAgo = (val, months = 7) => {
     return false
   }
 }
+
+export const formatStatusTime = (val, showSeconds = true) => {
+  if (!val) return '-'
+  try {
+    const utcVal = parseAsUTC(val)
+    let date = new Date(utcVal)
+
+    const timeOptions = {
+      day: '2-digit',
+      month: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      ...(showSeconds ? { second: '2-digit' } : {}),
+    }
+
+    if (appOffset.value !== 0) {
+      date = new Date(date.getTime() + appOffset.value * 3600000)
+      return new Intl.DateTimeFormat('ru-RU', {
+        ...timeOptions,
+        timeZone: 'UTC',
+      }).format(date)
+    }
+
+    const tz = appTimezone.value === 'System' ? undefined : appTimezone.value
+
+    return new Intl.DateTimeFormat('ru-RU', {
+      ...timeOptions,
+      timeZone: tz || undefined,
+    }).format(date)
+  } catch (e) {
+    console.error('formatStatusTime error:', e, val)
+    return val
+  }
+}
+

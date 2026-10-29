@@ -27,6 +27,7 @@ class Customer(SQLModel, table=True):
     phone: str = Field(max_length=20, unique=True, index=True, description="Телефон (основной идентификатор)")
     telegram_id: Optional[int] = Field(default=None, index=True, description="ID в Telegram если авторизован через бота")
     vk_user_id: Optional[int] = Field(default=None, index=True, description="ID в VK если аккаунт связан")
+    max_user_id: Optional[str] = Field(default=None, max_length=255, description="ID в MAX Messenger если аккаунт связан")
     name: Optional[str] = Field(default=None, max_length=255)
     surname: Optional[str] = Field(default=None, max_length=255)
     first_name: Optional[str] = Field(default=None, max_length=255, description="Имя (для совместимости)")
