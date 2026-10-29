@@ -2,18 +2,50 @@
 API эндпоинты управления резервными копиями, дисковым пространством,
 автоматизацией и системными ИИ-протоколами
 """
-from fastapi import APIRouter, Depends, HTTPException, Query, Body, BackgroundTasks
+from fastapi import APIRouter, Depends, HTTPException, Query, Header, Body
 from fastapi.responses import FileResponse
 from typing import Dict, Any, List, Optional
 from pydantic import BaseModel
 import os
+from jose import jwt, JWTError
+from sqlmodel import select
 
 from app.core.database import Session, get_session
 from app.services.backup_service import backup_service
-from app.api.deps import get_current_user
 from app.models.user import User
+from app.core.config import settings
 
 router = APIRouter(prefix="/system/backups", tags=["Система: Резервное копирование и ИИ"])
+
+
+def get_current_user_auth(
+    token_query: Optional[str] = Query(None, alias="token"),
+    auth_header: Optional[str] = Header(None, alias="Authorization"),
+    x_device_id: Optional[str] = Header(None, alias="X-Device-Id"),
+    session: Session = Depends(get_session)
+) -> User:
+    """Универсальная аутентификация через заголовок Bearer или Query-параметр token"""
+    raw_token = None
+    if auth_header and auth_header.startswith("Bearer "):
+        raw_token = auth_header[7:].strip()
+    elif token_query:
+        raw_token = token_query.strip()
+
+    if not raw_token or raw_token in ("null", "undefined", "None", ""):
+        raise HTTPException(status_code=401, detail="Не удалось валидировать учетные данные (токен отсутствует)")
+
+    try:
+        payload = jwt.decode(raw_token, settings.SECRET_KEY, algorithms=[settings.ALGORITHM])
+        user_id = payload.get("sub")
+        if not user_id:
+            raise HTTPException(status_code=401, detail="Не удалось валидировать учетные данные")
+    except (JWTError, Exception):
+        raise HTTPException(status_code=401, detail="Не удалось валидировать учетные данные")
+
+    user = session.exec(select(User).where(User.id == int(user_id))).first()
+    if not user:
+        raise HTTPException(status_code=401, detail="Пользователь не найден")
+    return user
 
 
 class CreateBackupRequest(BaseModel):
@@ -43,9 +75,11 @@ class UpdateDocRequest(BaseModel):
 
 
 @router.get("")
+@router.get("/")
+@router.get("/dashboard")
 def get_backups_dashboard(
     session: Session = Depends(get_session),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user_auth)
 ):
     """Сводная информация: список бэкапов, дисковое пространство и настройки"""
     backups = backup_service.list_backups()
@@ -63,7 +97,7 @@ def get_backups_dashboard(
 def create_backup_endpoint(
     req: CreateBackupRequest,
     session: Session = Depends(get_session),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user_auth)
 ):
     """Создание резервной копии вручную"""
     res = backup_service.create_backup(backup_type=req.backup_type)
@@ -76,7 +110,7 @@ def create_backup_endpoint(
 def delete_backup_endpoint(
     filename: str,
     session: Session = Depends(get_session),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user_auth)
 ):
     """Удаление указанного файла бэкапа"""
     res = backup_service.delete_backup(filename)
@@ -88,7 +122,7 @@ def delete_backup_endpoint(
 @router.get("/download/{filename}")
 def download_backup_endpoint(
     filename: str,
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user_auth)
 ):
     """Скачивание файла бэкапа"""
     clean_name = os.path.basename(filename)
@@ -101,7 +135,7 @@ def download_backup_endpoint(
 @router.get("/settings")
 def get_backup_settings_endpoint(
     session: Session = Depends(get_session),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user_auth)
 ):
     """Получение настроек автоматизации и ротации"""
     st = backup_service.get_or_create_settings(session)
@@ -112,7 +146,7 @@ def get_backup_settings_endpoint(
 def update_backup_settings_endpoint(
     req: UpdateSettingsRequest,
     session: Session = Depends(get_session),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user_auth)
 ):
     """Сохранение настроек автоматизации и ротации"""
     st = backup_service.get_or_create_settings(session)
@@ -132,7 +166,7 @@ def update_backup_settings_endpoint(
 @router.post("/retention/run")
 def run_retention_policy_endpoint(
     session: Session = Depends(get_session),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user_auth)
 ):
     """Запуск автоочистки устаревших бэкапов прямо сейчас"""
     res = backup_service.apply_retention_policy()
@@ -144,7 +178,7 @@ def run_retention_policy_endpoint(
 @router.get("/ai-prompts")
 def get_ai_prompts_endpoint(
     session: Session = Depends(get_session),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user_auth)
 ):
     """Получение списка единых системных промптов и регламентов для ИИ"""
     prompts = backup_service.get_ai_instructions(session)
@@ -155,7 +189,7 @@ def get_ai_prompts_endpoint(
 def save_ai_prompt_endpoint(
     req: UpdateAiPromptRequest,
     session: Session = Depends(get_session),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user_auth)
 ):
     """Сохранение или обновление ИИ-протокола"""
     res = backup_service.save_ai_instruction(session, req.dict())
@@ -165,7 +199,7 @@ def save_ai_prompt_endpoint(
 @router.get("/docs/{doc_name}")
 def get_doc_endpoint(
     doc_name: str,
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user_auth)
 ):
     """Чтение содержимого файла документации (system_faq, sitenav, sql_faq)"""
     res = backup_service.get_document(doc_name)
@@ -178,7 +212,7 @@ def get_doc_endpoint(
 def save_doc_endpoint(
     doc_name: str,
     req: UpdateDocRequest,
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user_auth)
 ):
     """Сохранение файла документации"""
     res = backup_service.save_document(doc_name, req.content)

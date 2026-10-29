@@ -1,5 +1,6 @@
 <script setup>
 import { ref, onMounted, computed } from 'vue'
+import { getAuthHeaders } from '@/utils/auth'
 
 const activeTab = ref('backups')
 const loading = ref(false)
@@ -61,9 +62,8 @@ const docLoading = ref(false)
 const loadDashboard = async () => {
   loading.value = true
   try {
-    const token = localStorage.getItem('token')
     const res = await fetch('/api/v1/system/backups', {
-      headers: { 'Authorization': `Bearer ${token}` }
+      headers: getAuthHeaders()
     })
     const data = await res.json()
     if (res.ok && data.status === 'success') {
@@ -86,13 +86,9 @@ const loadDashboard = async () => {
 const handleCreateBackup = async () => {
   creatingBackup.value = true
   try {
-    const token = localStorage.getItem('token')
     const res = await fetch('/api/v1/system/backups/create', {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${token}`
-      },
+      headers: getAuthHeaders(),
       body: JSON.stringify({ backup_type: selectedBackupType.value })
     })
     const data = await res.json()
@@ -118,10 +114,9 @@ const confirmDeleteBackup = (filename) => {
 
 const executeDeleteBackup = async () => {
   try {
-    const token = localStorage.getItem('token')
     const res = await fetch(`/api/v1/system/backups/${fileToDelete.value}`, {
       method: 'DELETE',
-      headers: { 'Authorization': `Bearer ${token}` }
+      headers: getAuthHeaders()
     })
     const data = await res.json()
     if (res.ok) {
@@ -136,24 +131,37 @@ const executeDeleteBackup = async () => {
   }
 }
 
-// Скачивание
-const downloadBackup = (filename) => {
-  const token = localStorage.getItem('token')
-  const url = `/api/v1/system/backups/download/${encodeURIComponent(filename)}`
-  window.open(url, '_blank')
+// Скачивание через Blob и Authorization header
+const downloadBackup = async (filename) => {
+  try {
+    showToast('Подготовка файла к скачиванию...', 'info')
+    const token = localStorage.getItem('access_token')
+    const res = await fetch(`/api/v1/system/backups/download/${encodeURIComponent(filename)}?token=${token}`, {
+      headers: getAuthHeaders()
+    })
+    if (!res.ok) throw new Error('Ошибка скачивания файла')
+    const blob = await res.blob()
+    const url = window.URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = filename
+    document.body.appendChild(a)
+    a.click()
+    a.remove()
+    window.URL.revokeObjectURL(url)
+    showToast('Файл успешно скачан', 'success')
+  } catch (e) {
+    showToast(`Ошибка: ${e.message}`, 'error')
+  }
 }
 
 // Сохранение настроек
 const handleSaveSettings = async () => {
   savingSettings.value = true
   try {
-    const token = localStorage.getItem('token')
     const res = await fetch('/api/v1/system/backups/settings', {
       method: 'PUT',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${token}`
-      },
+      headers: getAuthHeaders(),
       body: JSON.stringify(settings.value)
     })
     const data = await res.json()
@@ -173,10 +181,9 @@ const handleSaveSettings = async () => {
 const handleRunRetention = async () => {
   runningRetention.value = true
   try {
-    const token = localStorage.getItem('token')
     const res = await fetch('/api/v1/system/backups/retention/run', {
       method: 'POST',
-      headers: { 'Authorization': `Bearer ${token}` }
+      headers: getAuthHeaders()
     })
     const data = await res.json()
     if (res.ok) {
@@ -193,9 +200,8 @@ const handleRunRetention = async () => {
 // ИИ-протоколы
 const loadAiPrompts = async () => {
   try {
-    const token = localStorage.getItem('token')
     const res = await fetch('/api/v1/system/backups/ai-prompts', {
-      headers: { 'Authorization': `Bearer ${token}` }
+      headers: getAuthHeaders()
     })
     const data = await res.json()
     if (res.ok && data.prompts) {
@@ -209,14 +215,10 @@ const loadAiPrompts = async () => {
 const handleSavePrompt = async () => {
   savingPrompt.value = true
   try {
-    const token = localStorage.getItem('token')
     const p = activePrompt.value
     const res = await fetch('/api/v1/system/backups/ai-prompts', {
       method: 'PUT',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${token}`
-      },
+      headers: getAuthHeaders(),
       body: JSON.stringify({
         code: p.code,
         title: p.title,
@@ -249,9 +251,8 @@ const copyPromptToClipboard = () => {
 const loadDoc = async () => {
   docLoading.value = true
   try {
-    const token = localStorage.getItem('token')
     const res = await fetch(`/api/v1/system/backups/docs/${selectedDoc.value}`, {
-      headers: { 'Authorization': `Bearer ${token}` }
+      headers: getAuthHeaders()
     })
     const data = await res.json()
     if (res.ok && data.status === 'success') {
@@ -270,13 +271,9 @@ const loadDoc = async () => {
 const handleSaveDoc = async () => {
   savingDoc.value = true
   try {
-    const token = localStorage.getItem('token')
     const res = await fetch(`/api/v1/system/backups/docs/${selectedDoc.value}`, {
       method: 'PUT',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${token}`
-      },
+      headers: getAuthHeaders(),
       body: JSON.stringify({ content: docContent.value })
     })
     const data = await res.json()
