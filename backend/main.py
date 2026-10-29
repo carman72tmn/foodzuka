@@ -19,6 +19,7 @@ from app.api import (
     tbank, tbank_webhooks, bank, mango, senler, validation, multichat, kitchen, purchase, bot_commands,
     reviews, reminders, broadcasts, message_logs, vk_marketing_endpoints, link_tracker,
     system_modules,
+    system_backups,
     vk_birthday_bots, vk_cover_bots, vk_contests, vk_activity_bots,
     vk_first_comment_bots, vk_group_posting, vk_scheduler
 )
@@ -150,6 +151,7 @@ app.include_router(purchase.router, prefix="/api/v1")
 app.include_router(vk_marketing_endpoints.router, prefix="/api/v1/vk")
 app.include_router(link_tracker.router, prefix="/api/v1")
 app.include_router(system_modules.router, prefix="/api/v1")
+app.include_router(system_backups.router, prefix="/api/v1")
 app.include_router(vk_birthday_bots.router, prefix="/api/v1/vk-birthday-bots", tags=["VK Birthday Bots"])
 app.include_router(vk_cover_bots.router, prefix="/api/v1/vk-cover-bots", tags=["VK Cover Bots"])
 app.include_router(vk_contests.router, prefix="/api/v1/vk-contests", tags=["VK Contests"])
