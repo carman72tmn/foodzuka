@@ -9,7 +9,6 @@ services:
       POSTGRES_PASSWORD: ${DB_PASSWORD:-postgres}
     ports:
       - "5432:5432"
-    shm_size: 256m
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
@@ -17,11 +16,6 @@ services:
       interval: 5s
       timeout: 5s
       retries: 5
-    logging:
-      driver: "json-file"
-      options:
-        max-size: "15m"
-        max-file: "2"
 
   redis:
     image: redis:alpine
@@ -29,11 +23,6 @@ services:
     restart: always
     ports:
       - "6379:6379"
-    logging:
-      driver: "json-file"
-      options:
-        max-size: "50m"
-        max-file: "3"
 
   backend:
     build:
@@ -52,30 +41,18 @@ services:
     volumes:
       - ./backend:/app
       - /root/foodzuka/admin/public/media:/app/media
-      - /var/run/docker.sock:/var/run/docker.sock
-      - /root/foodzuka:/host_foodzuka:rw
     depends_on:
       db:
         condition: service_healthy
       redis:
         condition: service_started
-    logging:
-      driver: "json-file"
-      options:
-        max-size: "50m"
-        max-file: "3"
-    ulimits:
-      nofile:
-        soft: 65536
-        hard: 65536
 
   worker:
     build:
       context: ./backend
     container_name: foodtech-worker
-    restart: always
     env_file: .env
-    command: celery -A app.core.celery_app worker --loglevel=info --concurrency=2 --max-tasks-per-child=100
+    command: celery -A app.core.celery_app worker --loglevel=info
     environment:
       - PYTHONIOENCODING=utf-8
       - DATABASE_URL=postgresql://${DB_USERNAME:-foodtech_user}:${DB_PASSWORD:-postgres}@db:5432/${DB_DATABASE:-foodtech_db}
@@ -86,15 +63,6 @@ services:
     depends_on:
       - db
       - redis
-    logging:
-      driver: "json-file"
-      options:
-        max-size: "50m"
-        max-file: "3"
-    ulimits:
-      nofile:
-        soft: 65536
-        hard: 65536
 
   bot:
     build:
@@ -104,15 +72,8 @@ services:
     environment:
       - PYTHONIOENCODING=utf-8
       - API_URL=http://backend:8000/api/v1
-    volumes:
-      - ./bot:/app
     depends_on:
       - backend
-    logging:
-      driver: "json-file"
-      options:
-        max-size: "50m"
-        max-file: "3"
 
   admin:
     build:
@@ -136,11 +97,6 @@ services:
     depends_on:
       db:
         condition: service_healthy
-    logging:
-      driver: "json-file"
-      options:
-        max-size: "50m"
-        max-file: "3"
 
   frontend:
     build:
@@ -149,11 +105,6 @@ services:
     restart: always
     expose:
       - "5173"
-    logging:
-      driver: "json-file"
-      options:
-        max-size: "50m"
-        max-file: "3"
 
   nginx:
     image: nginx:alpine
@@ -171,24 +122,15 @@ services:
       - frontend
       - admin
       - backend
-    logging:
-      driver: "json-file"
-      options:
-        max-size: "50m"
-        max-file: "3"
 
   certbot:
     image: certbot/certbot:latest
     container_name: foodtech-certbot
+    restart: unless-stopped
     volumes:
       - ./certbot/conf:/etc/letsencrypt
       - ./certbot/www:/var/www/certbot
     entrypoint: "/bin/sh -c 'trap exit TERM; while :; do certbot renew; sleep 12h & wait $${!}; done;'"
-    logging:
-      driver: "json-file"
-      options:
-        max-size: "50m"
-        max-file: "3"
 
 volumes:
   postgres_data:
