@@ -426,6 +426,24 @@ def _serialize_and_enrich_order(
     order_dict["total_paid"] = order.total_paid
     order_dict["resolved_delivery_zone_name"] = order.resolved_zone_name
 
+    # Точный статус оплаты с приоритетом данных кассы iiko
+    pd = order.payments_details if isinstance(order.payments_details, dict) else {}
+    p_status = pd.get("payment_status")
+    if not p_status:
+        t_paid = float(order.total_paid or 0)
+        t_with_disc = float(order.total_with_discount if order.total_with_discount is not None else (order.total_amount or 0))
+        t_left = float(order.left_to_pay if order.left_to_pay is not None else max(0.0, t_with_disc - t_paid))
+        if order.status in (OrderStatus.closed, OrderStatus.delivered) or bool(order.is_paid) or (t_with_disc > 0 and t_left <= 0 and t_paid >= t_with_disc):
+            p_status = "paid"
+        elif t_paid > 0 and t_left > 0:
+            p_status = "partially_paid"
+        else:
+            p_status = "unpaid"
+    order_dict["payment_status"] = p_status
+    order_dict["payment_status_label"] = (
+        pd.get("payment_status_label") or ("Оплачен" if p_status == "paid" else ("Частично оплачен" if p_status == "partially_paid" else "Не оплачен"))
+    )
+
     # Индикаторы клиента (приоритет снимку данных в заказе)
     if order.customer_info_details:
         order_dict["customer_is_new"] = order.customer_info_details.get("is_new_guest", False)

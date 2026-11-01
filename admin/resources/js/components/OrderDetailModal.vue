@@ -593,11 +593,14 @@ const printOrder = () => {
 
 const getLoyaltyIcon = type => {
   switch (type) {
+  case 'free_product':
+  case 'gift': return 'bx-gift'
   case 'coupon_series': return 'bx-purchase-tag'
-  case 'promotion': return 'bx-gift'
+  case 'promotion': return 'bx-star'
   case 'manual_condition': return 'bx-cog'
-  case 'discount': return 'bx-minus-circle'
-  default: return 'bx-star'
+  case 'discount': return 'bx-badge-percent'
+  case 'bonus_spending': return 'bx-coin-stack'
+  default: return 'bx-purchase-tag-alt'
   }
 }
 
@@ -620,6 +623,91 @@ const getLoyaltyIconColor = type => {
   default: return 'grey-darken-1'
   }
 }
+
+// --- Лояльность, акции, подарки и бонусы iiko ---
+const paymentStatusInfo = computed(() => {
+  const pStatus = props.order?.payment_status || props.order?.payments_details?.payment_status
+  const isPaid = props.order?.is_paid
+  const totalPaid = parseFloat(props.order?.total_paid || 0)
+  const leftToPay = parseFloat(props.order?.left_to_pay !== undefined && props.order?.left_to_pay !== null ? props.order?.left_to_pay : 0)
+  const totalWithDisc = parseFloat(props.order?.total_with_discount || props.order?.total_amount || 0)
+
+  if (pStatus === 'paid' || isPaid || (totalWithDisc > 0 && leftToPay <= 0 && totalPaid >= totalWithDisc)) {
+    return {
+      status: 'paid',
+      label: 'ОПЛАЧЕН (IIKO)',
+      color: 'success',
+      colorClass: 'status-soft-success',
+      variant: 'flat',
+      isPartial: false
+    }
+  }
+
+  if (pStatus === 'partially_paid' || (totalPaid > 0 && leftToPay > 0)) {
+    return {
+      status: 'partially_paid',
+      label: 'ЧАСТИЧНО ОПЛАЧЕН',
+      color: 'warning',
+      colorClass: 'status-soft-warning',
+      variant: 'flat',
+      isPartial: true
+    }
+  }
+
+  return {
+    status: 'unpaid',
+    label: 'НЕ ОПЛАЧЕН',
+    color: 'error',
+    colorClass: 'status-soft-warning',
+    variant: 'flat',
+    isPartial: false
+  }
+})
+
+const loyaltyGifts = computed(() => {
+  const list = []
+  const items = props.order?.discounts_details?.items || []
+  for (const it of items) {
+    if (it.is_gift || it.type === 'free_product' || it.type === 'gift') {
+      list.push(it)
+    }
+  }
+  const orderItems = props.order?.order_items_details || props.order?.items || []
+  for (const it of orderItems) {
+    const isFree = parseFloat(it.price || 0) === 0 && parseFloat(it.sum || 0) === 0
+    if ((it.is_gift || isFree) && !list.some(g => (g.product_name || g.name) === it.name)) {
+      list.push({
+        name: `Подарок: ${it.name}`,
+        product_name: it.name,
+        sum: 0,
+        type: 'free_product',
+        is_gift: true
+      })
+    }
+  }
+  return list
+})
+
+const loyaltyDiscountsAndPromos = computed(() => {
+  const items = props.order?.discounts_details?.items || []
+  return items.filter(it => !it.is_gift && it.type !== 'free_product' && it.type !== 'gift' && it.type !== 'bonus_spending' && !it.is_bonus)
+})
+
+const loyaltyBonusSpending = computed(() => {
+  const spent = parseFloat(props.order?.bonus_spent || 0)
+  if (spent > 0) return spent
+  const items = props.order?.discounts_details?.items || []
+  const bonusItem = items.find(it => it.is_bonus || it.type === 'bonus_spending' || (it.name || '').toLowerCase().includes('списание бонус'))
+  return bonusItem ? parseFloat(bonusItem.sum || 0) : 0
+})
+
+const hasLoyaltySection = computed(() => {
+  return loyaltyGifts.value.length > 0 ||
+    loyaltyDiscountsAndPromos.value.length > 0 ||
+    loyaltyBonusSpending.value > 0 ||
+    parseFloat(props.order?.bonus_accrued || 0) > 0 ||
+    parseFloat(props.order?.total_discount || 0) > 0
+})
 
 const filteredDiscounts = computed(() => {
   return props.order?.discounts_details?.items || []
@@ -1636,9 +1724,9 @@ const goBackRecipe = () => {
               </div>
             </div>
 
-            <!-- 4. Loyalty & Discounts -->
+            <!-- 4. Loyalty, Promotions, Discounts & Gifts (Unified iiko loyalty block) -->
             <div
-              v-if="order.discounts_details?.items?.length || order.bonus_spent > 0 || order.bonus_accrued > 0"
+              v-if="hasLoyaltySection"
               class="info-section-soft"
             >
               <div class="section-label-soft">
@@ -1646,46 +1734,88 @@ const goBackRecipe = () => {
                   icon="bx-gift"
                   size="14"
                   class="me-1"
-                /> ЛОЯЛЬНОСТЬ
+                /> ЛОЯЛЬНОСТЬ И АКЦИИ (IIKO)
               </div>
-              <div class="glass-block-soft bg-white pa-3">
+              <div class="glass-block-soft bg-white pa-3 d-flex flex-column ga-3">
 
-                <!-- Discounts and Promotions -->
-                <div 
-                  v-for="(discount, idx) in filteredDiscounts" 
-                  :key="idx"
-                  class="d-flex align-center justify-space-between"
-                  :class="idx < (filteredDiscounts.length - 1) || order.bonus_accrued > 0 ? 'mb-2' : ''"
-                >
-                  <div class="d-flex align-center overflow-hidden">
-                    <VAvatar 
-                      size="24" 
-                      :color="getLoyaltyColor(discount.type)" 
-                      class="me-2"
-                    >
-                      <VIcon 
-                        :icon="getLoyaltyIcon(discount.type)" 
-                        size="14" 
-                        :color="getLoyaltyIconColor(discount.type)" 
-                      />
-                    </VAvatar>
-                    <div class="d-flex flex-column overflow-hidden">
-                      <span class="text-caption font-weight-bold text-truncate">{{ discount.name }}</span>
-                      <span 
-                        v-if="discount.type === 'coupon_series'" 
-                        class="text-tiny text-blue-darken-1"
-                      >
-                        Купон: {{ discount.coupon || 'Применен' }}
+                <!-- 1. Подарки к заказу (Free Products) -->
+                <div v-if="loyaltyGifts.length" class="d-flex flex-column ga-2">
+                  <div class="text-tiny font-weight-bold text-uppercase text-pink-darken-2 d-flex align-center ga-1">
+                    <VIcon icon="bx-gift" size="12" color="pink" /> Подарки к заказу
+                  </div>
+                  <div 
+                    v-for="(gift, gidx) in loyaltyGifts" 
+                    :key="'gift-' + gidx"
+                    class="d-flex align-center justify-space-between bg-pink-lighten-5 rounded pa-2"
+                  >
+                    <div class="d-flex align-center overflow-hidden">
+                      <VAvatar size="24" color="pink-lighten-4" class="me-2">
+                        <VIcon icon="bx-gift" size="14" color="pink-darken-2" />
+                      </VAvatar>
+                      <span class="text-caption font-weight-bold text-truncate text-pink-darken-4">
+                        {{ gift.product_name || gift.name }}
                       </span>
                     </div>
+                    <VChip size="x-small" color="pink-darken-1" variant="flat" class="font-weight-bold">
+                      0 ₽ (Подарок)
+                    </VChip>
                   </div>
-                  <span class="text-caption font-weight-bold text-red-darken-1">-{{ formatPrice(discount.sum) }} ₽</span>
                 </div>
 
-                <!-- Accrued Bonuses -->
+                <!-- 2. Скидки, акции и промокоды -->
+                <div v-if="loyaltyDiscountsAndPromos.length" class="d-flex flex-column ga-2">
+                  <div class="text-tiny font-weight-bold text-uppercase text-slate-500 d-flex align-center ga-1">
+                    <VIcon icon="bx-purchase-tag-alt" size="12" color="primary" /> Примененные скидки и акции
+                  </div>
+                  <div 
+                    v-for="(promo, pidx) in loyaltyDiscountsAndPromos" 
+                    :key="'promo-' + pidx"
+                    class="d-flex align-center justify-space-between py-1 border-b border-dashed"
+                  >
+                    <div class="d-flex align-center overflow-hidden">
+                      <VAvatar 
+                        size="24" 
+                        :color="getLoyaltyColor(promo.type)" 
+                        class="me-2"
+                      >
+                        <VIcon 
+                          :icon="getLoyaltyIcon(promo.type)" 
+                          size="14" 
+                          :color="getLoyaltyIconColor(promo.type)" 
+                        />
+                      </VAvatar>
+                      <div class="d-flex flex-column overflow-hidden">
+                        <span class="text-caption font-weight-bold text-truncate">{{ promo.name }}</span>
+                        <span 
+                          v-if="promo.coupon || promo.type === 'coupon_series'" 
+                          class="text-tiny text-blue-darken-2 font-weight-medium"
+                        >
+                          Промокод: {{ promo.coupon || 'Применен' }}
+                        </span>
+                      </div>
+                    </div>
+                    <span class="text-caption font-weight-bold text-red-darken-1">-{{ formatPrice(promo.sum) }} ₽</span>
+                  </div>
+                </div>
+
+                <!-- 3. Оплата / Списание бонусов iikoCard -->
+                <div v-if="loyaltyBonusSpending > 0" class="d-flex align-center justify-space-between bg-amber-lighten-5 rounded pa-2">
+                  <div class="d-flex align-center">
+                    <VAvatar size="24" color="amber-lighten-4" class="me-2">
+                      <VIcon icon="bx-coin-stack" size="14" color="amber-darken-3" />
+                    </VAvatar>
+                    <div class="d-flex flex-column">
+                      <span class="text-caption font-weight-bold text-amber-darken-4">Оплата бонусами iikoCard</span>
+                      <span class="text-tiny text-amber-darken-2">Списано баллов со счета</span>
+                    </div>
+                  </div>
+                  <span class="text-caption font-weight-black text-amber-darken-4">-{{ formatPrice(loyaltyBonusSpending) }} Б</span>
+                </div>
+
+                <!-- 4. Начисление бонусов -->
                 <div 
-                  v-if="order.bonus_accrued > 0" 
-                  class="d-flex align-center justify-space-between mt-2 pt-2 border-t border-dashed"
+                  v-if="parseFloat(order.bonus_accrued || 0) > 0" 
+                  class="d-flex align-center justify-space-between pt-1 border-t border-dashed"
                 >
                   <div class="d-flex align-center">
                     <VAvatar 
@@ -1703,66 +1833,7 @@ const goBackRecipe = () => {
                   </div>
                   <span class="text-caption font-weight-bold text-green-darken-2">+{{ formatPrice(order.bonus_accrued) }} Б</span>
                 </div>
-              </div>
-            </div>
 
-            <!-- [NEW] 5.5 Applied Promotions (Loyalty Details) -->
-            <div 
-              v-if="order.discounts_details?.items?.length" 
-              class="info-section-soft"
-            >
-              <div class="section-label-soft">
-                <VIcon
-                  icon="bx-gift"
-                  size="14"
-                  class="me-1"
-                /> ПРИМЕНЕННЫЕ АКЦИИ (IIKO)
-              </div>
-              <div class="glass-block-soft pa-0">
-                <VList density="compact" class="bg-transparent pa-0">
-                  <VListItem
-                    v-for="(item, idx) in order.discounts_details.items"
-                    :key="idx"
-                    class="py-2"
-                    :class="{ 'border-b border-dashed': idx < order.discounts_details.items.length - 1 }"
-                  >
-                    <template #prepend>
-                      <VAvatar 
-                        size="32" 
-                        :color="getLoyaltyColor(item.ui_info?.type || item.type)" 
-                        class="me-3"
-                      >
-                        <VIcon 
-                          :icon="getLoyaltyIcon(item.ui_info?.type || item.type)" 
-                          size="18" 
-                          :color="getLoyaltyIconColor(item.ui_info?.type || item.type)" 
-                        />
-                      </VAvatar>
-                    </template>
-
-                    <VListItemTitle class="text-body-2 font-weight-bold d-flex align-center justify-space-between">
-                      <span class="text-truncate" style="max-width: 250px;">{{ item.name }}</span>
-                      <span class="text-red-darken-1">-{{ formatPrice(item.sum) }} ₽</span>
-                    </VListItemTitle>
-
-                    <VListItemSubtitle class="mt-1 d-flex flex-column ga-1">
-                      <div v-if="item.ui_info?.program_name" class="d-flex align-center ga-1">
-                        <VIcon icon="bx-purchase-tag-alt" size="12" color="primary" />
-                        <span class="text-caption font-weight-medium text-primary">Программа: {{ item.ui_info.program_name }}</span>
-                      </div>
-                      <div v-if="item.ui_info?.marketing_campaign_name" class="d-flex align-center ga-1">
-                        <VIcon icon="bx-bullseye" size="12" color="pink" />
-                        <span class="text-caption">Акция: {{ item.ui_info.marketing_campaign_name }}</span>
-                      </div>
-                      <div v-if="item.ui_info?.coupon || item.ui_info?.certificate" class="d-flex align-center ga-1">
-                        <VIcon icon="bx-qr-scan" size="12" color="indigo" />
-                        <span class="text-caption text-indigo-darken-2 font-weight-bold">
-                          {{ item.ui_info.coupon ? `Купон: ${item.ui_info.coupon}` : `Сертификат: ${item.ui_info.certificate}` }}
-                        </span>
-                      </div>
-                    </VListItemSubtitle>
-                  </VListItem>
-                </VList>
               </div>
             </div>
 
@@ -1963,12 +2034,13 @@ const goBackRecipe = () => {
                 <div class="d-flex align-center ga-2 bg-white pa-2 px-3 rounded-lg border border-slate-100 shadow-sm">
                   <span class="text-caption text-disabled">Оплата:</span>
                   <VChip
-                    :class="order.is_paid ? 'status-soft-success' : 'status-soft-warning'"
+                    :class="paymentStatusInfo.colorClass"
+                    :color="paymentStatusInfo.color"
+                    :variant="paymentStatusInfo.variant"
                     size="x-small"
-                    variant="flat"
                     class="font-weight-bold px-3"
                   >
-                    {{ order.is_paid ? 'ОПЛАЧЕН' : 'НЕ ОПЛАЧЕН' }}
+                    {{ paymentStatusInfo.label }}
                   </VChip>
                 </div>
                 <div class="d-flex align-center ga-2 bg-white pa-2 px-3 rounded-lg border border-slate-100 shadow-sm">
@@ -2261,6 +2333,15 @@ const goBackRecipe = () => {
                         >
                           <VIcon v-if="item.deleted" icon="bx-x" size="14" color="error" class="me-1" />
                           {{ item.name }}
+                          <VChip
+                            v-if="item.is_gift || (parseFloat(item.price || 0) === 0 && parseFloat(item.sum || 0) === 0)"
+                            size="x-small"
+                            color="pink"
+                            variant="flat"
+                            class="ms-2 font-weight-bold"
+                          >
+                            <VIcon start size="12" icon="bx-gift" /> Подарок
+                          </VChip>
                         </div>
                         <div
                           v-if="item.size"

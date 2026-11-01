@@ -1814,15 +1814,11 @@ class IikoSyncService:
                     or raw_status_lower == "closed"
                 )
                 
-                # Если это оплата iikoCard (бонусы), прибавляем к потраченным бонусам и считаем как скидку
-                # Это делаем независимо от is_processed, так как бонусы списываются сразу и уменьшают сумму к доплате
+                # Платежи iikoCard (бонусы)
                 if pk == "iikocard" or "бонус" in (pn or "").lower():
                     bonus_spent_from_payments += psum
-                    # Сумму оплаты бонусами прописываем в скидку и вычитаем из итого к оплате
-                    total_discount += Decimal(str(psum))
-                    total_with_discount = max(Decimal("0.00"), total_with_discount - Decimal(str(psum)))
                 elif is_processed:
-                    # Только реальные оплаты (нал, карта) идут в общую сумму оплаченного
+                    # Только реальные проведенные денежные оплаты идут в сумму оплаченного
                     total_paid += psum
                 
                 pm_list_detailed.append({
@@ -1834,22 +1830,40 @@ class IikoSyncService:
                 })
                 if pn: pm_list.append(pn)
             
-            # Учитываем iiko Cloud processedPaymentsSum (если он больше того что мы спарсили)
+            # Учитываем iiko Cloud processedPaymentsSum (сумма подтвержденных кассой iiko платежей)
             processed_params = float(o_data.get("processedPaymentsSum") or 0)
             if processed_params > total_paid:
                 total_paid = processed_params
 
-            # Считаем остаток
-            left_to_pay = max(Decimal('0.00'), total_with_discount - Decimal(str(total_paid)))
-            is_paid = (left_to_pay <= Decimal('0.00'))
+            # Считаем остаток к оплате
+            left_to_pay = max(Decimal('0.00'), total_with_discount - Decimal(str(round(total_paid, 2))))
             
-            payment_method = ", ".join(list(set(pm_list))) or "Не указан"
-            
-            # Фолбэк статуса закрытого заказа: в iiko закрытый заказ всегда полностью оплачен
-            if not is_paid and raw_status_lower == "closed":
+            # СТРОГИЙ ПРИОРИТЕТ IIKO ДЛЯ СТАТУСА ОПЛАТЫ:
+            # 1. Если заказ закрыт в кассе iiko - он всегда 100% оплачен полностью
+            if raw_status_lower == "closed":
                 is_paid = True
                 total_paid = float(total_with_discount)
                 left_to_pay = Decimal('0.00')
+                payment_status = "paid"
+                payment_status_label = "Оплачен (iiko)"
+            # 2. Если сумма проведенных кассой оплат покрывает заказ
+            elif total_with_discount > 0 and left_to_pay <= Decimal('0.00') and total_paid >= float(total_with_discount):
+                is_paid = True
+                left_to_pay = Decimal('0.00')
+                payment_status = "paid"
+                payment_status_label = "Оплачен (iiko)"
+            # 3. Частичная оплата (внесена часть суммы, остаток > 0)
+            elif total_paid > 0 and left_to_pay > 0:
+                is_paid = False
+                payment_status = "partially_paid"
+                payment_status_label = "Частично оплачен"
+            # 4. Не оплачен
+            else:
+                is_paid = False
+                payment_status = "unpaid"
+                payment_status_label = "Не оплачен"
+            
+            payment_method = ", ".join(list(set(pm_list))) or "Не указан"
 
             status_map = {
                 "unconfirmed": OrderStatus.unconfirmed, 
@@ -2142,17 +2156,20 @@ class IikoSyncService:
             else:
                 order.comment = orig_comment or None
             
-            # Если заказ уже оплачен курьером или отмечен оплаченным в локальной БД, не сбрасываем в False
-            if not is_paid and getattr(order, 'is_paid', False) and mapped_status in (OrderStatus.delivering, OrderStatus.delivered):
-                is_paid = True
-                left_to_pay = Decimal('0.00')
-                logger.info(f"Order {order_id_iiko}: Retaining local courier paid status")
-
+            # Статус оплаты берется строго из кассы iiko (приоритетные значения iiko).
+            # Не сбрасываем в оплачен только на основании доставки, пока нет подтверждения кассы/платежа.
             order.total_amount, order.total_with_discount, order.total_discount = sum_total, total_with_discount, total_discount
-            order.total_paid = Decimal(str(total_paid))
+            order.total_paid = Decimal(str(round(total_paid, 2)))
             order.left_to_pay = left_to_pay
             order.is_paid, order.payment_method, order.order_type = is_paid, payment_method, order_type
-            order.payments_details = pm_list_detailed
+            order.payments_details = {
+                "items": pm_list_detailed, 
+                "total_paid": float(total_paid),
+                "left_to_pay": float(left_to_pay),
+                "payment_status": payment_status,
+                "payment_status_label": payment_status_label,
+                "processed_payments_sum": float(processed_params)
+            }
 
             # Терминальная группа
             order.terminal_group_id = terminal_group_id or order.terminal_group_id
@@ -2360,83 +2377,153 @@ class IikoSyncService:
             else:
                 logger.info(f"Order {order_id_iiko}: No valid items in webhook payload, skipping items update to prevent data loss")
 
+            # --- ОБРАБОТКА ЛОЯЛЬНОСТИ, СКИДОК, АКЦИЙ, КУПОНОВ И ПОДАРКОВ IIKO ---
+            loyalty_info = o_data.get("loyaltyInfo") or {}
+            coupon_code = loyalty_info.get("coupon")
+            dynamic_discounts = loyalty_info.get("dynamicDiscounts") or []
+            applied_manual = loyalty_info.get("appliedManualConditions") or []
+            free_products_raw = o_data.get("freeProducts") or loyalty_info.get("freeProducts") or []
+
             # Предварительно загружаем все элементы лояльности для обогащения
             def _get_all_loyalty():
                 return {item.iiko_id: item for item in session.exec(select(IikoLoyaltyItem)).all()}
             loyalty_cache = await asyncio.to_thread(_get_all_loyalty)
             
-            # Маппинг известных системных ID iiko, которые могут не быть в БД
-            SYSTEM_LOYALTY_MAP = {
-                "30ee9e91-36d4-a868-e087-15892defe17c": {"name": "Списание бонусов iikoCard", "type": "bonus_spending"},
-                "03650000-6bec-ac1f-833b-08dd8d78ea33": {"name": "Купон iikoCard", "type": "coupon_series"}
-            }
-            
             bonus_spent_from_discounts = 0
             enriched_discounts = []
+            gifts_list = []
+
+            # 1. Выделение подарков (Free Products) из iiko
+            for fp in free_products_raw:
+                if not isinstance(fp, dict): continue
+                fp_id = fp.get("id") or fp.get("productId")
+                fp_name = prod_map.get(fp_id) or fp.get("name") or fp.get("code") or "Подарочное блюдо"
+                g_item = {
+                    "name": f"Подарок к заказу: {fp_name}",
+                    "sum": 0.0,
+                    "type": "free_product",
+                    "is_gift": True,
+                    "product_id": fp_id,
+                    "product_name": fp_name
+                }
+                gifts_list.append(g_item)
+                enriched_discounts.append(g_item)
+
+            # Проверяем позиции состава заказа: если у позиции цена 0, это подарок по акции
+            for e_item in enriched_items:
+                i_price = float(e_item.get("price") or 0)
+                i_sum = float(e_item.get("sum") or 0)
+                if i_price == 0 and i_sum == 0 and not e_item.get("is_modifier"):
+                    e_item["is_gift"] = True
+                    g_name = e_item.get("name") or "Подарок к заказу"
+                    if not any(g.get("product_name") == g_name for g in gifts_list):
+                        g_item = {
+                            "name": f"Подарок к заказу: {g_name}",
+                            "sum": 0.0,
+                            "type": "free_product",
+                            "is_gift": True,
+                            "product_name": g_name
+                        }
+                        gifts_list.append(g_item)
+                        enriched_discounts.append(g_item)
+
+            # 2. Обработка скидок и акций
             for d in disc_list:
                 if not isinstance(d, dict): continue
                 ed = d.copy()
-                
                 d_sum = float(d.get("sum") or 0)
                 
-                # Возможные ID в разных структурах iiko Cloud
-                ids_to_check = [
-                    d.get("discountTypeId"), 
-                    d.get("marketingCampaignId"), 
-                    d.get("couponSeriesId"),
-                    d.get("id"),
-                    (d.get("discountType") or {}).get("id") if isinstance(d.get("discountType"), dict) else None
-                ]
+                dtype = d.get("discountType") or {}
+                dtype_id = dtype.get("id") if isinstance(dtype, dict) else d.get("discountTypeId")
+                dtype_name = dtype.get("name") if isinstance(dtype, dict) else clean(dtype)
                 
-                # Сначала проверяем системную карту
-                is_system_bonus = False
-                for tid in ids_to_check:
-                    if tid in SYSTEM_LOYALTY_MAP:
-                        sys_info = SYSTEM_LOYALTY_MAP[tid]
-                        ed["name"] = sys_info["name"]
-                        ed["type"] = sys_info["type"]
-                        is_system_bonus = (sys_info["type"] == "bonus_spending")
-                        break
+                # Поиск названия в динамических скидках или справочнике лояльности
+                resolved_name = None
+                resolved_type = "discount"
                 
-                # Если не системная, ищем в БД
-                if not ed.get("name") or ed.get("name") == "iikoCard":
-                    for tid in ids_to_check:
-                        if tid and tid in loyalty_cache:
-                            l_item = loyalty_cache[tid]
-                            ed["name"] = l_item.name
-                            ed["type"] = l_item.type
-                            if l_item.description:
-                                ed["description"] = l_item.description
-                            # Проверяем не бонусы ли это по имени
-                            if "бонус" in (l_item.name or "").lower():
-                                is_system_bonus = True
+                # Проверяем dynamicDiscounts
+                for dyn in dynamic_discounts:
+                    if isinstance(dyn, dict):
+                        mc_id = dyn.get("manualConditionId")
+                        if mc_id and mc_id in loyalty_cache:
+                            l_obj = loyalty_cache[mc_id]
+                            resolved_name = l_obj.name
+                            resolved_type = l_obj.type or "promotion"
                             break
+                        if dyn.get("name"):
+                            resolved_name = dyn.get("name")
+                            resolved_type = "promotion"
+                            break
+
+                # Проверяем кэш базы данных по discountType.id
+                if not resolved_name and dtype_id and dtype_id in loyalty_cache:
+                    l_it = loyalty_cache[dtype_id]
+                    resolved_name = l_it.name
+                    resolved_type = l_it.type or "discount"
+                elif not resolved_name and dtype_name and dtype_name != "iikoCard":
+                    resolved_name = dtype_name
+
+                # Проверка: является ли это ДЕЙСТВИТЕЛЬНО списанием бонусов
+                is_real_bonus = False
+                check_name = (resolved_name or dtype_name or "").lower()
                 
-                # Если это бонусы в виде скидки
-                if is_system_bonus or ed.get("type") == "bonus_spending" or "бонус" in (ed.get("name") or "").lower():
-                    bonus_spent_from_discounts += d_sum
+                if "списание бонус" in check_name or "оплата бонус" in check_name:
+                    is_real_bonus = True
+                elif bonus_spent_from_payments > 0 and ("бонус" in check_name or dtype_id == "30ee9e91-36d4-a868-e087-15892defe17c"):
+                    # Привязка к факту списания бонусов в платежах
+                    is_real_bonus = True
+
+                if is_real_bonus:
+                    ed["name"] = resolved_name or "Списание бонусов iikoCard"
+                    ed["type"] = "bonus_spending"
                     ed["is_bonus"] = True
-                
+                    bonus_spent_from_discounts += d_sum
+                else:
+                    # Это АКЦИЯ, СКИДКА или КУПОН, а НЕ бонусы!
+                    ed["is_bonus"] = False
+                    if coupon_code:
+                        ed["name"] = f"Промокод ({coupon_code})"
+                        ed["type"] = "coupon_series"
+                        ed["coupon"] = coupon_code
+                    elif resolved_name:
+                        ed["name"] = resolved_name
+                        ed["type"] = resolved_type
+                    else:
+                        ed["name"] = "Скидка по акции iikoCard"
+                        ed["type"] = "promotion"
+
                 enriched_discounts.append(ed)
 
-            # Начисленные бонусы (пытаемся найти в данных лояльности)
+            # Начисленные бонусы (если переданы)
             bonus_accrued = 0
-            if iiko_card_data:
-                # Если переданы данные iiko Card
-                pass # Тут можно расширить
+            if iiko_card_data and isinstance(iiko_card_data, dict):
+                bonus_accrued = float(iiko_card_data.get("bonus_accrued") or 0)
             
-            # Суммируем бонусы из платежей и скидок (обычно они приходят либо там, либо там)
+            # Суммируем реальные бонусы
             final_bonus_spent = max(bonus_spent_from_payments, bonus_spent_from_discounts)
             if bonus_spent_from_payments > 0 and bonus_spent_from_discounts > 0:
-                # Если пришли и там и там (редко), берем максимум или сумму? Обычно iiko дублирует в webhook
-                final_bonus_spent = bonus_spent_from_payments 
+                final_bonus_spent = bonus_spent_from_payments
 
             order.base_amount = sum_total
             order.left_to_pay = left_to_pay
             order.total_paid = Decimal(str(round(total_paid, 2)))
             order.bonus_spent = Decimal(str(round(final_bonus_spent, 2)))
-            order.payments_details = {"items": pm_list_detailed, "total_paid": total_paid}
-            order.discounts_details = {"items": enriched_discounts}
+            if bonus_accrued > 0:
+                order.bonus_accrued = Decimal(str(round(bonus_accrued, 2)))
+
+            order.payments_details = {
+                "items": pm_list_detailed, 
+                "total_paid": float(total_paid),
+                "left_to_pay": float(left_to_pay),
+                "payment_status": payment_status,
+                "payment_status_label": payment_status_label,
+                "processed_payments_sum": float(processed_params)
+            }
+            order.discounts_details = {
+                "items": enriched_discounts,
+                "gifts": gifts_list,
+                "bonus_spent": float(final_bonus_spent)
+            }
             order.updated_at = datetime.now(timezone.utc)
             
             sql_flag_modified(order, "order_items_details")
