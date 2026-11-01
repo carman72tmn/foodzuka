@@ -9,8 +9,8 @@ const loading = ref({
 })
 
 const settings = ref({
-  organization_id: "???",
-  external_menu_id: "???"
+  organization_id: "Загрузка...",
+  external_menu_id: "Загрузка..."
 })
 
 const syncLogs = ref([])
@@ -34,7 +34,9 @@ const fetchSettings = async () => {
     if (res.ok) {
       settings.value = await res.json()
     }
-  } catch (e) {}
+  } catch (e) {
+    console.error("Ошибка загрузки настроек iiko:", e)
+  }
 }
 
 const fetchLogs = async () => {
@@ -44,8 +46,11 @@ const fetchLogs = async () => {
     if (res.ok) {
       syncLogs.value = await res.json()
     }
-  } catch (e) {}
-  finally { logsLoading.value = false }
+  } catch (e) {
+    console.error("Ошибка загрузки логов синхронизации:", e)
+  } finally {
+    logsLoading.value = false
+  }
 }
 
 const startSync = async (type, endpoint, isFastapiV1 = false) => {
@@ -56,13 +61,13 @@ const startSync = async (type, endpoint, isFastapiV1 = false) => {
     const res = await fetch(url, { method: 'POST' })
     const data = await res.json()
     if (res.ok) {
-      showMessage(data.message || "???????????? ???????????????? ??????????????")
+      showMessage(data.message || "Синхронизация успешно запущена")
       setTimeout(fetchLogs, 1000)
     } else {
-      showMessage(data.detail || "???????????? ?????????????? ????????????", "error")
+      showMessage(data.detail || data.error || "Ошибка при запуске синхронизации", "error")
     }
   } catch (e) {
-    showMessage("???????????? ????????", "error")
+    showMessage("Сетевая ошибка при запросе синхронизации", "error")
   } finally {
     loading.value[type] = false
   }
@@ -72,7 +77,7 @@ let logInterval = null
 onMounted(() => {
   fetchSettings()
   fetchLogs()
-  logInterval = setInterval(fetchLogs, 10000) // ?????????????????? ???????? ???????????? 10 ??????
+  logInterval = setInterval(fetchLogs, 10000) // Обновление логов каждые 10 секунд
 })
 
 onUnmounted(() => {
@@ -82,101 +87,124 @@ onUnmounted(() => {
 
 <template>
   <VRow>
-    <!-- ???????????????? ???????????????????? -->
+    <!-- Карточка 1: Полное меню -->
     <VCol cols="12" md="6" lg="3">
       <VCard class="text-center h-100 py-4 border shadow-sm">
         <VCardText>
           <VAvatar color="primary" variant="tonal" size="64" class="mb-4">
             <VIcon icon="mdi-sync" size="32" />
           </VAvatar>
-          <h3 class="text-h6 font-weight-bold mb-2">???????????? ????????</h3>
+          <h3 class="text-h6 font-weight-bold mb-2">Полное меню</h3>
           <p class="text-caption text-medium-emphasis mb-6 px-4">
-            ???????????????? ???????? ??????????????, ??????????????????, ?????????????????????????? ?? ????????.
+            Синхронизация всех категорий, товаров, размерностей блюд и модификаторов.
           </p>
-          <VBtn :loading="loading.menu" color="primary" @click="startSync('menu', 'sync-menu')" class="rounded-pill px-6">
-            ??????????????????
+          <VBtn 
+            :loading="loading.menu" 
+            color="primary" 
+            @click="startSync('menu', 'sync-menu')" 
+            class="rounded-pill px-6"
+          >
+            Синхронизировать
           </VBtn>
         </VCardText>
       </VCard>
     </VCol>
 
+    <!-- Карточка 2: Обновление цен -->
     <VCol cols="12" md="6" lg="3">
       <VCard class="text-center h-100 py-4 border shadow-sm">
         <VCardText>
           <VAvatar color="info" variant="tonal" size="64" class="mb-4">
             <VIcon icon="mdi-currency-rub" size="32" />
           </VAvatar>
-          <h3 class="text-h6 font-weight-bold mb-2">???????????????? ????????</h3>
+          <h3 class="text-h6 font-weight-bold mb-2">Обновление цен</h3>
           <p class="text-caption text-medium-emphasis mb-6 px-4">
-            ?????????????? ?????????????????????????? ???????????? ?????? ???? External Menu API v2.
+            Быстрая актуализация цен товаров и размеров из External Menu API v2.
           </p>
-          <VBtn :loading="loading.prices" color="info" @click="startSync('prices', 'sync-prices')" class="rounded-pill px-6">
-            ????????????????
+          <VBtn 
+            :loading="loading.prices" 
+            color="info" 
+            @click="startSync('prices', 'sync-prices')" 
+            class="rounded-pill px-6"
+          >
+            Обновить цены
           </VBtn>
         </VCardText>
       </VCard>
     </VCol>
 
+    <!-- Карточка 3: Стоп-листы -->
     <VCol cols="12" md="6" lg="3">
       <VCard class="text-center h-100 py-4 border shadow-sm">
         <VCardText>
           <VAvatar color="error" variant="tonal" size="64" class="mb-4">
             <VIcon icon="mdi-cancel" size="32" />
           </VAvatar>
-          <h3 class="text-h6 font-weight-bold mb-2">????????-??????????</h3>
+          <h3 class="text-h6 font-weight-bold mb-2">Стоп-листы</h3>
           <p class="text-caption text-medium-emphasis mb-6 px-4">
-            ?????????????????? ???????????????????? ?????????????? ?? ???????????????????? ???????????????? ???? iiko.
+            Обновление недоступных позиций и размеров с терминалов iiko.
           </p>
-          <VBtn :loading="loading.stops" color="error" @click="startSync('stops', 'sync-stop-list')" class="rounded-pill px-6">
-            ??????????????????
+          <VBtn 
+            :loading="loading.stops" 
+            color="error" 
+            @click="startSync('stops', 'sync-stop-list')" 
+            class="rounded-pill px-6"
+          >
+            Сверить стоп-лист
           </VBtn>
         </VCardText>
       </VCard>
     </VCol>
 
+    <!-- Карточка 4: Разделы и категории -->
     <VCol cols="12" md="6" lg="3">
       <VCard class="text-center h-100 py-4 border shadow-sm">
         <VCardText>
           <VAvatar color="secondary" variant="tonal" size="64" class="mb-4">
             <VIcon icon="mdi-folder-sync" size="32" />
           </VAvatar>
-          <h3 class="text-h6 font-weight-bold mb-2">?????????????? (v2)</h3>
+          <h3 class="text-h6 font-weight-bold mb-2">Категории (v2)</h3>
           <p class="text-caption text-medium-emphasis mb-6 px-4">
-            ?????????????????????????? ?????????????????? ??????????????????, ???????????????????????? ?? ???? ????????.
+            Синхронизация дерева категорий, подкатегорий и их порядка.
           </p>
-          <VBtn :loading="loading.sections" color="secondary" @click="startSync('sections', 'categories/sync-from-iiko', true)" class="rounded-pill px-6">
-            ????????????????
+          <VBtn 
+            :loading="loading.sections" 
+            color="secondary" 
+            @click="startSync('sections', 'categories/sync-from-iiko', true)" 
+            class="rounded-pill px-6"
+          >
+            Сверить разделы
           </VBtn>
         </VCardText>
       </VCard>
     </VCol>
 
-    <!-- ?????????????????? -->
+    <!-- Блок настроек iiko -->
     <VCol cols="12" md="4">
       <VCard class="elevation-2 border">
         <VCardTitle class="pa-4 font-weight-bold">
-           <VIcon icon="mdi-cog-outline" class="me-2" /> ?????????????????? iiko
+           <VIcon icon="mdi-cog-outline" class="me-2" /> Настройки iiko
         </VCardTitle>
         <VCardText class="pa-4">
            <div class="mb-4">
               <div class="text-caption text-medium-emphasis">Organization ID:</div>
-              <div class="font-weight-medium">{{ settings.organization_id }}</div>
+              <div class="font-weight-medium font-mono text-break">{{ settings.organization_id || 'Не задан' }}</div>
            </div>
            <div class="mb-4">
               <div class="text-caption text-medium-emphasis">External Menu ID:</div>
-              <div class="font-weight-medium">{{ settings.external_menu_id }}</div>
+              <div class="font-weight-medium font-mono text-break">{{ settings.external_menu_id || 'Не задан' }}</div>
            </div>
            <VDivider class="mb-4" />
-           <VBtn block variant="tonal" to="/settings/iiko" prepend-icon="mdi-pencil">???????????????? ?? ????????????????????</VBtn>
+           <VBtn block variant="tonal" to="/settings/iiko" prepend-icon="mdi-pencil">Перейти в настройки iiko</VBtn>
         </VCardText>
       </VCard>
     </VCol>
 
-    <!-- ???????? -->
+    <!-- Блок логов -->
     <VCol cols="12" md="8">
       <VCard class="elevation-2 border">
         <VCardTitle class="pa-4 d-flex align-center font-weight-bold">
-           <VIcon icon="mdi-history" class="me-2" /> ?????????????????? ??????????????????????????
+           <VIcon icon="mdi-history" class="me-2" /> Журнал синхронизации
            <VSpacer />
            <VBtn icon="mdi-refresh" variant="text" size="small" :loading="logsLoading" @click="fetchLogs" />
         </VCardTitle>
@@ -184,10 +212,10 @@ onUnmounted(() => {
            <VDataTable
               :items="syncLogs"
               :headers="[
-                 { title: '??????', key: 'sync_type' },
-                 { title: '????????????', key: 'status' },
-                 { title: '????????????', key: 'details' },
-                 { title: '????????', key: 'created_at' }
+                 { title: 'Тип', key: 'sync_type' },
+                 { title: 'Статус', key: 'status' },
+                 { title: 'Детали операции', key: 'details' },
+                 { title: 'Дата и время', key: 'created_at' }
               ]"
               density="compact"
               hide-default-footer
@@ -198,7 +226,7 @@ onUnmounted(() => {
               <template #item.status="{ item }">
                  <VChip :color="item.status === 'success' ? 'success' : (item.status === 'running' ? 'warning' : 'error')" 
                         size="x-small" label class="font-weight-bold">
-                    {{ item.status.toUpperCase() }}
+                    {{ item.status === 'success' ? 'УСПЕШНО' : (item.status === 'running' ? 'В ПРОЦЕССЕ' : 'ОШИБКА') }}
                  </VChip>
               </template>
               <template #item.created_at="{ item }">
@@ -214,4 +242,3 @@ onUnmounted(() => {
     {{ snackbarText }}
   </VSnackbar>
 </template>
-

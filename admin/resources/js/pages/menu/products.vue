@@ -422,10 +422,29 @@ onMounted(loadData)
             </template>
 
             <template #item.price="{ item }">
-              <div class="text-h6 font-weight-bold text-primary">{{ formatPrice(item.price) }}</div>
-              <div v-if="item.old_price" class="text-caption text-decoration-line-through text-medium-emphasis">
-                {{ formatPrice(item.old_price) }}
-              </div>
+              <template v-if="item.sizes && item.sizes.length > 1">
+                <div class="text-subtitle-1 font-weight-bold text-primary">
+                  {{ formatPrice(Math.min(...item.sizes.map(s => Number(s.price)))) }} – {{ formatPrice(Math.max(...item.sizes.map(s => Number(s.price)))) }}
+                </div>
+                <div class="d-flex flex-wrap gap-1 mt-1">
+                  <VChip
+                    v-for="s in item.sizes"
+                    :key="s.id"
+                    size="x-small"
+                    :variant="s.is_default ? 'flat' : 'tonal'"
+                    :color="s.is_default ? 'primary' : 'secondary'"
+                    class="font-weight-medium"
+                  >
+                    {{ s.name }}: {{ Number(s.price) }} ₽
+                  </VChip>
+                </div>
+              </template>
+              <template v-else>
+                <div class="text-h6 font-weight-bold text-primary">{{ formatPrice(item.price) }}</div>
+                <div v-if="item.old_price" class="text-caption text-decoration-line-through text-medium-emphasis">
+                  {{ formatPrice(item.old_price) }}
+                </div>
+              </template>
             </template>
 
             <template #item.status="{ item }">
@@ -530,7 +549,26 @@ onMounted(loadData)
             </template>
 
             <template #item.price="{ item }">
-              <div class="text-subtitle-1 font-weight-bold">{{ formatPrice(item.price) }}</div>
+              <template v-if="item.sizes && item.sizes.length > 1">
+                <div class="text-subtitle-1 font-weight-bold text-primary">
+                  {{ formatPrice(Math.min(...item.sizes.map(s => Number(s.price)))) }} – {{ formatPrice(Math.max(...item.sizes.map(s => Number(s.price)))) }}
+                </div>
+                <div class="d-flex flex-wrap gap-1 mt-1">
+                  <VChip
+                    v-for="s in item.sizes"
+                    :key="s.id"
+                    size="x-small"
+                    :variant="s.is_default ? 'flat' : 'tonal'"
+                    :color="s.is_default ? 'primary' : 'secondary'"
+                    class="font-weight-medium"
+                  >
+                    {{ s.name }}: {{ Number(s.price) }} ₽
+                  </VChip>
+                </div>
+              </template>
+              <template v-else>
+                <div class="text-subtitle-1 font-weight-bold">{{ formatPrice(item.price) }}</div>
+              </template>
             </template>
 
             <template #item.status="{ item }">

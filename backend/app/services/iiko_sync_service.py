@@ -961,28 +961,67 @@ class IikoSyncService:
         return {"count": count}
 
     def _process_stop_lists(self, session: Session, stop_lists: Dict[str, Any]) -> Dict[str, Any]:
-        # Если пришел список (хотя iiko_service должен был это исправить), берем первый элемент
+        """Обработка стоп-листов: двусторонняя синхронизация (постановка и автоматическое снятие со стопа)"""
         if isinstance(stop_lists, list):
             stop_lists = stop_lists[0] if stop_lists else {}
             
         terminal_stop_lists = stop_lists.get("terminalGroupStopLists", []) if isinstance(stop_lists, dict) else []
-        count = 0
         stopped_ids = set()
         
         for t_sl in terminal_stop_lists:
             for item in t_sl.get("items", []):
-                stopped_ids.add(item.get("productId"))
+                p_id = item.get("productId")
+                if p_id:
+                    stopped_ids.add(str(p_id))
         
+        now_dt = datetime.now(timezone.utc).replace(tzinfo=None)
+        
+        # Находим товары по прямому iiko_id или через ProductSize
+        stopped_prod_ids = set()
         if stopped_ids:
-            session.execute(
-                update(Product)
-                .where(Product.iiko_id.in_(list(stopped_ids)))
-                .values(is_available=False, updated_at=datetime.now(timezone.utc).replace(tzinfo=None))
-            )
-            count = len(stopped_ids)
+            stopped_prods = session.exec(select(Product).where(Product.iiko_id.in_(list(stopped_ids)))).all()
+            for p in stopped_prods:
+                stopped_prod_ids.add(p.id)
             
+            stopped_sizes = session.exec(select(ProductSize).where(ProductSize.iiko_id.in_(list(stopped_ids)))).all()
+            for s in stopped_sizes:
+                if s.product_id:
+                    stopped_prod_ids.add(s.product_id)
+
+        # 1. ПОСТАНОВКА НА СТОП
+        placed_count = 0
+        if stopped_prod_ids:
+            for p in session.exec(select(Product).where(Product.id.in_(list(stopped_prod_ids)))).all():
+                if not p.is_stopped or p.is_available:
+                    p.is_stopped = True
+                    p.is_available = False
+                    p.stopped_at = now_dt
+                    p.updated_at = now_dt
+                    session.add(p)
+                    placed_count += 1
+
+        # 2. АВТОМАТИЧЕСКОЕ СНЯТИЕ СО СТОПА (для позиций, ушедших из стоп-листа iiko)
+        unstopped_query = select(Product).where(Product.is_stopped == True)
+        if stopped_prod_ids:
+            unstopped_query = unstopped_query.where(~Product.id.in_(list(stopped_prod_ids)))
+        
+        unstopped_prods = session.exec(unstopped_query).all()
+        released_count = 0
+        for p in unstopped_prods:
+            p.is_stopped = False
+            p.is_available = True
+            p.stopped_at = None
+            p.updated_at = now_dt
+            session.add(p)
+            released_count += 1
+
         session.commit()
-        return {"count": count}
+        logger.info(f"Stop-lists processed: {len(stopped_prod_ids)} in iiko, {placed_count} placed on stop, {released_count} released from stop")
+        return {
+            "count": len(stopped_prod_ids),
+            "placed_count": placed_count,
+            "released_count": released_count
+        }
 
     def _sync_from_external_menu_sync(self, session: Session, menu_data: Dict[str, Any], log_id: int, nomenclature_prices: Optional[Dict[tuple, float]] = None) -> Dict[str, Any]:
         """Логика обработки внешнего меню iiko (Синхронная версия для потока)"""
@@ -1083,20 +1122,45 @@ class IikoSyncService:
             nutritions = {}
             weight = None
             
+            # Определяем размер по умолчанию или первый размер с ненулевой ценой
+            target_size = None
             if sizes:
-                s0 = sizes[0]
-                prices = s0.get("prices", [])
+                target_size = next((s for s in sizes if s.get("isDefault") or s.get("default")), None)
+                if not target_size:
+                    for s in sizes:
+                        s_pr = 0
+                        if s.get("prices"): s_pr = s["prices"][0].get("price", 0)
+                        if s_pr > 0:
+                            target_size = s
+                            break
+                if not target_size:
+                    target_size = sizes[0]
+
+            if target_size:
+                prices = target_size.get("prices", [])
                 if prices: price = prices[0].get("price", 0)
-                nutritions = s0.get("nutritionPerHundredGrams") or s0.get("nutritions") or {}
-                weight = s0.get("portionWeightGrams")
+                nutritions = target_size.get("nutritionPerHundredGrams") or target_size.get("nutritions") or {}
+                weight = target_size.get("portionWeightGrams")
             elif "price" in item_data: 
                 price = item_data["price"]
 
-            # Fallback цены
-            size0_id = sizes[0].get("sizeId") if sizes else None
-            fallback_price = nomenclature_prices.get((item_id, size0_id))
+            # Fallback цены из классической номенклатуры
+            target_size_id = target_size.get("sizeId") if target_size else None
+            fallback_price = nomenclature_prices.get((item_id, target_size_id)) or nomenclature_prices.get((item_id, None))
             if (price is None or price == 0) and fallback_price is not None:
                 price = fallback_price
+
+            # Если цена все еще 0, но в других размерах есть цена > 0 - берем минимальную положительную
+            if (price is None or price == 0) and sizes:
+                positive_prices = []
+                for s in sizes:
+                    sp_list = s.get("prices", [])
+                    if sp_list and sp_list[0].get("price", 0) > 0:
+                        positive_prices.append(float(sp_list[0]["price"]))
+                    elif nomenclature_prices.get((item_id, s.get("sizeId"))):
+                        positive_prices.append(float(nomenclature_prices[(item_id, s.get("sizeId"))]))
+                if positive_prices:
+                    price = min(positive_prices)
 
             updated_data = {
                 "name": item_data["name"],
