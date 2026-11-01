@@ -125,6 +125,12 @@ class MailingCascadeService:
                             )
                         cascade = session.exec(fallback_statement.order_by(MailingCascade.id.desc())).first()
                 
+                if not cascade and event_type in ("broadcast", "reminder"):
+                    fallback_any = select(MailingCascade).where(MailingCascade.is_active == True).order_by(MailingCascade.id.asc())
+                    cascade = session.exec(fallback_any).first()
+                    if cascade:
+                        logger.info(f"Fallback active cascade #{cascade.id} ('{cascade.name}') used for event '{event_type}'")
+
                 if not cascade or not cascade.steps:
                     logger.debug(f"No active cascade found (event: {event_type}, cascade_id: {cascade_id}, customer: {customer_id})")
                     return

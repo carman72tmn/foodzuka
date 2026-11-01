@@ -961,12 +961,14 @@ class VkCoverService:
             "v": self.api_version
         }
         
-        async with httpx.AsyncClient(timeout=30.0) as client:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(60.0, connect=15.0)) as client:
             try:
                 resp = await client.get(url_server, params=params_server)
                 data = resp.json()
                 if "error" in data:
-                    logger.error(f"VK API getOwnerCoverPhotoUploadServer error: {data['error']}")
+                    err_msg = data.get("error", {}).get("error_msg", str(data["error"]))
+                    err_code = data.get("error", {}).get("error_code")
+                    logger.warning(f"VK API getOwnerCoverPhotoUploadServer предупреждение (code {err_code}): {err_msg}")
                     return False
                 
                 upload_url = data["response"]["upload_url"]
@@ -977,7 +979,7 @@ class VkCoverService:
                 upload_data = resp_upload.json()
                 
                 if "error" in upload_data:
-                    logger.error(f"VK Cover upload error: {upload_data['error']}")
+                    logger.warning(f"VK Cover upload error: {upload_data['error']}")
                     return False
                 
                 # 3. Сохраняем обложку
@@ -993,14 +995,17 @@ class VkCoverService:
                 save_data = resp_save.json()
                 
                 if "error" in save_data:
-                    logger.error(f"VK API saveOwnerCoverPhoto error: {save_data['error']}")
+                    logger.warning(f"VK API saveOwnerCoverPhoto error: {save_data['error']}")
                     return False
                 
                 logger.info(f"VK Cover successfully updated for group {group_id}")
                 return True
                 
+            except httpx.TimeoutException:
+                logger.warning(f"VK API таймаут при загрузке обложки сообщества {group_id} (VK сервер не ответил за 60с)")
+                return False
             except Exception as e:
-                logger.error(f"Failed to upload VK cover for group {group_id}: {e}", exc_info=True)
+                logger.warning(f"VK Cover upload warning for group {group_id}: {e}")
                 return False
 
     async def publish_cover(self, db: Session, bot: VkCoverBot) -> bool:
@@ -1023,7 +1028,7 @@ class VkCoverService:
         
         # Сохраняем в байты в формате JPEG (требование VK API)
         buf = BytesIO()
-        img.save(buf, format="JPEG", quality=95)
+        img.save(buf, format="JPEG", quality=85, optimize=True)
         img_bytes = buf.getvalue()
         
         # Загружаем в ВК с фоллбэком токенов при ошибках

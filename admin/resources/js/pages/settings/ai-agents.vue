@@ -441,6 +441,32 @@ const saveBulkProxies = async () => {
   }
 }
 
+const exportProxiesTxt = () => {
+  if (!proxies.value || proxies.value.length === 0) {
+    showSnackbar('Нет прокси для экспорта')
+    return
+  }
+  const lines = proxies.value.map(p => {
+    if (p.username && p.password) {
+      return `${p.host}:${p.port}:${p.username}:${p.password}`
+    } else if (p.username) {
+      return `${p.host}:${p.port}:${p.username}`
+    }
+    return `${p.host}:${p.port}`
+  })
+  const textContent = lines.join('\n')
+  const blob = new Blob([textContent], { type: 'text/plain;charset=utf-8' })
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = `proxies_export_${new Date().toISOString().slice(0, 10)}.txt`
+  document.body.appendChild(a)
+  a.click()
+  document.body.removeChild(a)
+  URL.revokeObjectURL(url)
+  showSnackbar(`Экспортировано ${lines.length} прокси в TXT`)
+}
+
 // ==========================================
 // ДЕЙСТВИЯ С ПОДКЛЮЧЕНИЯМИ ИИ
 // ==========================================
@@ -1078,6 +1104,9 @@ onMounted(() => {
                 </VBtn>
                 <VBtn color="secondary" variant="outlined" prepend-icon="bx-upload" @click="isBulkProxyModalOpen = true">
                   Массовый импорт
+                </VBtn>
+                <VBtn color="info" variant="outlined" prepend-icon="bx-download" @click="exportProxiesTxt">
+                  Экспорт в TXT
                 </VBtn>
                 <VBtn color="primary" prepend-icon="bx-plus" @click="openAddProxy">
                   Добавить прокси

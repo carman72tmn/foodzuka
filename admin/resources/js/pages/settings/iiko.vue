@@ -25,8 +25,6 @@ const showMessage = (text, color = "success") => {
 const showPassword = ref(false)
 const settings = ref({
   api_login: "",
-  app_id: "",
-  client_secret: "",
   organization_id: "",
   external_menu_id: "",
   terminal_group_id: "",
@@ -34,15 +32,11 @@ const settings = ref({
   payment_type_card: "",
   payment_type_online: "",
   payment_type_bonus: "",
-  payment_type_courier_cash: "",
-  payment_type_courier_card: "",
   bonus_limit_percent: 0,
   discount_id: "",
   no_pass_promo: false,
   no_use_bonus: false,
   no_use_iiko_promo: false,
-  hide_empty_categories: false,
-  hide_stopped_products: false,
   fallback_email: "",
   fallback_telegram_id: "",
   webhook_url: "",
@@ -51,7 +45,6 @@ const settings = ref({
   resto_login: "",
   resto_password: "",
   price_category_id: "",
-  price_source: "category",
   address_format: "components",
   city_name: "",
   manual_timezone: "",
@@ -1011,18 +1004,6 @@ onMounted(async () => {
                 </VCol>
                 <VCol cols="12" md="6">
                   <VSelect
-                    v-model="settings.price_source"
-                    :items="[
-                      { title: 'Ценовая категория из iiko API', value: 'category' },
-                      { title: 'Напрямую из внешнего меню iiko Web', value: 'menu' }
-                    ]"
-                    label="Источник выгрузки цен"
-                    hint="Выберите, откуда брать цены при синхронизации меню v2"
-                    persistent-hint
-                  />
-                </VCol>
-                <VCol cols="12" md="6" v-if="settings.price_source === 'category' || !settings.price_source">
-                  <VSelect
                     v-model="settings.price_category_id"
                     :items="priceCategories"
                     label="Категория цен"
@@ -1051,28 +1032,6 @@ onMounted(async () => {
                   Проверить Cloud API
                 </VBtn>
               </div>
-            </VCardText>
-          </VCard>
-
-          <VCard title="Параметры разработчика (Public API)" class="mb-6">
-            <VCardText>
-              <VRow>
-                <VCol cols="12" md="6">
-                  <VTextField
-                    v-model="settings.app_id"
-                    label="App ID"
-                    placeholder="Введите App ID"
-                  />
-                </VCol>
-                <VCol cols="12" md="6">
-                  <VTextField
-                    v-model="settings.client_secret"
-                    label="Client Secret"
-                    placeholder="Введите Client Secret"
-                    type="password"
-                  />
-                </VCol>
-              </VRow>
             </VCardText>
           </VCard>
 
@@ -1142,25 +1101,7 @@ onMounted(async () => {
             </VCardText>
           </VCard>
 
-          <VCard class="mt-4">
-            <VCardTitle>Способы оплаты для изменения курьером в пути</VCardTitle>
-            <VCardText>
-              <VAlert type="info" variant="tonal" class="mb-4 text-caption">
-                Выберите типы оплат из iiko, которые будут доступны курьеру для изменения способа оплаты в пути. 
-                Эти типы оплат должны быть предварительно активированы и разрешены для доставок в панели управления iiko.
-              </VAlert>
-              <VRow>
-                <VCol cols="12" md="6">
-                  <VSelect v-model="settings.payment_type_courier_cash" :items="paymentTypesOptions" label="Наличные для курьера" clearable />
-                </VCol>
-                <VCol cols="12" md="6">
-                  <VSelect v-model="settings.payment_type_courier_card" :items="paymentTypesOptions" label="Карта для курьера" clearable />
-                </VCol>
-              </VRow>
-            </VCardText>
-          </VCard>
-
-          <VCard class="mt-4">
+          <VCard>
             <VCardTitle class="d-flex align-center">
               Привязка оплат (Mapping)
               <VSpacer />
@@ -1942,8 +1883,8 @@ onMounted(async () => {
                     v-model="settings.address_format"
                     label="Формат адреса"
                     :items="[
-                      {title: 'По компонентам (Город, Улица, Дом, Подъезд, Этаж, Кв)', value: 'components'},
-                      {title: 'Одной строкой (line1 / line3 со всеми деталями)', value: 'line1'}
+                      {title: 'По компонентам (Город, Улица, Дом)', value: 'components'},
+                      {title: 'Строка (Одной строкой)', value: 'line1'}
                     ]"
                     class="mb-4"
                   />
@@ -1967,14 +1908,6 @@ onMounted(async () => {
                     clearable
                     @update:model-value="updateTimezoneOffset"
                   />
-
-                  <div class="text-subtitle-2 font-weight-bold text-grey-darken-1 mb-2 mt-4">Отображение каталога на сайте:</div>
-                  <VSwitch v-model="settings.hide_empty_categories" label="Скрывать на сайте категории без товаров" density="compact" class="mb-1" />
-                  <VSwitch v-model="settings.hide_stopped_products" label="Скрывать на сайте товары в стоп-листе" density="compact" class="mb-1" />
-                  <div class="text-caption text-grey mb-4">
-                    Если «Скрывать на сайте товары в стоп-листе» отключено, товары будут отображаться с уменьшенной яркостью и сообщением о временной недоступности без возможности покупки.
-                  </div>
-
                   <VBtn color="primary" class="mt-4" @click="saveSettings">Сохранить</VBtn>
                 </VCardText>
               </VCard>

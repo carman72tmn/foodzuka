@@ -18,13 +18,6 @@
           </VBtn>
         </div>
       </VCardTitle>
-      <VCardText v-if="selectedPeriod === 'custom'">
-        <VRow>
-          <VCol cols="12" sm="5"><VTextField v-model="customFrom" type="date" label="От" density="compact" /></VCol>
-          <VCol cols="12" sm="5"><VTextField v-model="customTo" type="date" label="До" density="compact" /></VCol>
-          <VCol cols="12" sm="2"><VBtn color="primary" block @click="fetchReport(true)">Ок</VBtn></VCol>
-        </VRow>
-      </VCardText>
     </VCard>
 
     <VCard>
@@ -35,12 +28,6 @@
         <template #item.OrderTime="{ item }">
           {{ formatDateTime(item.OrderTime) }}
         </template>
-        <template #item.OrderServiceType="{ item }">
-          <div class="d-flex flex-column">
-            <span>{{ item.OrderServiceType }}</span>
-            <span v-if="item.Courier" class="text-caption text-medium-emphasis">Курьер: {{ item.Courier }}</span>
-          </div>
-        </template>
       </VDataTable>
     </VCard>
   </div>
@@ -49,22 +36,18 @@
 <script setup>
 import { ref, onMounted } from 'vue'
 import { formatDateTime as formatDT } from '@/utils/date'
-import { getAuthHeaders } from '@/utils/auth'
 
 const selectedPeriod = ref('today')
-const customFrom = ref('')
-const customTo = ref('')
 const loading = ref(false)
 const reportData = ref([])
 
 const headers = [
   { title: '№', key: 'OrderNum' },
   { title: 'Время', key: 'OrderTime' },
-  { title: 'Клиент', key: 'CustomerName' },
+  { title: 'Сумма', key: 'OrderSum', align: 'end' },
   { title: 'Тип сервиса', key: 'OrderServiceType' },
   { title: 'Зона', key: 'DeliveryZone' },
   { title: 'Филиал', key: 'Branch' },
-  { title: 'Сумма', key: 'OrderSum', align: 'end' },
 ]
 
 function formatCurrency(val) {
@@ -79,13 +62,7 @@ async function fetchReport(forceRefresh = false) {
   loading.value = true
   try {
     const params = new URLSearchParams({ period: selectedPeriod.value, refresh: forceRefresh })
-    if (selectedPeriod.value === 'custom') {
-      params.set('date_from', customFrom.value)
-      params.set('date_to', customTo.value)
-    }
-    const resp = await fetch(`/api/v1/reports/olap/orders?${params}`, {
-      headers: getAuthHeaders()
-    })
+    const resp = await fetch(`/api/v1/reports/olap/orders?${params}`)
     const json = await resp.json()
     reportData.value = json.data || []
   } catch (e) {

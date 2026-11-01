@@ -1,13 +1,12 @@
 <script setup>
 import { ref, computed, onMounted, onUnmounted, watch, nextTick } from "vue"
-import { useRoute, useRouter } from "vue-router"
+import { useRoute } from "vue-router"
 import { formatDateTime, formatDate } from "@/utils/date"
 import { getAuthHeaders } from "@/utils/auth"
 import OrderDetailModal from "../../components/OrderDetailModal.vue"
 import { useChatStore } from "@/stores/chatStore"
 
 const route = useRoute()
-const router = useRouter()
 const CACHE_KEY = 'foodtech_orders_fast_cache_v2'
 
 // Определение статуса завершенности заказа
@@ -594,7 +593,7 @@ onMounted(async () => {
     loadOrders(true)
   }, 60000)
 
-  // 5. Подключение WebSocket Мультичата для приема входящих обновлений заказов в реальном времени
+  // 5. Подключение WebSocket Мультичата для приема входящих диалогов в реальном времени
   chatStore.connectWs()
 
   window.addEventListener('order-updated-event', handleOrderUpdateEvent)
@@ -800,10 +799,8 @@ const getOrderCookingDuration = item => {
 
 const openCustomerChat = (item) => {
   if (!item) return
-  const query = {}
-  if (item.customer_phone) query.search = item.customer_phone
-  else if (item.customer_id) query.customer_id = item.customer_id
-  router.push({ path: '/multichat', query })
+  // Переход в основной раздел Мультичата без тяжелых плавающих окон
+  window.open('/admin/multichat', '_blank')
 }
 </script>
 
@@ -1290,8 +1287,8 @@ const openCustomerChat = (item) => {
                     </VTooltip>
                   </div>
 
-                  <!-- Кнопка перехода в мультичат -->
-                  <VTooltip text="Открыть диалог в Мультичате">
+                  <!-- Кнопка быстрого открытия плавающего чата -->
+                  <VTooltip text="Написать в мессенджер (плавающий чат)">
                     <template #activator="{ props: ttProps }">
                       <VBtn
                         v-bind="ttProps"

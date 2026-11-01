@@ -68,3 +68,29 @@ if ('serviceWorker' in navigator) {
   })
 }
 
+
+// Автоматическая разблокировка аудиоподсистемы для iOS Safari и мобильных устройств
+const unlockIOSAudio = () => {
+  try {
+    const AudioContext = window.AudioContext || window.webkitAudioContext
+    if (AudioContext) {
+      const ctx = new AudioContext()
+      if (ctx.state === 'suspended') {
+        ctx.resume()
+      }
+      const buffer = ctx.createBuffer(1, 1, 22050)
+      const source = ctx.createBufferSource()
+      source.buffer = buffer
+      source.connect(ctx.destination)
+      source.start(0)
+    }
+    const silent = new Audio('data:audio/wav;base64,UklGRigAAABXQVZFZm10IBIAAAABAAEARKwAAIhYAQACABAAAABkYXRhAgAAAAEA')
+    silent.play().catch(() => {})
+    console.log('[Audio] iOS Audio playback successfully unlocked')
+  } catch (e) {
+    console.warn('[Audio] Failed to unlock audio:', e)
+  }
+}
+window.addEventListener('touchstart', unlockIOSAudio, { once: true, passive: true })
+window.addEventListener('click', unlockIOSAudio, { once: true })
+window.addEventListener('keydown', unlockIOSAudio, { once: true })

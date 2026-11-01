@@ -14,6 +14,7 @@ export default defineConfig({
     host: '0.0.0.0',
     port: 5173,
     strictPort: true,
-    allowedHosts: ['vezuroll.ru', 'www.vezuroll.ru', '72roll.ru', 'www.72roll.ru', 'localhost'],
+    allowedHosts: ['vezuroll.ru', 'www.vezuroll.ru', 'vezuroll.ru', 'www.vezuroll.ru', 'localhost'],
   }
 })
+

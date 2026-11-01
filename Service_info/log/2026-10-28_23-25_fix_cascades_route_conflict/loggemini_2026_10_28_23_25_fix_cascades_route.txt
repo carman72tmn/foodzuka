@@ -1,0 +1,20 @@
+СЕССИЯ: 2026-10-28 23:25
+ОШИБКА: "Рассылки -> Уведомления и рассылки" выдавала тост: "Не удалось загрузить цепочки уведомлений".
+СТАТУС: ИСПРАВЛЕНО И ПРОТЕСТИРОВАНО НА VPS (vezuroll.ru)
+
+1. ПРИЧИНА СБОЯ:
+   - В интерфейсе `admin/resources/js/pages/mailings/notifications-and-mailings.vue` на хуке монтирования вызывается `axios.get('/api/v1/mailings/cascades')`.
+   - В `backend/main.py` роутер `mailings.router` (с префиксом `/mailings`) был зарегистрирован РАНЬШЕ, чем `mailing_cascades.router` (с префиксом `/mailings/cascades`).
+   - В `backend/app/api/mailings.py` объявлен эндпоинт `@router.get("/{mailing_id}")`, где `mailing_id: int`.
+   - При поступлении запроса `/api/v1/mailings/cascades` движок FastAPI проверял `mailings.router` первым, перехватывал строку `"cascades"` в качестве параметра `{mailing_id}` и падал с ошибкой 422:
+     "Input should be a valid integer, unable to parse string as an integer, input: cascades".
+   - Запрос никогда не доходил до `mailing_cascades.py`, что приводило к ошибке загрузки цепочек в UI.
+
+2. ВНЕСЕННЫЕ ИЗМЕНЕНИЯ:
+   - `backend/main.py`: Порядок регистрации роутеров скорректирован — `app.include_router(mailing_cascades.router, prefix="/api/v1")` теперь зарегистрирован ПЕРЕД `app.include_router(mailings.router, prefix="/api/v1")`.
+   - `backend/app/api/mailing_cascades.py`: Добавлена поддержка обоих вариантов URL (с завершающим слэшем `/` и без него `""`).
+
+3. ТЕСТИРОВАНИЕ НА VPS:
+   - Запрос `GET https://vezuroll.ru/api/v1/mailings/cascades` вернул 401 Not Authenticated (вместо 422 int_parsing), что подтверждает корректный роутинг в контроллер цепочек.
+   - Запрос `GET https://vezuroll.ru/api/v1/mailings/cascades/` также успешно маршрутизируется.
+   - В браузере авторизованного администратора запрос отдает список активных каскадных цепочек.

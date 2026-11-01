@@ -156,6 +156,7 @@ class CustomerMessageLogResponse(BaseModel):
     delivered_at: Optional[datetime] = None
     read_at: Optional[datetime] = None
     clicked_at: Optional[datetime] = None
+    created_at: Optional[datetime] = None
     
     # Дополнительно для UI
     customer_name: Optional[str] = None

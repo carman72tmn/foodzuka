@@ -1,5 +1,5 @@
 <script setup>
-import { ref, onMounted, computed } from 'vue'
+import { ref, onMounted, computed, watch } from 'vue'
 import axios from 'axios'
 import { useToast } from 'vue-toastification'
 
@@ -315,7 +315,7 @@ const openCreateReminderDialog = () => {
     name: '',
     days_inactive: 14,
     template: 'Привет, {customer_name}! Давно не виделись. Дарим вам скидку 10% на следующий заказ по промокоду BACK10!',
-    cascade_id: null,
+    cascade_id: cascades.value.length > 0 ? cascades.value[0].id : null,
     is_active: true
   }
   isReminderDialogOpen.value = true
@@ -333,17 +333,24 @@ const saveReminder = async () => {
   }
   isSaving.value = true
   try {
+    const payload = {
+      name: currentReminder.value.name,
+      days_inactive: Number(currentReminder.value.days_inactive) || 14,
+      template: currentReminder.value.template,
+      cascade_id: currentReminder.value.cascade_id || null,
+      is_active: currentReminder.value.is_active !== false
+    }
     if (currentReminder.value.id) {
-      await axios.patch(`/api/v1/mailings/reminders/${currentReminder.value.id}`, currentReminder.value)
+      await axios.patch(`/api/v1/mailings/reminders/${currentReminder.value.id}`, payload)
       toast.success('Напоминание обновлено')
     } else {
-      await axios.post('/api/v1/mailings/reminders', currentReminder.value)
+      await axios.post('/api/v1/mailings/reminders', payload)
       toast.success('Напоминание создано')
     }
     isReminderDialogOpen.value = false
     fetchReminders()
   } catch (error) {
-    toast.error('Ошибка при сохранении напоминания')
+    toast.error('Ошибка при сохранении напоминания: ' + (error.response?.data?.detail || error.message))
   } finally {
     isSaving.value = false
   }
@@ -399,7 +406,7 @@ const openCreateBroadcastDialog = () => {
   currentBroadcast.value = {
     title: '',
     template_text: 'Привет, {customer_name}! У нас для вас отличные новости! Попробуйте наши новые роллы со скидкой 15% по ссылке: https://vezuroll.ru/menu',
-    cascade_id: null,
+    cascade_id: cascades.value.length > 0 ? cascades.value[0].id : null,
     audience_filters: {
       days_inactive: '',
       total_orders_amount_min: '',
@@ -416,12 +423,31 @@ const saveBroadcast = async () => {
   }
   isSaving.value = true
   try {
-    await axios.post('/api/v1/mailings/broadcasts', currentBroadcast.value)
+    const rawFilters = currentBroadcast.value.audience_filters || {}
+    const filters = {}
+    if (rawFilters.days_inactive !== '' && rawFilters.days_inactive !== null && !isNaN(rawFilters.days_inactive)) {
+      filters.days_inactive = Number(rawFilters.days_inactive)
+    }
+    if (rawFilters.total_orders_amount_min !== '' && rawFilters.total_orders_amount_min !== null && !isNaN(rawFilters.total_orders_amount_min)) {
+      filters.total_orders_amount_min = Number(rawFilters.total_orders_amount_min)
+    }
+    if (rawFilters.total_orders_count_min !== '' && rawFilters.total_orders_count_min !== null && !isNaN(rawFilters.total_orders_count_min)) {
+      filters.total_orders_count_min = Number(rawFilters.total_orders_count_min)
+    }
+
+    const payload = {
+      title: currentBroadcast.value.title,
+      template_text: currentBroadcast.value.template_text,
+      cascade_id: currentBroadcast.value.cascade_id || null,
+      audience_filters: Object.keys(filters).length > 0 ? filters : null
+    }
+
+    await axios.post('/api/v1/mailings/broadcasts', payload)
     toast.success('Рассылка (черновик) создана')
     isBroadcastDialogOpen.value = false
     fetchBroadcasts()
   } catch (error) {
-    toast.error('Ошибка при создании рассылки')
+    toast.error('Ошибка при создании рассылки: ' + (error.response?.data?.detail || error.message))
   } finally {
     isSaving.value = false
   }
@@ -491,6 +517,16 @@ const getStatusText = (status) => {
     default: return status
   }
 }
+
+const formatDate = (val) => {
+  if (!val) return '—'
+  const d = new Date(val)
+  return isNaN(d.getTime()) ? '—' : d.toLocaleString('ru-RU')
+}
+
+watch(activeTab, () => {
+  handleTabChange()
+})
 
 // Initial mounting load based on active tab
 const handleTabChange = () => {
@@ -942,7 +978,7 @@ onMounted(() => {
               </thead>
               <tbody>
                 <tr v-for="log in messageLogs" :key="log.id" class="hover-row">
-                  <td class="text-caption">{{ new Date(log.sent_at || log.created_at).toLocaleString('ru-RU') }}</td>
+                  <td class="text-caption">{{ formatDate(log.sent_at || log.created_at) }}</td>
                   <td>
                     <div>{{ log.customer_name }}</div>
                     <span class="text-caption text-muted">{{ log.recipient_address }}</span>

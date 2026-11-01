@@ -447,3 +447,33 @@ un_backup_retention).
      - В новой вкладке аналитики выведены KPI карточки, таблица концентрации доставок по улицам, рейтинг курьеров, выводы экспертной системы и кнопка ИИ-резюме.
 
 _Дата последнего обновления: 29.10.2026 15:28 (UTC+5)_
+
+
+---
+
+### 55. Полный аудит структуры админ-панели, настроек, сервисов, кода и бэкапов (01.11.2026) [NEW]
+**Проведено исследование эталонной среды на VPS (vezuroll.ru):**
+1. **Инфраструктура и стек**:
+   - Контейнеры: `foodtech-admin` (Vue 3 / Vite / Laravel, порты 5173, 8000, 9000), `foodtech-backend` (FastAPI / Uvicorn), `foodtech-worker` (Celery), `foodtech-bot` (Telegram), `foodtech-db` (PostgreSQL 15), `foodtech-redis`, `foodtech-nginx` (SSL Let's Encrypt), `foodtech-certbot`, `foodtech-frontend`.
+   - База данных: 153 таблицы PostgreSQL (`foodtech_db`), 16 423 клиента, 3 676 заказов, 21 роль пользователей, 168 permissions.
+2. **Структура страниц и навигации**:
+   - Админ-панель (`vezuroll.ru/admin`): 18 разделов меню, более 50 страниц (Компании, Филиалы, Зоны доставки, Меню/Категории/Опции/Импорт, Кухня/Техкарты/KDS, Заказы, ИИ-Агенты, Мультичат, Лента уведомлений, Курьеры, Клиенты, Закуп/Позиции, NPS, Лояльность iikoCard, Промокоды, Маркетинг VK (6 ботов, автопостинг, расписание), Банк/Т-Банк эквайринг, Каскадные рассылки, Система/Модули/Бэкапы/Сервер/Метки/Логи, Отчеты, Сотрудники, Пользователи и Роли).
+   - Панель сотрудников (`vezuroll.ru/pers`): специализированный роутер `employee_routes.js` и приложение `EmployeeApp.vue`.
+3. **Внешние интеграции и учетные записи**:
+   - **iiko Cloud (Transport API)**: Org ID `2704eeae-dc5f-4c9f-9b81-375c454dd5bd`, Login `e3a2b22667384961b27d33364e93a68c`.
+   - **iiko Resto (Server API)**: `https://dovezzuka-tyumen.iiko.it/resto`, Login `superapi`.
+   - **iikoCard**: Программа `03650000-6bec-ac1f-6b5a-08dadd0d9bc1`, POS-канал `120-060-943`.
+   - **Т-Банк (Тинькофф Эквайринг)**: Merchant ID `400000001164353`, SBP ID `42734785`, терминалы `2331114751` (самовывоз) и `3190059708` (доставка), сертификат Sub11 активен до июня 2027 г.
+   - **ВКонтакте**: Группа `186688777`, Mini App ID `54681737`, VK Parser активен (маска `7****`), шаблоны Pickup/Delivery уведомлений активны, 6 маркетинговых роботов.
+   - **MAX Messenger**: `https://platform-api2.max.ru`, отправка через мост `pymax_web_instance`.
+   - **Телефония и СМС-валидация**: Провайдер `red_sms` (логин `dovezuka72`), Wait Call номер `+79587091516`, тайм-аут 30 сек.
+   - **ИИ-Провайдеры**: 4 подключения (YandexGPT, Groq, Cerebras, OpenAI), 5 агентов, 5 виртуальных ассистентов.
+4. **Аудит бэкапов и файлов для восстановления**:
+   - Обнаружено 48 файлов бэкапов/архивов/дампов, из которых ключевые:
+     - `/root/foodzuka/backend/backups/foodzuka_code_config_2026_10_29_1316.tar.gz` (427.24 MB) — свежий архив кода от 29.10.2026.
+     - `/root/foodzuka/backend/backups/db_snapshot_2026_10_29_1316.sql.gz` (52.00 MB) — снимок БД от 29.10.2026.
+     - Устаревшие артефакты: `admin/build.zip` (1 MB, 31.08.2026), `admin/js.zip` (529 KB, 22.04.2026), `vk-notifications.b64` (47 KB, 25.04.2026), `vk-notifications_user.b64` (41 KB), `configs/nginx/default.conf.bak` и `default.conf.bak_`, `default.conf休息` (с испорченным именем), `scratch/check_cols.py休息`, `backend/app/api/webhooks_fixed.py` (забытый дубль от 07.04.2026), дубли в сервисах (`iiko_service.py.vps_current`, `iiko_sync_service.py.broken_save`, `iiko_sync_service.py.vps_current`, `backend/app/models/iiko_sync_service.py`).
+5. **Сравнение VPS (эталон) и локального окружения**:
+   - 484 файла идентичны по коду.
+   - 32 файла имеют реальные расхождения (на VPS самая актуальная версия с доработками от 28-29 октября 2026 г.).
+   - На VPS отсутствуют локальные мусорные файлы `*_backup.vue`.

@@ -1,0 +1,25 @@
+СЕССИЯ: 2026-10-28 23:35
+ЗАДАЧА: Исправление сбоя вкладки "Заказы" (fetchRecentMultichatDialogs), восстановление работы Монитора Т-Банка и настроек Т-API, аудит логов.
+СТАТУС: ВСЕ ИСПРАВЛЕНИЯ ПРИМЕНЕНЫ И ПРОТЕСТИРОВАНЫ НА VPS (vezuroll.ru)
+
+1. ИСПРАВЛЕНИЕ ВКЛАДКИ "ЗАКАЗЫ" (/orders):
+   - Ошибка: ReferenceError: fetchRecentMultichatDialogs is not defined
+   - Причина: В файле `admin/resources/js/pages/orders/index.vue` на строке 599 вызывалась функция `fetchRecentMultichatDialogs()`, которая не была объявлена или импортирована в данном компоненте (метод `fetchDialogs` находится внутри дочернего компонента FloatingMultichat).
+   - Решение: Вызов заменен на безопасное обращение к `floatingMultichatRef.value?.fetchDialogs()`.
+   - Фронтенд пересобран на VPS через `npm run build` (766 модулей трансформировано, 0 ошибок).
+
+2. ИСПРАВЛЕНИЕ МОНИТОРА Т-БАНК И НАСТРОЕК Т-API:
+   - Проблема: "не удалось загрузить данные" при переходе в `/settings/tbank` и пустая таблица в `/bank/tbank-payments`.
+   - Причина: Роутеры `tbank.router` (префикс `/settings/tbank`), `tbank_webhooks.router` (префикс `/tbank/webhooks`) и `bank.router` (префикс `/bank`) были созданы в `backend/app/api/`, но не были зарегистрированы в точке входа `backend/main.py`. Все входящие запросы к этим путям возвращали 404 Not Found.
+   - Решение: Роутеры `tbank`, `tbank_webhooks`, `bank`, а также `mango`, `senler`, `validation`, `bot_commands`, `multichat`, `kitchen`, `purchase` импортированы и подключены к приложению FastAPI в `backend/main.py`.
+
+3. АУДИТ И ИСПРАВЛЕНИЕ ЛОГОВ СЕРВЕРА (ОШИБКИ 422 И 404):
+   - В логах обнаружены ошибки 422 Unprocessable Entity на запросы `/api/v1/mailings/reviews`, `/api/v1/mailings/reminders`, `/api/v1/mailings/broadcasts`, `/api/v1/mailings/logs`.
+   - Причина: Роутер `mailings.router` перехватывал подпути своим параметром `/{mailing_id}` (ожидающим число).
+   - Решение: Все специализированные роутеры (`reviews`, `reminders`, `broadcasts`, `message_logs`) подключены в `backend/main.py` СТРОГО ДО общего роутера `mailings.router`.
+   - Теперь запросы `/api/v1/mailings/reviews` и `/api/v1/mailings/reminders` возвращают 200 OK (пустой список/данные) вместо 422.
+
+4. СИНХРОНИЗАЦИЯ СЕРВЕРА И ЛОКАЛЬНОГО РЕПОЗИТОРИЯ:
+   - Все изменения выгружены на VPS.
+   - Контейнер `foodtech-backend` перезапущен.
+   - Проведено контрольное curl-тестирование всех исправленных эндпоинтов.

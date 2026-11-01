@@ -46,3 +46,4 @@ qrcode==7.4.2
 Pillow==10.2.0
 telethon==1.34.0
 maxapi-python>=2.4.0
+socksio==1.0.0

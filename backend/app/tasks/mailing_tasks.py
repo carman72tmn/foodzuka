@@ -89,7 +89,7 @@ async def run_customer_broadcast(broadcast_id: int):
     
     with Session(engine) as session:
         broadcast = session.get(CustomerBroadcast, broadcast_id)
-        if not broadcast or broadcast.status not in ("draft", "scheduled"):
+        if not broadcast or broadcast.status not in ("draft", "scheduled", "processing"):
             logger.warning(f"Broadcast {broadcast_id} not found or not in draft/scheduled status")
             return
             

@@ -305,6 +305,7 @@ const permissionGroups = [
     title: 'Система',
     icon: 'ri-settings-4-line',
     items: [
+      { title: 'ИИ Агенты (Чат и Аналитика)', viewCode: 'ai_agents_chat_view', description: 'Доступ к интерактивному окну чата с ИИ агентами в корне меню' },
       { title: 'Агенты ИИ', viewCode: 'settings_ai_agents_view', editCode: 'settings_ai_agents_edit', description: 'Настройка пула прокси, API-ключей Gemini/OpenAI/GigaChat/YandexGPT и ролей агентов' },
       { title: 'Мониторинг сервера', viewCode: 'system_server_view', description: 'Мониторинг ресурсов сервера VPS (CPU, RAM, диск)' },
       { title: 'Фоновые процессы (Celery)', viewCode: 'system_tasks_view', editCode: 'system_tasks_edit', description: 'Просмотр фоновых задач, запуск синхронизаций, перезапуск зависших задач' },

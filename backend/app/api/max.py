@@ -797,7 +797,8 @@ async def receive_max_webhook(
             except Exception as e_cmd:
                 logger.error(f"Error in MAX courier text command: {e_cmd}")
 
-    if (event_type in ["message_created", "new_message", "message"] or msg_text) and user_id:
+    has_media = bool(msg_obj.get("attachments") or msg_obj.get("payload"))
+    if (event_type in ["message_created", "new_message", "message"] or msg_text) and user_id and (msg_text or has_media):
         sender_obj = msg_obj.get("sender") or data.get("sender") or {}
         first_name = sender_obj.get("first_name") or ""
         last_name = sender_obj.get("last_name") or ""
@@ -805,8 +806,14 @@ async def receive_max_webhook(
         sender_name = full_n or sender_obj.get("name") or sender_obj.get("username") or f"Пользователь MAX {user_id}"
         avatar_url = sender_obj.get("avatar_url") or sender_obj.get("photo_url") or None
         
+        # Проверяем, является ли отправитель ботом
+        bot_instance = db.get(MaxBot, bot_id) if bot_id else None
+        is_bot_sender = bool(sender_obj.get("is_bot") or (bot_instance and str(bot_instance.bot_id) == str(user_id)))
+        direction = "outbound" if is_bot_sender else "inbound"
+        target_peer_id = user_id if not is_bot_sender else str(msg_obj.get("recipient", {}).get("chat_id") or chat_id or user_id)
+
         # Проверяем привязанного клиента
-        cust = db.exec(select(Customer).where(Customer.max_user_id == user_id)).first()
+        cust = db.exec(select(Customer).where(Customer.max_user_id == target_peer_id)).first()
         if cust:
             c_name = f"{cust.first_name or cust.name or ''} {cust.last_name or cust.surname or ''}".strip()
             if c_name:
@@ -818,15 +825,15 @@ async def receive_max_webhook(
         chat_msg = MultichatMessage(
             channel="max_bot",
             channel_id=channel_id_str,
-            peer_id=user_id,
+            peer_id=target_peer_id,
             peer_name=sender_name,
             peer_avatar=avatar_url,
             from_id=user_id,
             text=msg_text or "[Вложение / Медиа]",
-            direction="inbound",
+            direction=direction,
             external_id=ext_msg_id,
             created_at=datetime.now(timezone.utc),
-            is_read=False,
+            is_read=is_bot_sender,
             payload=data
         )
         db.add(chat_msg)

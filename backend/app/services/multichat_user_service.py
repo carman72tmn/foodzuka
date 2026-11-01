@@ -516,10 +516,10 @@ class MultichatUserService:
                 pass
 
             try:
-                # 1. Получаем список диалогов (бесед)
+                # 1. Получаем список диалогов (бесед) с оптимизированным count=20
                 resp = httpx.get("https://api.vk.com/method/messages.getConversations", params={
                     "access_token": acc.token,
-                    "count": 40,
+                    "count": 20,
                     "extended": 1,
                     "fields": "first_name,last_name,photo_100,photo_50",
                     "v": "5.131"
@@ -529,13 +529,16 @@ class MultichatUserService:
                 if "error" in data:
                     err_obj = data.get("error", {})
                     err_code = err_obj.get("error_code")
-                    logger.warning(f"VK getConversations error for account {acc.name}: {err_obj}")
-                    if err_code == 9:
+                    if err_code in (9, 29):
+                        # Flood control или Rate limit ВКонтакте: штатное ограничение частоты запросов
+                        logger.info(f"VK API Flood control (code {err_code}) для аккаунта '{acc.name}'. Запросы приостановлены на 2 часа (7200 сек) для снятия блокировки ВКонтакте.")
                         try:
                             from app.core.redis import sync_redis_client
-                            sync_redis_client.setex(f"vk_flood_cooldown:{acc.id}", 600, "1")
+                            sync_redis_client.setex(f"vk_flood_cooldown:{acc.id}", 7200, "1")
                         except Exception:
                             pass
+                    else:
+                        logger.warning(f"VK getConversations error for account {acc.name}: {err_obj}")
                     continue
 
                 response_data = data.get("response", {})
@@ -611,6 +614,24 @@ class MultichatUserService:
                     if not msg_text and last_msg.get("attachments"):
                         types = [att.get("type", "вложение") for att in last_msg.get("attachments", [])]
                         msg_text = f"[{', '.join(types)}]"
+                    elif not msg_text and last_msg.get("action"):
+                        act = last_msg.get("action", {})
+                        a_type = act.get("type", "")
+                        if a_type == "chat_create":
+                            msg_text = "[Создана беседа]"
+                        elif a_type == "chat_title_update":
+                            msg_text = f"[Обновлено название: {act.get('text', '')}]"
+                        elif a_type == "chat_photo_update":
+                            msg_text = "[Обновлена фотография беседы]"
+                        elif a_type == "chat_invite_user":
+                            msg_text = "[Пользователь добавлен в беседу]"
+                        elif a_type == "chat_kick_user":
+                            msg_text = "[Пользователь покинул беседу]"
+                        else:
+                            msg_text = f"[Событие: {a_type}]"
+                    elif not msg_text:
+                        # Пропускаем пустые сообщения без текста, вложений и событий
+                        continue
 
                     is_outbound = (last_msg.get("out") == 1)
                     direction = "outbound" if is_outbound else "inbound"
@@ -809,7 +830,13 @@ class MultichatUserService:
                     title = chat.get("title") or chat.get("name") or f"MAX {chat_id}"
                     avatar = chat.get("icon", {}).get("url") if isinstance(chat.get("icon"), dict) else chat.get("avatar")
                     last_msg_obj = chat.get("last_message") or {}
-                    last_text = last_msg_obj.get("text") or chat.get("last_message_text") or "Диалог"
+                    last_text = (last_msg_obj.get("text") or chat.get("last_message_text") or "").strip()
+                    has_attachments = bool(last_msg_obj.get("attachments") or last_msg_obj.get("payload"))
+                    if not last_text and not has_attachments:
+                        # Пропускаем чаты без текста и вложений, не создаем ложные сообщения
+                        continue
+                    if not last_text and has_attachments:
+                        last_text = "[Вложение MAX]"
                     msg_ts = last_msg_obj.get("timestamp") or time.time()
                     msg_date = datetime.fromtimestamp(msg_ts / 1000 if msg_ts > 1e11 else msg_ts, tz=timezone.utc)
                     ext_id = str(last_msg_obj.get("id") or f"max_{chat_id}_{int(msg_ts)}")
@@ -963,11 +990,15 @@ class VkUserLongPollManager:
                         if "error" in data:
                             err_info = data["error"]
                             err_c = err_info.get("error_code")
-                            logger.warning(f"VK User LongPoll getLongPollServer error for {acc_name}: {err_info}")
-                            if err_c in (9, 5):
-                                await asyncio.sleep(300)
+                            if err_c in (9, 29):
+                                logger.info(f"VK User LongPoll Flood control для {acc_name}. Пауза 3600 сек для охлаждения лимитов.")
+                                await asyncio.sleep(3600)
                             else:
-                                await asyncio.sleep(15)
+                                logger.warning(f"VK User LongPoll getLongPollServer error for {acc_name}: {err_info}")
+                                if err_c == 5:
+                                    await asyncio.sleep(300)
+                                else:
+                                    await asyncio.sleep(15)
                             continue
 
                         res_obj = data.get("response", {})

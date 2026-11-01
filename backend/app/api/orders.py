@@ -813,11 +813,11 @@ def get_dashboard_summary(session: Session = Depends(get_session)):
             })
             
         # 5. Сотрудники на смене (только открытые за последние 24 часа)
-        cutoff_24h = datetime.now(timezone.utc) - timedelta(hours=24)
+        cutoff_14h = datetime.now(timezone.utc) - timedelta(hours=14)
         open_shifts_count = session.exec(
             select(func.count(Shift.id)).where(
                 Shift.status == "OPEN",
-                Shift.date_open >= cutoff_24h
+                Shift.date_open >= cutoff_14h
             )
         ).one() or 0
 

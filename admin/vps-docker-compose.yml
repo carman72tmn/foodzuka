@@ -33,7 +33,7 @@ services:
       - DATABASE_URL=postgresql://${DB_USERNAME:-foodtech_user}:${DB_PASSWORD:-postgres}@db:5432/${DB_DATABASE:-foodtech_db}
       - REDIS_URL=redis://redis:6379/0
       - API_RELOAD=True
-      - APP_PUBLIC_URL=https://72roll.ru
+      - APP_PUBLIC_URL=https://vezuroll.ru
     expose:
       - "8000"
     volumes:

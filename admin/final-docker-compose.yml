@@ -33,7 +33,7 @@ services:
       - DATABASE_URL=postgresql://${DB_USERNAME:-foodtech_user}:${DB_PASSWORD:-your_strong_password}@db:5432/${DB_DATABASE:-foodtech_db}
       - REDIS_URL=redis://redis:6379/0
       - API_RELOAD=True
-      - APP_PUBLIC_URL=https://72roll.ru
+      - APP_PUBLIC_URL=https://vezuroll.ru
     expose:
       - "8000"
     volumes:
@@ -50,7 +50,7 @@ services:
     container_name: foodtech-bot
     restart: always
     environment:
-      - API_URL=https://72roll.ru/api/v1
+      - API_URL=https://vezuroll.ru/api/v1
     volumes:
       - ./bot:/app
     depends_on:
@@ -91,7 +91,7 @@ services:
       - ./frontend:/app
       - /app/node_modules
     environment:
-      - VITE_API_URL=https://72roll.ru/api/v1
+      - VITE_API_URL=https://vezuroll.ru/api/v1
 
   nginx:
     image: nginx:alpine

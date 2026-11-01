@@ -1,2 +1,1 @@
 ALTER TABLE iiko_settings ADD COLUMN IF NOT EXISTS bonus_program_ids TEXT;
-ALTER TABLE orders ADD COLUMN IF NOT EXISTS total_paid NUMERIC(12, 2) DEFAULT 0.0;

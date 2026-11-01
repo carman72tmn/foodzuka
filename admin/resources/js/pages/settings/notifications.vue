@@ -1338,17 +1338,33 @@ onMounted(async () => {
             <li class="mb-1">Проверьте системные настройки Windows/macOS: убедитесь, что вашему браузеру (Chrome, Safari, Firefox) разрешено отправлять уведомления в панели уведомлений системы.</li>
           </ol>
 
-          <h4 class="font-weight-black text-subtitle-1 mb-2 text-primary">📱 На устройствах Apple (iPhone / iPad)</h4>
-          <p class="text-caption text-warning mb-2 font-weight-bold">
-            ⚠️ Внимание! На устройствах iOS пуш-уведомления в обычном Safari без установки приложения на экран «Домой» не работают из-за ограничений Apple.
-          </p>
-          <ol class="ps-4 mb-4 text-body-2">
-            <li class="mb-1">Откройте <b>Safari</b> и перейдите на страницу входа админки (https://vezuroll.ru/admin).</li>
-            <li class="mb-1">Нажмите на кнопку <b>«Поделиться»</b> (квадрат со стрелкой вверх) в Safari.</li>
-            <li class="mb-1">Выберите пункт <b>«На экран „Домой“» (Add to Home Screen)</b>. На вашем экране появится иконка админки.</li>
-            <li class="mb-1">Откройте созданное приложение с экрана телефона и войдите под своим логином.</li>
-            <li class="mb-1">Перейдите в этот раздел настроек и нажмите <b>«Подписаться на Пуши»</b>. Согласитесь на отправку уведомлений во всплывающем системном окне.</li>
-          </ol>
+          <h4 class="font-weight-black text-subtitle-1 mb-2 text-primary">📱 На устройствах Apple (iPhone / iPad — Все версии iOS)</h4>
+          
+          <div class="mb-3">
+            <span class="text-caption font-weight-bold text-success">🍏 Для современных iOS (16.4 и новее):</span>
+            <p class="text-caption mb-1">
+              Apple добавила Web Push API только для веб-приложений, добавленных на домашний экран (PWA):
+            </p>
+            <ol class="ps-4 text-caption mb-2">
+              <li class="mb-0.5">Откройте <b>Safari</b> и войдите в админку (https://vezuroll.ru/admin).</li>
+              <li class="mb-0.5">Нажмите кнопку <b>«Поделиться»</b> (квадрат со стрелочкой вверх) внизу Safari.</li>
+              <li class="mb-0.5">Выберите пункт <b>«На экран „Домой“» (Add to Home Screen)</b>. На рабочем столе появится иконка приложения.</li>
+              <li class="mb-0.5">Запустите админку с домашнего экрана и нажмите <b>«Подписаться на Пуши»</b> выше.</li>
+            </ol>
+          </div>
+
+          <div class="mb-3 pa-2 bg-light rounded border">
+            <span class="text-caption font-weight-bold text-info">⚡ Для старых версий iOS (до 16.3 включительно):</span>
+            <p class="text-caption mb-1">
+              В старых версиях Safari технология прямого Web Push отсутствует на уровне самой системы iOS. Для них в панели реализована многоуровневая поддержка:
+            </p>
+            <ul class="ps-4 text-caption mb-0">
+              <li class="mb-1"><b>Разблокировка звука на iOS:</b> при первом касании экрана в Safari активируется звуковая подсистема — все звуковые сигналы заказов, оплат и курьеров будут звучать даже при блокировке ориентации или свернутых меню.</li>
+              <li class="mb-1"><b>Резервный Push в Telegram:</b> настройте Telegram-бота во вкладке <a href="/admin/settings/bot" class="text-primary font-weight-bold">«Настройки TG-Бота»</a> — системные уведомления будут приходить в мессенджер в виде нативных пушей на любых версиях iOS.</li>
+              <li class="mb-1"><b>ВК-уведомления:</b> подключите шлюз ВКонтакте в <a href="/admin/settings/vk-notifications" class="text-primary font-weight-bold">«Системные рассылки»</a> для пушей в мобильное приложение VK.</li>
+              <li><b>Интерактивная лента:</b> используйте вкладку <a href="/admin/notifications-feed" class="text-primary font-weight-bold">«Лента уведомлений»</a> для живого отслеживания всех событий со звуковым сопровождением.</li>
+            </ul>
+          </div>
 
           <h4 class="font-weight-black text-subtitle-1 mb-2 text-primary">🤖 На устройствах Android</h4>
           <ol class="ps-4 mb-4 text-body-2">

@@ -15,6 +15,7 @@ from app.models.user import User
 router = APIRouter(prefix="/mailings/cascades", tags=["Mailing Cascades"])
 
 @router.get("", response_model=List[MailingCascadeResponse])
+@router.get("/", response_model=List[MailingCascadeResponse], include_in_schema=False)
 def get_cascades(db: Session = Depends(get_session), current_user: User = Depends(require_permission("mailings_cascades_view"))):
     """Получить список всех каскадов"""
     cascades = db.exec(select(MailingCascade).order_by(MailingCascade.id.desc())).all()

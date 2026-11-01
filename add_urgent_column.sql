@@ -1,0 +1,1 @@
+ALTER TABLE purchase_list_items ADD COLUMN IF NOT EXISTS is_urgent BOOLEAN DEFAULT FALSE;

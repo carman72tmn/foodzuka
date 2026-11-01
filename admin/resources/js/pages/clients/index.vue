@@ -1,7 +1,6 @@
 /* eslint-disable camelcase */
 <script setup>
 import { ref, onMounted, watch } from 'vue'
-import { useRoute } from 'vue-router'
 import { formatDateTime, formatDate, isLongTimeAgo } from '@/utils/date'
 import { getAuthHeaders } from '@/utils/auth'
 import CustomerDetailModal from '@/components/CustomerDetailModal.vue'
@@ -12,26 +11,16 @@ const loading = ref(true)
 const search = ref('')
 const page = ref(1)
 const itemsPerPage = ref(20)
-const sortBy = ref([])
 
 // Фильтры
 const availableCategories = ref([])
 const selectedCategories = ref([])
 const filterDuplicatesPhone = ref(false)
 const filterDuplicatesUid = ref(false)
-const selectedSocialChannel = ref(null)
-const socialChannelsList = [
-  { title: 'ВКонтакте', value: 'vk' },
-  { title: 'Telegram', value: 'telegram' },
-  { title: 'WhatsApp', value: 'whatsapp' },
-  { title: 'MAX Messenger', value: 'max' },
-  { title: 'SMS', value: 'sms' },
-]
 
 const headers = [
   { title: 'ID / Имя', key: 'id_name' },
   { title: 'Телефон', key: 'phone' },
-  { title: '', key: 'social_channels', sortable: true, align: 'center' },
   { title: 'ЛОЯЛЬНОСТЬ', key: 'loyalty_summary' },
   { title: 'День рождения', key: 'birthday' },
   { title: 'Риск', key: 'is_risk', align: 'center' },
@@ -91,12 +80,8 @@ const fetchCategories = async () => {
   }
 }
 
-const fetchClients = async (options = {}) => {
+const fetchClients = async () => {
   loading.value = true
-  if (options.page) page.value = options.page
-  if (options.itemsPerPage) itemsPerPage.value = options.itemsPerPage
-  if (options.sortBy) sortBy.value = options.sortBy
-  
   try {
     const params = new URLSearchParams({
       page: page.value,
@@ -121,17 +106,6 @@ const fetchClients = async (options = {}) => {
       params.append('filter_duplicates_uid', 'true')
     }
 
-    if (selectedSocialChannel.value) {
-      params.append('social_channel', selectedSocialChannel.value)
-    }
-
-    if (sortBy.value && sortBy.value.length > 0) {
-      const sort = sortBy.value[0]
-      if (sort.key === 'social_channels') {
-        params.append('sort_social', 'true')
-      }
-    }
-
     const response = await fetch(`/api/v1/customers/?${params.toString()}`, { headers: getAuthHeaders() })
     if (response.ok) {
       const data = await response.json()
@@ -153,7 +127,7 @@ const fetchClients = async (options = {}) => {
 }
 
 // Следим за изменением страницы или поиска
-watch([page, itemsPerPage, selectedCategories, filterDuplicatesPhone, filterDuplicatesUid, selectedSocialChannel], () => {
+watch([page, itemsPerPage, selectedCategories, filterDuplicatesPhone, filterDuplicatesUid], () => {
   fetchClients()
 })
 
@@ -425,11 +399,7 @@ const deleteAllClients = async () => {
   }
 }
 
-const route = useRoute()
 onMounted(() => {
-  if (route.query.search) {
-    search.value = route.query.search
-  }
   fetchClients()
   fetchCategories()
 })
@@ -437,16 +407,16 @@ onMounted(() => {
 
 <template>
   <div>
-    <div class="d-flex flex-column flex-md-row align-start align-md-center justify-space-between mb-6 gap-4">
+    <div class="d-flex align-center justify-space-between mb-4">
       <h2 class="text-h4 mb-0">
         Все клиенты
       </h2>
-      <div class="d-flex flex-wrap gap-2 w-100 w-md-auto">
+      <div>
         <VBtn
           color="primary"
           variant="tonal"
           prepend-icon="ri-download-line"
-          class="flex-grow-1 flex-sm-grow-0"
+          class="me-2"
         >
           Экспорт
         </VBtn>
@@ -454,7 +424,7 @@ onMounted(() => {
           color="success"
           variant="tonal"
           prepend-icon="ri-upload-line"
-          class="flex-grow-1 flex-sm-grow-0"
+          class="me-2"
           @click="$refs.fileInput.click()"
         >
           Импорт
@@ -470,7 +440,7 @@ onMounted(() => {
           color="warning"
           variant="tonal"
           prepend-icon="bx-sync"
-          class="flex-grow-1 flex-sm-grow-0"
+          class="me-2"
           :loading="syncAllLoading"
           @click="syncAll"
         >
@@ -480,7 +450,7 @@ onMounted(() => {
           color="error"
           variant="tonal"
           prepend-icon="bx-trash"
-          class="flex-grow-1 flex-sm-grow-0"
+          class="me-2"
           :loading="maintenanceLoading"
           @click="deleteAllClients"
         >
@@ -489,7 +459,6 @@ onMounted(() => {
         <VBtn
           color="primary"
           prepend-icon="ri-add-line"
-          class="flex-grow-1 flex-sm-grow-0"
         >
           Добавить клиента
         </VBtn>
@@ -520,12 +489,12 @@ onMounted(() => {
               </div>
             </div>
           </div>
-          <div class="d-flex flex-wrap gap-2 mt-4 mt-sm-0 w-100 w-sm-auto justify-start justify-sm-end">
+          <div class="d-flex flex-wrap gap-2 mt-4 mt-sm-0">
             <VBtn
               color="white"
               variant="elevated"
               rounded="pill"
-              class="maintenance-btn flex-grow-1 flex-sm-grow-0"
+              class="maintenance-btn"
               prepend-icon="ri-shield-check-line"
               :loading="maintenanceLoading"
               @click="checkIds"
@@ -536,7 +505,7 @@ onMounted(() => {
               color="white"
               variant="elevated"
               rounded="pill"
-              class="maintenance-btn flex-grow-1 flex-sm-grow-0"
+              class="maintenance-btn"
               prepend-icon="ri-group-line"
               :loading="maintenanceLoading"
               @click="mergeByUid"
@@ -547,7 +516,7 @@ onMounted(() => {
               color="white"
               variant="elevated"
               rounded="pill"
-              class="maintenance-btn flex-grow-1 flex-sm-grow-0"
+              class="maintenance-btn"
               prepend-icon="ri-phone-line"
               :loading="maintenanceLoading"
               @click="mergeByPhone"
@@ -561,7 +530,7 @@ onMounted(() => {
 
     <VCard>
       <VCardText class="d-flex align-center flex-wrap gap-4">
-        <div class="flex-grow-1" style="min-width: 250px; max-width: 100%;">
+        <div style="width: 350px;">
           <VTextField
             v-model="search"
             placeholder="Поиск по телефону, имени, фамилии или заметкам"
@@ -572,7 +541,7 @@ onMounted(() => {
           />
         </div>
 
-        <div class="flex-grow-1" style="min-width: 200px; max-width: 100%;">
+        <div style="width: 300px;">
           <VSelect
             v-model="selectedCategories"
             :items="availableCategories"
@@ -587,481 +556,204 @@ onMounted(() => {
           />
         </div>
 
-        <div class="flex-grow-1" style="min-width: 180px; max-width: 100%;">
-          <VSelect
-            v-model="selectedSocialChannel"
-            :items="socialChannelsList"
-            placeholder="Канал связи"
-            density="compact"
-            hide-details
-            clearable
-            prepend-inner-icon="ri-mail-line"
-          />
-        </div>
+        <VBtn
+          :color="filterDuplicatesPhone ? 'error' : 'secondary'"
+          variant="tonal"
+          :prepend-icon="filterDuplicatesPhone ? 'ri-close-line' : 'ri-user-search-line'"
+          @click="filterDuplicatesPhone = !filterDuplicatesPhone"
+        >
+          Дубли по телефону
+        </VBtn>
 
-        <div class="d-flex flex-wrap gap-2 w-100 w-sm-auto">
-          <VBtn
-            :color="filterDuplicatesPhone ? 'error' : 'secondary'"
-            variant="tonal"
-            :prepend-icon="filterDuplicatesPhone ? 'ri-close-line' : 'ri-user-search-line'"
-            class="flex-grow-1 flex-sm-grow-0"
-            @click="filterDuplicatesPhone = !filterDuplicatesPhone"
-          >
-            Дубли по телефону
-          </VBtn>
+        <VBtn
+          :color="filterDuplicatesUid ? 'error' : 'secondary'"
+          variant="tonal"
+          :prepend-icon="filterDuplicatesUid ? 'ri-user-settings-line' : 'ri-user-received-line'"
+          @click="filterDuplicatesUid = !filterDuplicatesUid"
+        >
+          Дубли по UID
+        </VBtn>
 
-          <VBtn
-            :color="filterDuplicatesUid ? 'error' : 'secondary'"
-            variant="tonal"
-            :prepend-icon="filterDuplicatesUid ? 'ri-user-settings-line' : 'ri-user-received-line'"
-            class="flex-grow-1 flex-sm-grow-0"
-            @click="filterDuplicatesUid = !filterDuplicatesUid"
-          >
-            Дубли по UID
-          </VBtn>
-        </div>
-
-        <VSpacer class="d-none d-sm-block" />
-        <div class="text-caption text-disabled w-100 w-sm-auto text-end mt-2 mt-sm-0">
+        <VSpacer />
+        <div class="text-caption text-disabled">
           Всего записей: {{ totalClients }}
         </div>
       </VCardText>
       <VDivider />
 
-      <!-- Десктопная версия (таблица) -->
-      <div class="d-none d-md-block">
-        <VDataTableServer
-          v-model:page="page"
-          v-model:items-per-page="itemsPerPage"
-          :headers="headers"
-          :items="clients"
-          :items-length="totalClients"
-          :loading="loading"
-          hover
-          @update:options="fetchClients"
-        >
-          <template #header.loyalty_categories="{ column }">
-            <div class="d-flex align-center">
-              <span>{{ column.title }}</span>
-              <VMenu :close-on-content-click="false" location="bottom">
-                <template #activator="{ props }">
-                  <VBtn
-                    icon="ri-filter-3-line"
-                    variant="text"
-                    size="x-small"
-                    v-bind="props"
-                    :color="selectedCategories.length > 0 ? 'primary' : 'default'"
-                    class="ms-1"
-                  />
-                </template>
-                <VCard min-width="250" class="pa-2">
-                  <VSelect
-                    v-model="selectedCategories"
-                    :items="availableCategories"
-                    label="Выберите категории"
-                    multiple
-                    chips
-                    closable-chips
-                    density="compact"
-                    variant="outlined"
-                    hide-details
-                    clearable
-                  />
-                </VCard>
-              </VMenu>
-            </div>
-          </template>
-          <template #header.social_channels>
-            <VIcon icon="ri-mail-line" title="Каналы связи" class="cursor-pointer" />
-          </template>
-
-          <template #item.social_channels="{ item }">
-            <div class="d-flex align-center justify-center ga-1">
-              <!-- VK -->
-              <VIcon
-                v-if="item.social_channels?.vk?.connected"
-                icon="ri-vk-fill"
-                size="20"
-                :color="item.social_channels.vk.active ? '#4c75a3' : '#ff4d4f'"
-                :title="item.social_channels.vk.active ? 'VK: Подписка активна' : 'VK: Заблокировано или нет подписки'"
-              />
-              
-              <!-- Telegram -->
-              <VIcon
-                v-if="item.social_channels?.telegram?.connected"
-                icon="ri-telegram-fill"
-                size="20"
-                :color="item.social_channels.telegram.active ? '#0088cc' : '#ff4d4f'"
-                :title="item.social_channels.telegram.active ? 'Telegram: Подписка активна' : 'Telegram: Уведомления отключены'"
-              />
-              
-              <!-- WhatsApp -->
-              <VIcon
-                v-if="item.social_channels?.whatsapp?.connected"
-                icon="ri-whatsapp-line"
-                size="20"
-                :color="item.social_channels.whatsapp.active ? '#25D366' : '#ff4d4f'"
-                :title="item.social_channels.whatsapp.active ? 'WhatsApp: Доступен' : 'WhatsApp: Блокировка'"
-              />
-              
-              <!-- MAX -->
-              <VIcon
-                v-if="item.social_channels?.max?.connected"
-                icon="ri-message-3-line"
-                size="20"
-                :color="item.social_channels.max.active ? '#7360F2' : '#ff4d4f'"
-                :title="item.social_channels.max.active ? 'MAX Messenger: Доступен' : 'MAX Messenger: Блокировка'"
-              />
-              
-              <!-- SMS -->
-              <VIcon
-                v-if="item.social_channels?.sms?.connected"
-                icon="ri-mail-send-line"
-                size="20"
-                :color="item.social_channels.sms.active ? '#FF9800' : '#ff4d4f'"
-                :title="item.social_channels.sms.active ? 'SMS: Доступно' : 'SMS: Блокировка'"
-              />
-            </div>
-          </template>
-
-          <template #item.id_name="{ item }">
-            <div class="d-flex align-center py-2" style="cursor: pointer" @click="openCustomerDetails(item)">
-              <VAvatar size="32" color="primary" variant="tonal" class="me-3">
-                {{ (item.name || 'G').charAt(0) }}
-              </VAvatar>
-              <div class="d-flex flex-column align-start">
-                <span class="font-weight-bold text-no-wrap text-high-emphasis">{{ item.name }} {{ item.surname }}</span>
-                <span class="text-caption text-disabled">ID: {{ item.id }}</span>
-              </div>
-              <VIcon v-if="item.high_risk_status" icon="bx-error" color="error" size="18" class="ms-2" />
-            </div>
-          </template>
-
-          <template #item.phone="{ item }">
-            <span class="text-body-2 text-primary font-weight-medium">{{ item.phone }}</span>
-          </template>
-          
-          <template #item.loyalty_summary="{ item }">
-            <div class="d-flex flex-column align-start">
-              <div class="d-flex flex-wrap gap-1 mb-1">
-                <VChip 
-                  v-if="item.is_new_guest && (item.total_orders_count || 0) <= 1" 
-                  size="x-small" 
-                  color="success" 
-                  class="font-weight-bold"
-                >
-                  НОВЫЙ ГОСТЬ
-                </VChip>
-                
-                <VChip 
-                  v-if="isLongTimeAgo(item.last_order_date)" 
-                  size="x-small" 
-                  color="warning" 
-                  class="font-weight-bold"
-                  prepend-icon="ri-history-line"
-                >
-                  ВЕРНУЛСЯ
-                </VChip>
-              </div>
-              <div v-if="item.bonus_points" class="d-flex align-center">
-                <VIcon icon="bx-coin" size="14" color="primary" class="me-1" />
-                <span class="text-body-2 font-weight-medium text-high-emphasis">{{ item.bonus_points }} баллов</span>
-              </div>
-              <span v-else-if="!item.is_new_guest && !isLongTimeAgo(item.last_order_date)" class="text-caption text-disabled">Активен</span>
-            </div>
-          </template>
-
-          <template #item.loyalty_categories="{ item }">
-            <div class="d-flex flex-wrap gap-1" style="max-width: 200px">
-              <template v-if="parseLoyaltyCategories(item).length">
-                <VChip
-                  v-for="(cat, idx) in parseLoyaltyCategories(item)"
-                  :key="idx"
-                  size="x-small"
-                  variant="tonal"
-                  color="secondary"
-                  class="text-capitalize"
-                >
-                  {{ cat }}
-                </VChip>
-              </template>
-              <span v-else class="text-caption text-disabled">-</span>
-            </div>
-          </template>
-
-          <template #item.is_risk="{ item }">
-            <VTooltip :text="item.high_risk_reason || 'Без описания'" v-if="item.high_risk_status">
+      <VDataTableServer
+        v-model:page="page"
+        v-model:items-per-page="itemsPerPage"
+        :headers="headers"
+        :items="clients"
+        :items-length="totalClients"
+        :loading="loading"
+        hover
+        @update:options="fetchClients"
+      >
+        <template #header.loyalty_categories="{ column }">
+          <div class="d-flex align-center">
+            <span>{{ column.title }}</span>
+            <VMenu :close-on-content-click="false" location="bottom">
               <template #activator="{ props }">
-                <VIcon v-bind="props" icon="bx-error" color="error" />
-              </template>
-            </VTooltip>
-            <VIcon v-else icon="bx-check-shield" color="success" />
-          </template>
-
-          <template #item.birthday="{ item }">
-            <span class="text-body-2 text-high-emphasis">{{ item.birthday ? formatDate(item.birthday) : '-' }}</span>
-          </template>
-
-
-          <template #item.bonus_points="{ item }">
-            <span class="text-success font-weight-bold">{{ formatMoney(item.bonus_points) }}</span>
-          </template>
-
-          <template #item.total_orders_count="{ item }">
-            <span class="text-high-emphasis">{{ item.total_orders_count }}</span>
-          </template>
-
-          <template #item.total_orders_amount="{ item }">
-            <span class="text-high-emphasis font-weight-bold">{{ formatMoney(item.total_orders_amount) }} ₽</span>
-          </template>
-
-          <template #item.last_order_date="{ item }">
-            <span class="text-body-2 text-high-emphasis">{{ item.last_order_date ? formatDate(item.last_order_date) : '-' }}</span>
-          </template>
-
-          <template #item.is_blocked="{ item }">
-            <VSwitch
-              v-model="item.is_blocked"
-              color="error"
-              density="compact"
-              hide-details
-              @change="toggleBlock(item)"
-            />
-          </template>
-
-          <template #item.actions="{ item }">
-            <div class="d-flex justify-end ga-1">
-              <VBtn
-                icon="bx-show"
-                size="x-small"
-                variant="text"
-                color="info"
-                @click="openCustomerDetails(item)"
-              />
-              <VBtn
-                icon="bx-sync"
-                size="x-small"
-                variant="text"
-                color="primary"
-                :loading="item.syncing"
-                @click="syncWithIiko(item)"
-              />
-              <VBtn
-                :icon="item.is_blocked ? 'bx-lock-open' : 'bx-lock'"
-                size="x-small"
-                variant="text"
-                :color="item.is_blocked ? 'success' : 'error'"
-                @click="item.is_blocked = !item.is_blocked; toggleBlock(item)"
-              />
-            </div>
-          </template>
-        </VDataTableServer>
-      </div>
-
-      <!-- Мобильная версия (карточки) -->
-      <div class="d-block d-md-none mt-4">
-        <div v-if="clients.length === 0" class="d-flex flex-column align-center my-8 py-8 bg-var-theme-surface rounded border elevation-1">
-          <VIcon icon="ri-inbox-line" size="48" color="disabled" class="mb-2" />
-          <div class="text-body-1 text-disabled">Клиенты не найдены</div>
-        </div>
-        <div v-else class="pa-4">
-          <VCard
-            v-for="item in clients"
-            :key="item.id"
-            class="mb-4 client-mobile-card border rounded-lg elevation-1 pa-4"
-            :style="{
-              borderLeft: item.high_risk_status ? '5px solid rgb(var(--v-theme-error))' : '5px solid rgb(var(--v-theme-success))'
-            }"
-            @click="openCustomerDetails(item)"
-          >
-            <!-- Шапка: Аватар, Имя, Фамилия, ID, Риск-индикатор и статус блокировки -->
-            <div class="d-flex justify-space-between align-start mb-3">
-              <div class="d-flex align-center">
-                <VAvatar size="40" color="primary" variant="tonal" class="me-3">
-                  {{ (item.name || 'G').charAt(0) }}
-                </VAvatar>
-                <div class="d-flex flex-column align-start">
-                  <span class="font-weight-bold text-subtitle-1 text-high-emphasis">{{ item.name }} {{ item.surname }}</span>
-                  <span class="text-caption text-disabled">ID: {{ item.id }}</span>
-                </div>
-                <VIcon v-if="item.high_risk_status" icon="bx-error" color="error" size="20" class="ms-2" />
-              </div>
-              
-              <div @click.stop class="d-flex align-center">
-                <span class="text-caption text-disabled me-1">Блок:</span>
-                <VSwitch
-                  v-model="item.is_blocked"
-                  color="error"
-                  density="compact"
-                  hide-details
-                  @change="toggleBlock(item)"
-                />
-              </div>
-            </div>
-
-            <VDivider class="my-2" />
-
-            <!-- Телефон и каналы связи -->
-            <div class="d-flex justify-space-between align-center mb-2">
-              <a 
-                v-if="item.phone"
-                :href="'tel:' + item.phone" 
-                class="text-body-2 font-weight-bold text-primary text-decoration-none"
-                @click.stop
-              >
-                {{ item.phone }}
-              </a>
-              <span v-else class="text-caption text-disabled">—</span>
-              
-              <!-- Иконки соцсетей -->
-              <div class="d-flex align-center gap-1">
-                <!-- VK -->
-                <VIcon
-                  v-if="item.social_channels?.vk?.connected"
-                  icon="ri-vk-fill"
-                  size="18"
-                  :color="item.social_channels.vk.active ? '#4c75a3' : '#ff4d4f'"
-                  :title="item.social_channels.vk.active ? 'VK: Активен' : 'VK: Блок'"
-                />
-                <!-- Telegram -->
-                <VIcon
-                  v-if="item.social_channels?.telegram?.connected"
-                  icon="ri-telegram-fill"
-                  size="18"
-                  :color="item.social_channels.telegram.active ? '#0088cc' : '#ff4d4f'"
-                />
-                <!-- WhatsApp -->
-                <VIcon
-                  v-if="item.social_channels?.whatsapp?.connected"
-                  icon="ri-whatsapp-line"
-                  size="18"
-                  :color="item.social_channels.whatsapp.active ? '#25D366' : '#ff4d4f'"
-                />
-                <!-- MAX Messenger -->
-                <VIcon
-                  v-if="item.social_channels?.max?.connected"
-                  icon="ri-message-3-line"
-                  size="18"
-                  :color="item.social_channels.max.active ? '#7360F2' : '#ff4d4f'"
-                />
-                <!-- SMS -->
-                <VIcon
-                  v-if="item.social_channels?.sms?.connected"
-                  icon="ri-mail-send-line"
-                  size="18"
-                  :color="item.social_channels.sms.active ? '#FF9800' : '#ff4d4f'"
-                />
-              </div>
-            </div>
-
-            <!-- Бонусы и статусы лояльности -->
-            <div class="d-flex justify-space-between align-center mb-3">
-              <div class="d-flex flex-wrap gap-1">
-                <VChip v-if="item.is_new_guest && (item.total_orders_count || 0) <= 1" size="x-small" color="success" class="font-weight-bold">
-                  НОВЫЙ ГОСТЬ
-                </VChip>
-                <VChip v-if="isLongTimeAgo(item.last_order_date)" size="x-small" color="warning" class="font-weight-bold" prepend-icon="ri-history-line">
-                  ВЕРНУЛСЯ
-                </VChip>
-              </div>
-              
-              <div v-if="item.bonus_points" class="d-flex align-center text-primary font-weight-bold text-body-2">
-                <VIcon icon="bx-coin" size="16" class="me-1" />
-                <span>{{ item.bonus_points }} баллов</span>
-              </div>
-              <span v-else class="text-caption text-disabled">0 баллов</span>
-            </div>
-
-            <!-- Статистика по заказам -->
-            <div class="bg-light-opacity rounded pa-2 mb-3 text-caption d-flex justify-space-around" style="background-color: rgba(var(--v-theme-primary), 0.05);">
-              <div class="text-center">
-                <div class="text-disabled">Заказы</div>
-                <div class="font-weight-bold text-high-emphasis">{{ item.total_orders_count || 0 }}</div>
-              </div>
-              <VDivider vertical class="mx-2" />
-              <div class="text-center">
-                <div class="text-disabled">Сумма</div>
-                <div class="font-weight-bold text-high-emphasis">{{ formatMoney(item.total_orders_amount) }} ₽</div>
-              </div>
-              <VDivider vertical class="mx-2" />
-              <div class="text-center">
-                <div class="text-disabled">Визит</div>
-                <div class="font-weight-bold text-high-emphasis">{{ item.last_order_date ? formatDate(item.last_order_date) : '-' }}</div>
-              </div>
-            </div>
-
-            <!-- Категории и День рождения -->
-            <div class="d-flex justify-space-between align-center mb-3 text-caption">
-              <div>
-                <span v-if="item.birthday" class="text-high-emphasis">🎂 {{ formatDate(item.birthday) }}</span>
-                <span v-else class="text-disabled">🎂 не указан</span>
-              </div>
-              <div class="d-flex flex-wrap gap-1">
-                <VChip
-                  v-for="(cat, idx) in parseLoyaltyCategories(item)"
-                  :key="idx"
+                <VBtn
+                  icon="ri-filter-3-line"
+                  variant="text"
                   size="x-small"
-                  variant="tonal"
-                  color="secondary"
-                  class="text-capitalize"
-                >
-                  {{ cat }}
-                </VChip>
-              </div>
+                  v-bind="props"
+                  :color="selectedCategories.length > 0 ? 'primary' : 'default'"
+                  class="ms-1"
+                />
+              </template>
+              <VCard min-width="250" class="pa-2">
+                <VSelect
+                  v-model="selectedCategories"
+                  :items="availableCategories"
+                  label="Выберите категории"
+                  multiple
+                  chips
+                  closable-chips
+                  density="compact"
+                  variant="outlined"
+                  hide-details
+                  clearable
+                />
+              </VCard>
+            </VMenu>
+          </div>
+        </template>
+        <template #item.id_name="{ item }">
+          <div class="d-flex align-center py-2" style="cursor: pointer" @click="openCustomerDetails(item)">
+            <VAvatar size="32" color="primary" variant="tonal" class="me-3">
+              {{ (item.name || 'G').charAt(0) }}
+            </VAvatar>
+            <div class="d-flex flex-column align-start">
+              <span class="font-weight-bold text-no-wrap">{{ item.name }} {{ item.surname }}</span>
+              <span class="text-caption text-disabled">ID: {{ item.id }}</span>
             </div>
+            <VIcon v-if="item.high_risk_status" icon="bx-error" color="error" size="18" class="ms-2" />
+          </div>
+        </template>
 
-            <VDivider class="my-2" />
-
-            <!-- Быстрые действия -->
-            <div class="d-flex justify-end gap-2 pt-1" @click.stop>
-              <VBtn
-                icon="bx-show"
-                size="small"
-                variant="tonal"
-                color="info"
-                title="Посмотреть карточку"
-                @click="openCustomerDetails(item)"
-              />
-              <VBtn
-                icon="bx-sync"
-                size="small"
-                variant="tonal"
-                color="primary"
-                :loading="item.syncing"
-                title="Синхронизировать с iiko"
-                @click="syncWithIiko(item)"
-              />
-              <VBtn
-                :icon="item.is_blocked ? 'bx-lock-open' : 'bx-lock'"
-                size="small"
-                variant="tonal"
-                :color="item.is_blocked ? 'success' : 'error'"
-                title="Блокировка"
-                @click="item.is_blocked = !item.is_blocked; toggleBlock(item)"
-              />
+        <template #item.phone="{ item }">
+          <span class="text-body-2 text-primary font-weight-medium">{{ item.phone }}</span>
+        </template>
+        
+        <template #item.loyalty_summary="{ item }">
+          <div class="d-flex flex-column align-start">
+            <div class="d-flex flex-wrap gap-1 mb-1">
+              <VChip 
+                v-if="item.is_new_guest && (item.total_orders_count || 0) <= 1" 
+                size="x-small" 
+                color="success" 
+                class="font-weight-bold"
+              >
+                НОВЫЙ ГОСТЬ
+              </VChip>
+              
+              <VChip 
+                v-if="isLongTimeAgo(item.last_order_date)" 
+                size="x-small" 
+                color="warning" 
+                class="font-weight-bold"
+                prepend-icon="ri-history-line"
+              >
+                ВЕРНУЛСЯ
+              </VChip>
             </div>
-          </VCard>
+            <div v-if="item.bonus_points" class="d-flex align-center">
+              <VIcon icon="bx-coin" size="14" color="primary" class="me-1" />
+              <span class="text-body-2 font-weight-medium">{{ item.bonus_points }} баллов</span>
+            </div>
+            <span v-else-if="!item.is_new_guest && !isLongTimeAgo(item.last_order_date)" class="text-caption text-disabled">Активен</span>
+          </div>
+        </template>
 
-          <!-- Мобильная пагинация -->
-          <div class="d-flex align-center justify-center mt-4 gap-2">
+        <template #item.loyalty_categories="{ item }">
+          <div class="d-flex flex-wrap gap-1" style="max-width: 200px">
+            <template v-if="parseLoyaltyCategories(item).length">
+              <VChip
+                v-for="(cat, idx) in parseLoyaltyCategories(item)"
+                :key="idx"
+                size="x-small"
+                variant="tonal"
+                color="secondary"
+                class="text-capitalize"
+              >
+                {{ cat }}
+              </VChip>
+            </template>
+            <span v-else class="text-caption text-disabled">-</span>
+          </div>
+        </template>
+
+        <template #item.is_risk="{ item }">
+          <VTooltip :text="item.high_risk_reason || 'Без описания'" v-if="item.high_risk_status">
+            <template #activator="{ props }">
+              <VIcon v-bind="props" icon="bx-error" color="error" />
+            </template>
+          </VTooltip>
+          <VIcon v-else icon="bx-check-shield" color="success" />
+        </template>
+
+        <template #item.birthday="{ item }">
+          <span class="text-body-2">{{ item.birthday ? formatDate(item.birthday) : '-' }}</span>
+        </template>
+
+
+        <template #item.bonus_points="{ item }">
+          <span class="text-success font-weight-bold">{{ formatMoney(item.bonus_points) }}</span>
+        </template>
+
+        <template #item.total_orders_count="{ item }">
+          <span>{{ item.total_orders_count }}</span>
+        </template>
+
+        <template #item.total_orders_amount="{ item }">
+          <span>{{ formatMoney(item.total_orders_amount) }}</span>
+        </template>
+
+        <template #item.last_order_date="{ item }">
+          <span class="text-body-2">{{ item.last_order_date ? formatDate(item.last_order_date) : '-' }}</span>
+        </template>
+
+        <template #item.is_blocked="{ item }">
+          <VSwitch
+            v-model="item.is_blocked"
+            color="error"
+            density="compact"
+            hide-details
+            @change="toggleBlock(item)"
+          />
+        </template>
+
+        <template #item.actions="{ item }">
+          <div class="d-flex justify-end ga-1">
             <VBtn
-              icon="ri-arrow-left-s-line"
+              icon="bx-show"
+              size="x-small"
               variant="text"
-              size="small"
-              :disabled="page <= 1"
-              @click="page--"
+              color="info"
+              @click="openCustomerDetails(item)"
             />
-            <span class="text-body-2 text-medium-emphasis">Страница {{ page }} из {{ Math.ceil(totalClients / itemsPerPage) }}</span>
             <VBtn
-              icon="ri-arrow-right-s-line"
+              icon="bx-sync"
+              size="x-small"
               variant="text"
-              size="small"
-              :disabled="page >= Math.ceil(totalClients / itemsPerPage)"
-              @click="page++"
+              color="primary"
+              :loading="item.syncing"
+              @click="syncWithIiko(item)"
+            />
+            <VBtn
+              :icon="item.is_blocked ? 'bx-lock-open' : 'bx-lock'"
+              size="x-small"
+              variant="text"
+              :color="item.is_blocked ? 'success' : 'error'"
+              @click="item.is_blocked = !item.is_blocked; toggleBlock(item)"
             />
           </div>
-        </div>
-      </div>
+        </template>
+      </VDataTableServer>
     </VCard>
 
     <CustomerDetailModal

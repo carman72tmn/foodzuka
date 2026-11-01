@@ -175,7 +175,7 @@ def get_open_shifts_detailed(session: Session = Depends(get_session)):
         elapsed_minutes = int((now_utc - shift_dt).total_seconds() / 60)
 
         # Авто-закрытие смен, которые висят открытыми дольше 24 часов (1440 минут)
-        if elapsed_minutes > 1440:
+        if elapsed_minutes > 840 or (now_utc.date() > shift_dt.date() and elapsed_minutes > 480):
             shift.status = "CLOSED"
             if not shift.date_close:
                 shift.date_close = shift.date_open

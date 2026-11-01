@@ -7,6 +7,12 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
   <title>Vezuroll - Панель Сотрудников</title>
   <link rel="manifest" href="{{ asset('manifest.json') }}" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="apple-mobile-web-app-title" content="Vezuroll Pers" />
+  <link rel="apple-touch-icon" href="{{ asset('favicon.ico') }}" />
+  <meta name="mobile-web-app-capable" content="yes" />
+  <meta name="theme-color" content="#696cff" />
   <link rel="stylesheet" type="text/css" href="{{ asset('loader.css') }}" />
   @vite(['resources/js/employee_main.js'])
 </head>

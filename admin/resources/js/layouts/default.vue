@@ -1,10 +1,13 @@
 <script setup>
 import DefaultLayoutWithVerticalNav from './components/DefaultLayoutWithVerticalNav.vue'
+import ModuleErrorBoundary from '@/components/ModuleErrorBoundary.vue'
 </script>
 
 <template>
   <DefaultLayoutWithVerticalNav>
-    <RouterView />
+    <ModuleErrorBoundary>
+      <RouterView />
+    </ModuleErrorBoundary>
   </DefaultLayoutWithVerticalNav>
 </template>
 

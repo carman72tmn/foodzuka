@@ -13,7 +13,9 @@ declare module 'vue' {
     ChatDrawer: typeof import('./resources/js/components/ChatDrawer.vue')['default']
     CustomerDetailModal: typeof import('./resources/js/components/CustomerDetailModal.vue')['default']
     ErrorHeader: typeof import('./resources/js/components/ErrorHeader.vue')['default']
+    FloatingAiAssistant: typeof import('./resources/js/components/ai/FloatingAiAssistant.vue')['default']
     FloatingMultichat: typeof import('./resources/js/components/FloatingMultichat.vue')['default']
+    ModuleErrorBoundary: typeof import('./resources/js/components/ModuleErrorBoundary.vue')['default']
     MoreBtn: typeof import('./resources/js/@core/components/MoreBtn.vue')['default']
     OrderArchiveCard: typeof import('./resources/js/components/OrderArchiveCard.vue')['default']
     OrderDetailModal: typeof import('./resources/js/components/OrderDetailModal.vue')['default']
@@ -22,6 +24,8 @@ declare module 'vue' {
     RouterView: typeof import('vue-router')['RouterView']
     ThemeSwitcher: typeof import('./resources/js/@core/components/ThemeSwitcher.vue')['default']
     UpgradeToPro: typeof import('./resources/js/components/UpgradeToPro.vue')['default']
+    VkMarketingBotMaxSettings: typeof import('./resources/js/components/VkMarketingBotMaxSettings.vue')['default']
+    VkMarketingBotModal: typeof import('./resources/js/components/VkMarketingBotModal.vue')['default']
     VueApexCharts: typeof import('vue3-apexcharts')['default']
     YandexDeliveryMap: typeof import('./resources/js/components/YandexDeliveryMap.vue')['default']
   }

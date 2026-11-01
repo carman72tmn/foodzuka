@@ -40,7 +40,7 @@ def get_logs(
     if customer_id:
         statement = statement.where(CustomerMessageLog.customer_id == customer_id)
         
-    statement = statement.order_by(CustomerMessageLog.sent_at.desc() if CustomerMessageLog.sent_at else CustomerMessageLog.id.desc())\
+    statement = statement.order_by(CustomerMessageLog.id.desc())\
         .limit(limit).offset(offset)
         
     results = db.exec(statement).all()
@@ -64,6 +64,7 @@ def get_logs(
             delivered_at=log.delivered_at,
             read_at=log.read_at,
             clicked_at=log.clicked_at,
+            created_at=getattr(log, 'created_at', None) or log.sent_at,
             customer_name=cust_name or "Гость",
             broadcast_title=br_title,
             reminder_name=rem_name

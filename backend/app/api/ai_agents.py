@@ -141,6 +141,28 @@ def mask_key(key: Optional[str]) -> Optional[str]:
 def list_proxies(session: Session = Depends(get_session)):
     return session.exec(select(AiProxy).order_by(AiProxy.priority.asc(), AiProxy.id.asc())).all()
 
+@router.get("/proxies/export")
+def export_proxies_txt(session: Session = Depends(get_session)):
+    """
+    Экспорт всех настроек прокси в формате txt (ip:port:user:pass)
+    """
+    proxies = session.exec(select(AiProxy).order_by(AiProxy.priority.asc(), AiProxy.id.asc())).all()
+    lines = []
+    for p in proxies:
+        if p.username and p.password:
+            lines.append(f"{p.host}:{p.port}:{p.username}:{p.password}")
+        elif p.username:
+            lines.append(f"{p.host}:{p.port}:{p.username}")
+        else:
+            lines.append(f"{p.host}:{p.port}")
+    content = "\n".join(lines)
+    from fastapi.responses import Response
+    return Response(
+        content=content,
+        media_type="text/plain; charset=utf-8",
+        headers={"Content-Disposition": "attachment; filename=proxies_export.txt"}
+    )
+
 @router.post("/proxies", response_model=AiProxy)
 def create_proxy(data: ProxyCreate, session: Session = Depends(get_session)):
     proxy = AiProxy(**data.dict())

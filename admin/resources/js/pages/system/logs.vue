@@ -34,7 +34,10 @@ const fetchCodeHistory = async () => {
   loading.value = true
   try {
     const res = await fetch(`${API_BASE}/code-history/`)
-    if (res.ok) codeHistory.value = await res.json()
+    if (res.ok) {
+      const data = await res.json()
+      codeHistory.value = Array.isArray(data) ? data : []
+    }
   } finally {
     loading.value = false
   }

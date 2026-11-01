@@ -67,6 +67,6 @@ def get_code_history(limit: int = Query(20, le=100)):
                 with open(history_file, "r", encoding="utf-8") as f:
                     return json.load(f)
         except Exception as file_err:
-            return {"error": f"Failed to fetch git history: {str(file_err)}"}
+            return []
         
-        return {"error": "Git not available and no history file found"}
+        return []

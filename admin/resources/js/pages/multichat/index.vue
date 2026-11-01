@@ -5225,6 +5225,47 @@ watch([newAccountType, vkAuthTab], ([newType, newVkTab]) => {
   line-height: 1;
 }
 
+/* Эстетичные стили мультичата в стилистике ИИ-агентов */
+.multichat-container {
+  box-shadow: 0 4px 18px rgba(15, 23, 42, 0.06);
+  border: 1px solid rgba(var(--v-border-color), 0.12) !important;
+  border-radius: 12px !important;
+  overflow: hidden;
+}
+
+.dialog-item.active-dialog,
+.dialog-item.active {
+  background: rgba(var(--v-theme-primary), 0.1) !important;
+  border-left: 3px solid rgb(var(--v-theme-primary)) !important;
+  transition: all 0.2s ease;
+}
+
+.multichat-light .message-outbound,
+.multichat-dark .message-outbound {
+  background: linear-gradient(135deg, rgb(var(--v-theme-primary)), #556ee6) !important;
+  color: #ffffff !important;
+  border-radius: 16px 16px 4px 16px !important;
+  box-shadow: 0 2px 8px rgba(var(--v-theme-primary), 0.22);
+}
+
+.multichat-light .message-inbound {
+  background: #ffffff !important;
+  border: 1px solid rgba(15, 23, 42, 0.08) !important;
+  border-radius: 16px 16px 16px 4px !important;
+  box-shadow: 0 1px 3px rgba(15, 23, 42, 0.04);
+}
+
+.multichat-dark .message-inbound {
+  background: #2b2c40 !important;
+  border: 1px solid rgba(255, 255, 255, 0.06) !important;
+  border-radius: 16px 16px 16px 4px !important;
+}
+
+.chat-input-area {
+  background: rgba(var(--v-theme-surface), 0.95);
+  backdrop-filter: blur(8px);
+}
+
 /* ========================================================
    АДАПТИВНОСТЬ ДЛЯ МОБИЛЬНЫХ УСТРОЙСТВ (MOBILE RESPONSIVE)
    ======================================================== */
