@@ -18,6 +18,7 @@
 </head>
 
 <body>
+  @include('partials.offline_indicator')
   <div id="app">
     <div id="loading-bg">
       <div class="loading-logo">
