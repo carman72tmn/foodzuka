@@ -481,9 +481,28 @@ _Дата последнего обновления: 29.10.2026 15:28 (UTC+5)_
 
 ---
 
-### 56. Создание эталонной контрольной точки (Baseline Checkpoint 01.11.2026) [NEW]
-- **Снимок базы данных**: `/root/foodzuka/backend/backups/baseline_db_2026_11_01_2106.sql.gz` (54 МБ).
-- **Архив эталонного кода**: `/root/foodzuka/backend/backups/baseline_code_2026_11_01_2106.tar.gz` (32 МБ).
-- **Скрипт отката на VPS**: `/root/foodzuka/scripts/restore_baseline_2026_11_01.sh`.
-- **Git ветка и тег**: ветка `vps-etalon-baseline`, тег `checkpoint-vps-2026-11-01` (коммит `a8b6f59`).
-- **Синхронизация**: локальный репозиторий полностью синхронизирован с VPS (11 499 файлов).
+### 56. Расследование и исправление сбоя курьерских пуш-уведомлений (01.11.2026) [NEW]
+**Лог сессии:** `Service_info/log/2026-11-01_21-33_courier_notifications_investigation/loggemini_2026-11-01_21-50_courier_delayed_notifications_fix.md`  
+**Затронутые файлы:** `backend/app/services/iiko_sync_service.py`, `backend/app/api/webhooks.py`, `docker-compose.yml`.
+
+#### Суть проблемы:
+Курьеры жаловались, что после доставки заказа и его закрытия в iiko им повторно приходило пуш-уведомление с текстом «Вам назначена доставка!» / «Назначен заказ на доставку», словно заказ поступил только что. Кроме того, при первичном назначении курьер получал сразу 2 дублирующих пуша.
+
+#### Причина:
+1. В `iiko_sync_service.py` и `webhooks.py:process_courier_assigned` при закрытии заказа кассиром или курьером iiko передает финальные данные курьера, закрывшего заказ. При этом флаги `is_courier_assigned_now` и `is_courier_changed` взводились без проверки терминального статуса заказа (`is_order_finished`).
+2. Метод `check_and_send_order_new_to_courier` (Шаг 1 «Новый заказ курьеру») не проверял завершенность заказа и при установке времени готовности кухни (`is_cooking_time_set`) или смене курьера отправлял карточку заказа новому курьеру повторно.
+3. В обработчиках назначения курьера вызывались параллельно `send_admin_push_notification` и `send_courier_notification`, что вызывало задвоение пушей.
+
+#### Решение:
+1. `backend/app/services/iiko_sync_service.py`:
+   - Введена проверка терминального статуса `is_order_finished = bool(mapped_status in (OrderStatus.closed, OrderStatus.cancelled, OrderStatus.delivered) or str(status).lower() in ("closed", "cancelled", "delivered", "доставлен", "закрыт", "отменен") or is_closed)`.
+   - Флаги `is_courier_assigned_now`, `is_courier_reassigned`, `is_courier_unassigned_now` активируются строго при `not is_order_finished`.
+   - Подавлен дублирующий вызов `send_admin_push_notification` для курьера, оставлен только специализированный `send_courier_notification`.
+   - В начало метода `check_and_send_order_new_to_courier` добавлена блокировка отправки по закрытым/доставленным/отмененным заказам.
+2. `backend/app/api/webhooks.py`:
+   - В функции `process_courier_assigned` добавлена проверка терминального статуса: если заказ закрыт, обновляется только имя курьера в БД и `CourierOrder` (для учета/статистики), а пуши, вебсокеты и внешние нотификации курьеру блокируются.
+   - Устранено дублирование пушей новому и старому курьеру.
+3. `docker-compose.yml`:
+   - Порт Redis `6379` привязан к `127.0.0.1:6379:6379`, что предотвращает несанкционированные внешние подключения ботов и сбои аутентификации Celery воркера.
+
+_Дата последнего обновления: 01.11.2026 21:52 (UTC+5)_
