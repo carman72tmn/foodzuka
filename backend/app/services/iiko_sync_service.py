@@ -2736,15 +2736,24 @@ class IikoSyncService:
             is_courier_unassigned_now = False
             is_courier_reassigned = False
             
-            if is_new and courier_name and courier_name != "Не назначен":
-                is_courier_assigned_now = True
-            elif not is_new and old_courier != courier_name:
-                if courier_name and courier_name != "Не назначен":
+            # Проверка терминального статуса заказа (доставлен, закрыт, отменен)
+            is_order_finished = bool(
+                mapped_status in (OrderStatus.closed, OrderStatus.cancelled, OrderStatus.delivered) or
+                (order and getattr(order, 'status', None) in (OrderStatus.closed, OrderStatus.cancelled, OrderStatus.delivered)) or
+                str(getattr(order, 'status', '')).lower() in ("closed", "cancelled", "delivered", "доставлен", "закрыт", "отменен")
+            )
+            
+            # Назначение курьера и пуш-уведомления активны ТОЛЬКО для активных незавершенных заказов
+            if not is_order_finished:
+                if is_new and courier_name and courier_name != "Не назначен":
                     is_courier_assigned_now = True
-                    if old_courier and old_courier != "Не назначен":
-                        is_courier_reassigned = True
-                if old_courier and old_courier != "Не назначен" and (not courier_name or courier_name == "Не назначен"):
-                    is_courier_unassigned_now = True
+                elif not is_new and old_courier != courier_name:
+                    if courier_name and courier_name != "Не назначен":
+                        is_courier_assigned_now = True
+                        if old_courier and old_courier != "Не назначен":
+                            is_courier_reassigned = True
+                    if old_courier and old_courier != "Не назначен" and (not courier_name or courier_name == "Не назначен"):
+                        is_courier_unassigned_now = True
 
             if is_courier_assigned_now:
                 # 0. При переназначении курьера обязательно сбрасываем статус подтверждения
@@ -2827,16 +2836,8 @@ class IikoSyncService:
                             "target_user_id": courier_user.id
                         }
                         self.send_websocket_broadcast_safe(ws_assigned)
-                            
-                        await self.send_admin_push_notification(
-                            session=session,
-                            title="Вам назначена доставка!",
-                            body=f"Адрес: {order.delivery_address} | Заказ #{external_number or order.id}",
-                            url="/pers/courier",
-                            event_type="delivery_assigned",
-                            target_user_id=courier_user.id,
-                            tag=f"assigned-{order.id}"
-                        )
+                        # Примечание: персональный Web Push курьеру отправляется ниже через send_courier_notification
+                        # (событие courier_order_assigned), чтобы исключить дублирование пушей.
                 except Exception as e:
                     logger.error(f"Failed to send courier delivery assignment notifications: {e}")
 
@@ -3027,7 +3028,7 @@ class IikoSyncService:
                         )
                         
                         # 1.1. Если время кухни задано впервые (>0 мин), проверяем досылку шага 1 (order_new) назначенному курьеру
-                        if is_cooking_time_set:
+                        if is_cooking_time_set and not is_order_finished:
                             await self.check_and_send_order_new_to_courier(order, session=session)
 
                         # 1.2. Отправка уведомления change_cooking_time (роутер проверит require_cooking_time_changed)
@@ -3383,6 +3384,12 @@ class IikoSyncService:
         """
         try:
             if not order:
+                return False
+
+            # 0. Завершенный / закрытый / доставленный / отмененный заказ курьеру как "новый" не отправляется
+            st_lower = str(getattr(order, 'status', '') or '').lower()
+            if st_lower in ("delivered", "closed", "cancelled", "доставлен", "закрыт", "отменен") or getattr(order, 'is_closed', False):
+                logger.debug(f"Order #{getattr(order, 'external_number', order.id)}: order_new suppressed because status is terminal '{st_lower}'")
                 return False
 
             # 1. Самовывоз курьеру не отправляется

@@ -81,16 +81,23 @@ async def process_courier_assigned(event_info: dict):
 
             ext_num = str(getattr(order, 'external_number', order.id) or order.id)
 
+            # Проверяем, не является ли заказ уже закрытым/доставленным/отмененным
+            is_order_finished = bool(
+                str(getattr(order, 'status', '')).lower() in ("closed", "cancelled", "delivered", "доставлен", "закрыт", "отменен") or
+                getattr(order, 'is_closed', False)
+            )
+
             if is_courier_changed:
-                logger.info(f"Order #{ext_num} courier changed: '{old_courier}' -> '{canonical_courier_name}' (reassigned={is_reassigned}, unassigned={is_unassigned})")
+                logger.info(f"Order #{ext_num} courier changed: '{old_courier}' -> '{canonical_courier_name}' (reassigned={is_reassigned}, unassigned={is_unassigned}, finished={is_order_finished})")
                 order.courier_name = canonical_courier_name
                 order.updated_at = datetime.now(timezone.utc)
                 
-                # При смене курьера ОБЯЗАТЕЛЬНО сбрасываем статус подтверждения
-                order.courier_notification_status = None
-                order.courier_accepted_at = None
-                order.courier_accepted_source = None
-                order.courier_read_at = None
+                # При смене курьера сбрасываем статус подтверждения (если заказ еще активен)
+                if not is_order_finished:
+                    order.courier_notification_status = None
+                    order.courier_accepted_at = None
+                    order.courier_accepted_source = None
+                    order.courier_read_at = None
                 session.add(order)
 
                 # Обновление записи в CourierOrder
@@ -120,6 +127,11 @@ async def process_courier_assigned(event_info: dict):
 
                 session.commit()
                 session.refresh(order)
+
+                # Если заказ уже доставлен, закрыт или отменен - блокируем отправку повторных пушей и уведомлений
+                if is_order_finished:
+                    logger.info(f"Order #{ext_num}: courier assignment notifications suppressed because order status is terminal '{order.status}'")
+                    return
 
                 # 1. WebSocket Broadcast в админку (/orders) и панель курьера (/pers/courier)
                 now_ts = int(datetime.now(timezone.utc).timestamp() * 1000)
@@ -167,15 +179,7 @@ async def process_courier_assigned(event_info: dict):
                             "target_user_id": courier_user.id
                         }
                         await manager.send_personal_message(json.dumps(ws_assigned), courier_user.id)
-                        await iiko_sync_service.send_admin_push_notification(
-                            session=session,
-                            title="Вам назначена доставка!",
-                            body=f"Адрес: {order.delivery_address} | Заказ #{ext_num}",
-                            url="/pers/courier",
-                            event_type="delivery_assigned",
-                            target_user_id=courier_user.id,
-                            tag=f"assigned-{order.id}"
-                        )
+                        # Push отправляется через send_courier_notification (без дублирования через send_admin_push_notification)
                         await iiko_sync_service.send_courier_notification(
                             session=session,
                             courier_user_id=courier_user.id,
@@ -210,15 +214,7 @@ async def process_courier_assigned(event_info: dict):
                                 "customer_name": order.customer_name or "Гость"
                             }
                             await manager.send_personal_message(json.dumps(ws_unassigned), old_user.id)
-                            await iiko_sync_service.send_admin_push_notification(
-                                session=session,
-                                title="Доставка отменена",
-                                body=f"С вас снята доставка заказа #{ext_num}",
-                                url="/pers/courier",
-                                event_type="delivery_unassigned",
-                                target_user_id=old_user.id,
-                                tag=f"unassigned-{order.id}"
-                            )
+                            # Push отправляется через send_courier_notification (без дублирования через send_admin_push_notification)
                             await iiko_sync_service.send_courier_notification(
                                 session=session,
                                 courier_user_id=old_user.id,
