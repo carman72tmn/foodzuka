@@ -3,6 +3,7 @@ import { onMounted } from 'vue'
 import { useTheme } from 'vuetify'
 import { appTimezone, appOffset } from '@/utils/date'
 import ModuleErrorBoundary from '@/components/ModuleErrorBoundary.vue'
+import NetworkStatusBanner from '@/components/NetworkStatusBanner.vue'
 
 const { global: globalTheme } = useTheme()
 
@@ -40,6 +41,7 @@ onMounted(async () => {
 
 <template>
   <VApp>
+    <NetworkStatusBanner />
     <ModuleErrorBoundary>
       <RouterView />
     </ModuleErrorBoundary>

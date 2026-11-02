@@ -6,18 +6,27 @@ import { useToast } from 'vue-toastification'
 import { formatDate, formatTime, formatDateTime } from '@/utils/date'
 import OrderArchiveCard from '@/components/OrderArchiveCard.vue'
 import OrderDetailModal from '@/components/OrderDetailModal.vue'
+import {
+  CACHE_KEYS,
+  saveCache4h,
+  loadCache4h,
+  fetchWithFallback,
+  enqueueOutboxAction,
+  processOutboxQueue,
+  getOutboxQueue
+} from '@/utils/offlineCacheManager'
 
 const toast = useToast()
 
 const theme = useTheme()
 const activeTab = ref('orders')
-const orders = ref([])
+const orders = ref(loadCache4h(CACHE_KEYS.COURIER_ORDERS_4H) || [])
 const archiveOrders = ref([])
 const shifts = ref([])
 const activeCouriers = ref([])
 const loading = ref(false)
 const error = ref(null)
-const paymentTypes = ref([])
+const paymentTypes = ref(loadCache4h(CACHE_KEYS.PAYMENT_TYPES) || [])
 const selectedPaymentType = ref(null)
 const showDetailsDialog = ref(false)
 const showCloseDialog = ref(false)
@@ -246,7 +255,7 @@ const isSuperAdmin = computed(() => !!authState.user?.is_superuser)
 const isAdmin = computed(() => isSuperAdmin.value || !!authState.user?.is_admin || hasPermission('couriers_manage') || hasPermission('courier_view'))
 
 // Персональный статус смены курьера (п. 2 ТЗ)
-const myShiftStatus = ref({
+const myShiftStatus = ref(loadCache4h(CACHE_KEYS.SHIFT_STATUS) || {
   is_courier: false,
   is_shift_open: false,
   courier_name: '',
@@ -257,9 +266,9 @@ const shiftOpening = ref(false)
 
 const fetchMyShiftStatus = async () => {
   try {
-    const res = await fetch('/api/v1/courier/my-shift-status', {
+    const res = await fetchWithFallback('/api/v1/courier/my-shift-status', {
       headers: getAuthHeaders()
-    })
+    }, { cacheKey: CACHE_KEYS.SHIFT_STATUS })
     const data = await res.json()
     if (data.status === 'success') {
       myShiftStatus.value = {
@@ -269,6 +278,7 @@ const fetchMyShiftStatus = async () => {
         terminal_group_name: data.terminal_group_name || '',
         loading: false
       }
+      saveCache4h(CACHE_KEYS.SHIFT_STATUS, myShiftStatus.value)
     }
   } catch (err) {
     console.error('Error fetching my shift status:', err)
@@ -663,13 +673,10 @@ const fetchOrders = async (includeClosed = false) => {
   
   if (includeClosed) {
     params.append('include_closed', 'true')
-    // Если выбран курьер и НЕ выбрана конкретная дата - НЕ шлем дату, чтобы бэкенд показал 7 дней
-    // Иначе шлем selectedDate
     if (selectedDate.value && (!archiveCourierFilter.value || userSelectedSpecificDate.value)) {
       params.append('date_from', selectedDate.value)
       params.append('date_to', selectedDate.value)
     }
-    
     if (archiveCourierFilter.value) {
       params.append('courier_filter', archiveCourierFilter.value)
     }
@@ -678,25 +685,42 @@ const fetchOrders = async (includeClosed = false) => {
   }
   
   const queryString = params.toString()
-  if (queryString) url += `?${queryString}`
+  if (queryString) url += '?' + queryString
 
-  const res = await fetch(url, {
-    headers: getAuthHeaders(),
-  })
-  const data = await res.json()
-  console.log('Archive fetch result:', data)
-  if (data.status === 'success') {
-    if (includeClosed) {
-      archiveOrders.value = data.data
-      if (data.pagination) {
-        archiveTotalPages.value = data.pagination.pages
-        archiveTotalItems.value = data.pagination.total
+  try {
+    const res = await fetchWithFallback(url, {
+      headers: getAuthHeaders(),
+    }, { cacheKey: includeClosed ? null : CACHE_KEYS.COURIER_ORDERS_4H })
+    const data = await res.json()
+    if (data.status === 'success') {
+      if (includeClosed) {
+        archiveOrders.value = data.data
+        if (data.pagination) {
+          archiveTotalPages.value = data.pagination.pages
+          archiveTotalItems.value = data.pagination.total
+        }
+      } else {
+        const pendingActions = getOutboxQueue()
+        const pendingOrderIds = new Set(pendingActions.map(a => String(a.order_id)))
+        
+        const freshOrders = (data.data || []).map(ord => {
+          if (pendingOrderIds.has(String(ord.id))) {
+            return { ...ord, pending_offline_sync: true }
+          }
+          return ord
+        })
+        orders.value = freshOrders
+        saveCache4h(CACHE_KEYS.COURIER_ORDERS_4H, freshOrders)
       }
     } else {
-      orders.value = data.data
+      error.value = data.message || 'Ошибка загрузки заказов'
     }
-  } else {
-    error.value = data.message || 'Ошибка загрузки заказов'
+  } catch (err) {
+    console.warn('Failed to fetch orders, fallback to 4h cache:', err)
+    if (!includeClosed) {
+      const cached = loadCache4h(CACHE_KEYS.COURIER_ORDERS_4H)
+      if (cached) orders.value = cached
+    }
   }
 }
 
@@ -823,15 +847,18 @@ const fetchActiveCouriers = async () => {
 
 const fetchPaymentTypes = async () => {
   try {
-    const res = await fetch('/api/v1/courier/payment-types', {
+    const res = await fetchWithFallback('/api/v1/courier/payment-types', {
       headers: getAuthHeaders(),
-    })
+    }, { cacheKey: CACHE_KEYS.PAYMENT_TYPES })
     const data = await res.json()
-    if (data.status === 'success') {
+    if (data.status === 'success' && Array.isArray(data.data) && data.data.length > 0) {
       paymentTypes.value = data.data
+      saveCache4h(CACHE_KEYS.PAYMENT_TYPES, data.data)
     }
   } catch (e) {
-    console.error('Failed to fetch payment types', e)
+    console.error('Failed to fetch payment types, using 4h cache', e)
+    const fallbackPts = loadCache4h(CACHE_KEYS.PAYMENT_TYPES)
+    if (fallbackPts && fallbackPts.length) paymentTypes.value = fallbackPts
   }
 }
 
@@ -894,18 +921,44 @@ const closeOrderAction = async () => {
   }
   
   loading.value = true
+  const orderId = selectedOrder.value.id
+  const amount = Number(selectedOrder.value.left_to_pay || selectedOrder.value.total_with_discount || selectedOrder.value.sum || 0)
+  const ptId = selectedPaymentType.value
+  const ptObj = (paymentTypes.value || []).find(p => p.iiko_id === ptId)
+  const ptName = ptObj ? ptObj.name : 'Оплата'
+
   try {
-    const orderId = selectedOrder.value.id
-    const amount = Number(selectedOrder.value.left_to_pay || selectedOrder.value.total_with_discount || selectedOrder.value.sum || 0)
-    const ptId = selectedPaymentType.value
-    
-    const res = await fetch(`/api/v1/courier/orders/${orderId}/close?payment_type_id=${ptId}&amount=${amount}`, {
+    const closeUrl = `/api/v1/courier/orders/${orderId}/close?payment_type_id=${ptId}&amount=${amount}`
+    const res = await fetchWithFallback(closeUrl, {
       method: 'POST',
       headers: getAuthHeaders(),
+    }, {
+      outboxAction: {
+        type: 'close_order',
+        order_id: orderId,
+        iiko_order_id: selectedOrder.value?.iiko_order_id,
+        payment_type_id: ptId,
+        amount: amount,
+        payment_name: ptName
+      }
     })
     
     const data = await res.json()
-    if (res.ok && data.status === 'success') {
+    if (data.status === 'queued') {
+      toast.info('Заказ сохранен автономно! Закрытие в iiko будет отправлено при появлении связи.')
+      const cur = orders.value.find(o => o.id === orderId)
+      if (cur) {
+        cur.status = 'delivered'
+        cur.is_paid = true
+        cur.left_to_pay = 0
+        cur.payment_method = ptName
+        cur.pending_offline_sync = true
+      }
+      saveCache4h(CACHE_KEYS.COURIER_ORDERS_4H, orders.value)
+      showCloseDialog.value = false
+      selectedOrder.value = null
+      selectedPaymentType.value = null
+    } else if (res.ok && data.status === 'success') {
       toast.success(data.message || 'Заказ успешно доставлен и закрыт')
       showCloseDialog.value = false
       selectedOrder.value = null
@@ -915,8 +968,26 @@ const closeOrderAction = async () => {
       toast.error(data.detail || data.message || 'Ошибка при закрытии заказа')
     }
   } catch (e) {
-    console.error('Close order error:', e)
-    toast.error('Ошибка сети при закрытии заказа')
+    console.error('Close order error, saving to outbox:', e)
+    enqueueOutboxAction({
+      type: 'close_order',
+      order_id: orderId,
+      iiko_order_id: selectedOrder.value?.iiko_order_id,
+      payment_type_id: ptId,
+      amount: amount,
+      payment_name: ptName
+    })
+    const cur = orders.value.find(o => o.id === orderId)
+    if (cur) {
+      cur.status = 'delivered'
+      cur.is_paid = true
+      cur.left_to_pay = 0
+      cur.payment_method = ptName
+      cur.pending_offline_sync = true
+    }
+    saveCache4h(CACHE_KEYS.COURIER_ORDERS_4H, orders.value)
+    toast.info('Заказ сохранен в автономном режиме (закроется в iiko при появлении сети)')
+    showCloseDialog.value = false
   } finally {
     loading.value = false
   }
@@ -1075,17 +1146,28 @@ const submitPaymentChange = async () => {
   }
   
   try {
-    const res = await fetch(`/api/v1/courier/orders/${targetOrder.id}/change-payment-type`, {
+    const res = await fetchWithFallback(`/api/v1/courier/orders/${targetOrder.id}/change-payment-type`, {
       method: 'POST',
       headers: {
         ...getAuthHeaders(),
         'Content-Type': 'application/json'
       },
       body: JSON.stringify(payload)
+    }, {
+      outboxAction: {
+        type: 'change_payment',
+        order_id: targetOrder.id,
+        iiko_order_id: targetOrder.iiko_order_id,
+        payments: payload.payments
+      }
     })
-    
     const data = await res.json()
-    if (res.ok && data.status === 'success') {
+    if (data.status === 'queued') {
+      toast.info('Способ оплаты сохранен автономно (будет выгружен в iiko при наличии связи)')
+      targetOrder.pending_offline_sync = true
+      saveCache4h(CACHE_KEYS.COURIER_ORDERS_4H, orders.value)
+      showChangePaymentDialog.value = false
+    } else if (res.ok && data.status === 'success') {
       if (isDeliveryConfirmation.value) {
         // Если выбор способа производился при нажатии кнопки "Доставлен" — переводим заказ в статус Delivered
         const statusRes = await fetch(`/api/v1/courier/orders/${targetOrder.id}/status?status=Delivered`, {
@@ -1833,6 +1915,8 @@ const closeSbpDialog = () => {
 }
 
 onMounted(() => {
+  processOutboxQueue(getAuthHeaders)
+  window.addEventListener('online', () => processOutboxQueue(getAuthHeaders))
   fetchData()
   if (isSuperAdmin.value || isAdmin.value) {
     fetchAllCouriersWithShifts()
@@ -1985,6 +2069,15 @@ onUnmounted(() => {
                   <div class="d-flex justify-space-between align-center">
                     <div class="d-flex align-center ga-2">
                       <span class="text-card-title">№{{ order.external_number || order.number || '???' }}</span>
+                      <VChip 
+                        v-if="order.pending_offline_sync" 
+                        color="warning" 
+                        size="x-small" 
+                        variant="flat" 
+                        class="font-weight-black text-white ms-1"
+                      >
+                        ⏳ В очереди
+                      </VChip>
                       <VChip 
                         :color="getStatusColor(order.status)" 
                         size="x-small" 

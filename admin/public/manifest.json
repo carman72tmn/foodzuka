@@ -1,9 +1,9 @@
 {
-  "name": "Vezuroll Admin",
-  "short_name": "Vezuroll Admin",
-  "description": "Панель администратора Vezuroll",
+  "name": "Vezuroll Admin & Staff",
+  "short_name": "Vezuroll",
+  "description": "Панель управления и доставки Vezuroll",
   "start_url": "/admin/",
-  "scope": "/admin/",
+  "scope": "/",
   "display": "standalone",
   "background_color": "#ffffff",
   "theme_color": "#696cff",

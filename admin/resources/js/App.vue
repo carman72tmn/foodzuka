@@ -4,6 +4,7 @@ import { useRouter } from 'vue-router'
 import { appTimezone, appOffset } from '@/utils/date'
 import { loginWithVkMiniApp } from '@/utils/auth'
 import PwaInstallBanner from '@/components/PwaInstallBanner.vue'
+import NetworkStatusBanner from '@/components/NetworkStatusBanner.vue'
 
 const router = useRouter()
 
@@ -76,6 +77,7 @@ onMounted(async () => {
 
 <template>
   <VApp>
+    <NetworkStatusBanner />
     <RouterView />
     <PwaInstallBanner />
   </VApp>

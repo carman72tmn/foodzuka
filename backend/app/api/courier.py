@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException, status, Query
 from sqlmodel import Session, select
-from typing import List, Optional, Dict, Any, Tuple
+from typing import List, Optional, Dict, Any, Tuple, Union
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pydantic import BaseModel
@@ -2478,4 +2478,118 @@ async def close_courier_order(
         "status_name": OrderStatus.closed.value
     }
 
+class CourierOfflineActionItem(BaseModel):
+    id: str
+    type: str  # 'close_order' | 'change_payment'
+    order_id: Union[int, str]
+    iiko_order_id: Optional[str] = None
+    payment_type_id: Optional[str] = None
+    amount: Optional[float] = None
+    payment_name: Optional[str] = None
+    payments: Optional[List[Dict[str, Any]]] = None
+    timestamp: Optional[int] = None
+    clientDate: Optional[str] = None
 
+
+class CourierSyncOfflineActionsRequest(BaseModel):
+    actions: List[CourierOfflineActionItem]
+
+
+@router.post("/sync-offline-actions")
+async def sync_offline_actions(
+    payload: CourierSyncOfflineActionsRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """
+    Пакетная синхронизация отложенных действий курьера (Outbox),
+    накопившихся при работе в автономном режиме или при сбое сети.
+    """
+    settings = db.exec(select(IikoSettings)).first()
+    org_id = settings.organization_id if settings else None
+    processed_ids = []
+
+    for action in payload.actions:
+        try:
+            order = _find_order(db, str(action.order_id))
+            if not order:
+                logger.warning(f"[OfflineSync] Order {action.order_id} not found in DB, skipping action {action.id}")
+                processed_ids.append(action.id)
+                continue
+
+            if action.type == "close_order":
+                # Если заказ уже закрыт в БД, просто подтверждаем обработку
+                if order.status == OrderStatus.closed:
+                    processed_ids.append(action.id)
+                    continue
+
+                # 1. Применяем оплату в iiko с сохранением бонусов
+                target_pt_id = action.payment_type_id
+                target_amount = action.amount
+                selected_pt_name = action.payment_name
+
+                if target_pt_id:
+                    success, pt_name = await _apply_order_payment_to_iiko(
+                        db=db,
+                        order=order,
+                        settings=settings,
+                        payment_type_id=target_pt_id,
+                        current_user=current_user,
+                        amount=target_amount
+                    )
+                    if success and pt_name:
+                        selected_pt_name = pt_name
+
+                # 2. Закрываем доставку в iiko Cloud
+                if org_id and order.iiko_order_id:
+                    try:
+                        logger.info(f"[OfflineSync] Closing delivery order {order.id} in iiko Cloud")
+                        await iiko_service.close_delivery(
+                            organization_id=org_id,
+                            order_id=order.iiko_order_id,
+                            api_login=settings.api_login if settings else None
+                        )
+                    except Exception as ce:
+                        logger.warning(f"[OfflineSync] Error closing delivery in iiko for order {order.id}: {ce}")
+
+                # 3. Обновляем статус в локальной БД
+                order.status = OrderStatus.closed
+                order.is_paid = True
+                order.left_to_pay = Decimal("0.00")
+                if selected_pt_name:
+                    order.payment_method = selected_pt_name
+                order.actual_time = datetime.now(timezone.utc).replace(tzinfo=None)
+
+                append_order_status_history(
+                    order=order,
+                    new_status=OrderStatus.closed,
+                    session=db,
+                    comment="Заказ доставлен и закрыт курьером (автономная синхронизация Outbox)",
+                    user=f"Курьер: {current_user.full_name or current_user.username}"
+                )
+
+                db.add(order)
+                db.commit()
+                db.refresh(order)
+                processed_ids.append(action.id)
+
+            elif action.type == "change_payment":
+                if action.payments:
+                    items = [CourierChangePaymentItem(payment_type_id=p.get("payment_type_id"), sum=p.get("sum", 0)) for p in action.payments]
+                    sub_req = CourierChangePaymentTypeRequestSchema(payments=items)
+                    await courier_change_payment_type(order_id=str(order.id), data=sub_req, current_user=current_user, db=db)
+                processed_ids.append(action.id)
+
+            else:
+                logger.warning(f"[OfflineSync] Unknown action type: {action.type}")
+                processed_ids.append(action.id)
+
+        except Exception as act_err:
+            logger.error(f"[OfflineSync] Error processing action {action.id} for order {action.order_id}: {act_err}")
+            processed_ids.append(action.id)
+
+    return {
+        "status": "success",
+        "processed_ids": processed_ids,
+        "count": len(processed_ids)
+    }
