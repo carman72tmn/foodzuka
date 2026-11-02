@@ -266,48 +266,79 @@ class IikoService:
             masked_login = f"{login[:4]}...{login[-4:]}" if login and len(login) > 8 else "НЕКОРРЕКТНО"
             logger.info(f"Запрос НОВОГО токена iiko для логина: {masked_login}")
 
+            token = None
+            expires_at = None
+
+            # Достаем app_id и client_secret для авторизации iiko Transport API v2
+            app_id = (getattr(settings_db, "app_id", None) if settings_db else None) or "19de15e4-bce3-4742-b120-72a33813c025"
+            client_secret = (getattr(settings_db, "client_secret", None) if settings_db else None) or "9BryJrlsxs9aA863hjNPQLFSmlNvMZ0piUQFWCLBSec="
+
+            # 3.1. Сначала пробуем современный /api/v2/access_token (требуется новыми API ключами iiko Cloud)
             try:
-                response = await self.client.post(
-                    f"{self.api_url}/api/1/access_token",
-                    json={"apiLogin": login}
+                v2_payload = {
+                    "apiLogin": login,
+                    "appId": app_id,
+                    "clientSecret": client_secret
+                }
+                v2_resp = await self.client.post(
+                    f"{self.api_url}/api/v2/access_token",
+                    json=v2_payload
                 )
-                response.raise_for_status()
-                data = response.json()
-                token = data["token"]
-                expires_at = now + timedelta(minutes=14)
-                
-                # Сохраняем в кеш и БД
-                self._token_cache[login] = (token, expires_at)
-                
-                try:
-                    def _update_db_token(t, e):
-                        with Session(engine) as session:
-                            s = session.exec(select(IikoSettings).where(IikoSettings.api_login == login)).first()
-                            if s:
-                                s.access_token = t
-                                s.token_expires_at = e
-                                session.add(s)
-                                session.commit()
-                    await asyncio.to_thread(_update_db_token, token, expires_at)
-                except Exception as db_err:
-                    logger.error(f"Не удалось сохранить токен в БД: {db_err}")
+                if v2_resp.status_code == 200:
+                    v2_data = v2_resp.json()
+                    token = v2_data.get("token")
+                    expires_at = now + timedelta(minutes=50) # Стандартный срок токена v2 — 1 час
+                    logger.info("Успешно получен токен доступа iiko Cloud через /api/v2/access_token")
+            except Exception as v2_err:
+                logger.debug(f"Попытка получения токена через /api/v2/access_token не удалась: {v2_err}")
 
-                # Обновляем основные поля если это "глобальный" логин
-                if not api_login:
-                    self.access_token = token
-                    self.token_expires_at = expires_at
-
-                return token
-            except httpx.HTTPStatusError as e:
+            # 3.2. Если v2 не вернул токен, пробуем legacy /api/1/access_token
+            if not token:
                 try:
-                    err_text = e.response.text
-                except:
-                    err_text = str(e)
-                logger.error(f"Не удалось получить токен доступа: {err_text}")
-                raise
-            except Exception as e:
-                logger.error(f"Критическая ошибка при получении токена iiko: {e}")
-                raise
+                    response = await self.client.post(
+                        f"{self.api_url}/api/1/access_token",
+                        json={"apiLogin": login}
+                    )
+                    response.raise_for_status()
+                    data = response.json()
+                    token = data.get("token")
+                    expires_at = now + timedelta(minutes=14)
+                except httpx.HTTPStatusError as e:
+                    try:
+                        err_text = e.response.text
+                    except:
+                        err_text = str(e)
+                    logger.error(f"Не удалось получить токен доступа через legacy /api/1: {err_text}")
+                    raise
+                except Exception as e:
+                    logger.error(f"Критическая ошибка при получении токена iiko legacy /api/1: {e}")
+                    raise
+
+            if not token:
+                raise RuntimeError("Не удалось получить токен доступа iiko Cloud ни через v2, ни через v1")
+
+            # Сохраняем в кеш и БД
+            self._token_cache[login] = (token, expires_at)
+            
+            try:
+                def _update_db_token(t, e):
+                    with Session(engine) as session:
+                        s = session.exec(select(IikoSettings).where(IikoSettings.api_login == login)).first()
+                        if s:
+                            s.access_token = t
+                            s.token_expires_at = e
+                            session.add(s)
+                            session.commit()
+                await asyncio.to_thread(_update_db_token, token, expires_at)
+            except Exception as db_err:
+                logger.error(f"Не удалось сохранить токен в БД: {db_err}")
+
+            # Обновляем основные поля если это "глобальный" логин
+            if not api_login:
+                self.access_token = token
+                self.token_expires_at = expires_at
+
+            return token
 
     @staticmethod
     def _sanitize_for_json(obj: Any) -> Any:

@@ -674,7 +674,7 @@ async def get_all_couriers_with_shifts(
                 "iiko_id": emp.iiko_id,
                 "name": emp.name,
                 "phone": emp.phone,
-                "code": emp.code,
+                "code": getattr(emp, "code", None) or getattr(emp, "iiko_id", None),
                 "is_shift_open": False,
                 "terminal_group_id": None,
                 "is_online": False,
@@ -2171,7 +2171,7 @@ async def _apply_order_payment_to_iiko(
             final_payments = bonus_payments + new_payments
             
             # Проверяем, не совпадает ли уже оплата в iiko
-            order_body = iiko_order.get("order") or iiko_order
+            order_body = (iiko_order.get("order") or iiko_order) if isinstance(iiko_order, dict) else {}
             raw_payments = order_body.get("payments") or []
             payments_already_match = False
             if len(final_payments) == 1 and len(raw_payments) == 1:
@@ -2304,7 +2304,7 @@ async def courier_change_payment_type(
     final_payments = bonus_payments + new_payments
     
     # 4. Проверяем, не совпадает ли уже оплата в iiko
-    order_body = iiko_order.get("order") or iiko_order
+    order_body = (iiko_order.get("order") or iiko_order) if isinstance(iiko_order, dict) else {}
     raw_payments = order_body.get("payments") or []
     payments_already_match = False
     if len(final_payments) == 1 and len(raw_payments) == 1:

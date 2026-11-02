@@ -595,3 +595,31 @@ _Дата последнего обновления: 01.11.2026 23:02 (UTC+5)_
    - В блоке состояния заказа добавлен бейдж «ЧАСТИЧНО ОПЛАЧЕН» и статус с приоритетом кассы iiko.
 
 _Дата последнего обновления: 01.11.2026 23:28 (UTC+5)_
+
+---
+
+### 60. Исправление авторизации iiko Cloud Transport API v2 и восстановление работы курьеров (02.11.2026) [NEW]
+**Лог сессии:** `Service_info/log/loggemini_2026-11-02_14-10_fix_iiko_v2_auth_and_courier_shifts/log.md`  
+**Затронутые файлы:**
+- `backend/app/services/iiko_service.py`
+- `backend/app/api/courier.py`
+
+#### Причины сбоя:
+1. Сервер iiko Cloud заблокировал устаревший эндпоинт авторизации `/api/1/access_token` с кодом `403 Forbidden` (`"This API key does not support /api/1/access_token. Please use /api/v2/access_token instead."`).
+2. В эндпоинте получения смен курьеров `GET /api/v1/courier/all-couriers-shifts` происходило падение с кодом 500 (`AttributeError: 'Employee' object has no attribute 'code'`) из-за обращения к несуществующему атрибуту `emp.code` модели `Employee`.
+3. При закрытии заказов курьерами отсутствовала безопасная распаковка ответа заказа iiko при проверке оплат.
+
+#### Реализованный комплекс изменений:
+1. **Переход на Transport API v2 (`iiko_service.py`):**
+   - Метод `_get_access_token` переведен на эндпоинт `/api/v2/access_token` с передачей `apiLogin`, `appId` и `clientSecret`.
+   - Внедрено кэширование токена на 50 минут (3000 секунд) для предотвращения превышения лимитов запросов (HTTP 429).
+   - Предусмотрен безопасный fallback на v1 при необходимости.
+2. **Исправление ошибок курьеров (`courier.py`):**
+   - Устранено падение 500: заменено обращение `emp.code` на безопасный вызов `getattr(emp, "code", None) or getattr(emp, "iiko_id", None)`.
+   - Обеспечена безопасная распаковка словаря заказа в методах `_apply_order_payment_to_iiko` и `courier_change_payment_type`.
+3. **Верификация на VPS:**
+   - Эндпоинт `GET /api/v1/courier/all-couriers-shifts` возвращает HTTP 200 и полный список из 11 курьеров.
+   - Метод `get_active_couriers` успешно получает активных курьеров и их геопозицию из iiko Cloud.
+   - Все фоновые запросы `/api/v1/orders/active-couriers` и `/api/v1/orders/active` стабильно отдают статус 200 OK.
+
+_Дата последнего обновления: 02.11.2026 14:10 (UTC+5)_
